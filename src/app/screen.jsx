@@ -1,9 +1,11 @@
 import { router, useFocusEffect } from 'expo-router';
+import { Image } from 'expo-image';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Platform,
+  PanResponder,
   Pressable,
   StyleSheet,
   View,
@@ -79,6 +81,7 @@ function CameraScreen() {
   const [isFocused, setIsFocused] = useState(true);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [cameraError, setCameraError] = useState(null);
 
   useFocusEffect(
@@ -110,6 +113,26 @@ function CameraScreen() {
 
       if (!photo?.uri) return;
 
+      setCapturedPhoto(photo);
+    } catch {
+      Alert.alert('Capture failed', 'We could not capture the image. Please try again.');
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
+  const discardPhoto = () => {
+    setCapturedPhoto(null);
+    setIsCameraReady(false);
+    setCameraError(null);
+  };
+
+  const savePhoto = async () => {
+    if (!capturedPhoto?.uri || isCapturing) return;
+
+    setIsCapturing(true);
+
+    try {
       if (Platform.OS === 'web') {
         Alert.alert('Not available', 'Saving photos is available on a mobile device.');
         return;
@@ -125,7 +148,9 @@ function CameraScreen() {
         return;
       }
 
-      await mediaLibraryModule.Asset.create(photo.uri);
+      await mediaLibraryModule.Asset.create(capturedPhoto.uri);
+      setCapturedPhoto(null);
+      setIsCameraReady(false);
       Alert.alert('Photo saved', 'The captured image was saved to your device.');
     } catch {
       Alert.alert('Capture failed', 'We could not save the captured image. Please try again.');
@@ -133,6 +158,69 @@ function CameraScreen() {
       setIsCapturing(false);
     }
   };
+
+  if (capturedPhoto) {
+    return (
+      <View style={styles.reviewContainer}>
+        <SafeAreaView style={styles.reviewSafeArea}>
+          <ThemedText type="subtitle" style={styles.reviewTitle}>
+            Review capture
+          </ThemedText>
+
+          <View style={styles.imageFrame}>
+            <Image
+              contentFit="contain"
+              source={{ uri: capturedPhoto.uri }}
+              style={styles.reviewImage}
+            />
+            <CropOverlay
+              aspectRatio={
+                capturedPhoto.width && capturedPhoto.height
+                  ? capturedPhoto.width / capturedPhoto.height
+                  : 4 / 3
+              }
+            />
+          </View>
+
+          <View style={styles.reviewActions}>
+            <Pressable
+              accessibilityLabel="Discard captured image"
+              accessibilityRole="button"
+              disabled={isCapturing}
+              onPress={discardPhoto}
+              style={({ pressed }) => [
+                styles.actionButton,
+                styles.discardButton,
+                pressed && styles.pressed,
+                isCapturing && styles.disabled,
+              ]}>
+              <ThemedText type="smallBold">Discard</ThemedText>
+            </Pressable>
+
+            <Pressable
+              accessibilityLabel="Save captured image"
+              accessibilityRole="button"
+              disabled={isCapturing}
+              onPress={savePhoto}
+              style={({ pressed }) => [
+                styles.actionButton,
+                styles.saveButton,
+                pressed && styles.pressed,
+                isCapturing && styles.disabled,
+              ]}>
+              {isCapturing ? (
+                <ActivityIndicator color={Colors.light.background} />
+              ) : (
+                <ThemedText type="smallBold" style={styles.saveButtonText}>
+                  Save
+                </ThemedText>
+              )}
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      </View>
+    );
+  }
 
   if (!cameraPermission || !cameraPermission.granted) {
     return (
@@ -191,6 +279,239 @@ function CameraScreen() {
   );
 }
 
+const edgeConnections = {
+  top: ['topLeft', 'topRight'],
+  right: ['topRight', 'bottomRight'],
+  bottom: ['bottomRight', 'bottomLeft'],
+  left: ['bottomLeft', 'topLeft'],
+};
+
+function CropOverlay({ aspectRatio }) {
+  const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
+  const [corners, setCorners] = useState(null);
+  const [edgeOffsets, setEdgeOffsets] = useState({
+    top: { x: 0, y: 0 },
+    right: { x: 0, y: 0 },
+    bottom: { x: 0, y: 0 },
+    left: { x: 0, y: 0 },
+  });
+
+  const imageSize = getImageViewport(frameSize, aspectRatio);
+  const visibleCorners = corners ?? getDefaultCorners(imageSize);
+
+  const edgePositions = Object.fromEntries(
+    Object.entries(edgeConnections).map(([edge, [firstCorner, secondCorner]]) => {
+      const first = visibleCorners[firstCorner];
+      const second = visibleCorners[secondCorner];
+      const midpoint = {
+        x: (first.x + second.x) / 2,
+        y: (first.y + second.y) / 2,
+      };
+      const offset = edgeOffsets[edge];
+
+      return [edge, clampPoint({ x: midpoint.x + offset.x, y: midpoint.y + offset.y })];
+    })
+  );
+
+  const updateCorner = (corner, position) => {
+    setCorners((current) => ({
+      ...(current ?? getDefaultCorners(imageSize)),
+      [corner]: clampPoint(position),
+    }));
+  };
+
+  const updateEdge = (edge, position) => {
+    const [firstCorner, secondCorner] = edgeConnections[edge];
+    const first = visibleCorners[firstCorner];
+    const second = visibleCorners[secondCorner];
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+    const nextPosition = clampPoint(position);
+
+    setEdgeOffsets((current) => ({
+      ...current,
+      [edge]: {
+        x: nextPosition.x - midpoint.x,
+        y: nextPosition.y - midpoint.y,
+      },
+    }));
+  };
+
+  const lineSegments = Object.entries(edgeConnections).flatMap(([edge, [firstCorner, secondCorner]]) => [
+    [visibleCorners[firstCorner], edgePositions[edge]],
+    [edgePositions[edge], visibleCorners[secondCorner]],
+  ]);
+
+  return (
+    <View
+      pointerEvents="box-none"
+      style={styles.cropOverlay}
+      onLayout={({ nativeEvent }) => {
+        const { width, height } = nativeEvent.layout;
+        setFrameSize({ width, height });
+      }}>
+      {imageSize.width > 0 && imageSize.height > 0 && (
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.cropViewport,
+            {
+              width: imageSize.width,
+              height: imageSize.height,
+              left: imageSize.left,
+              top: imageSize.top,
+            },
+          ]}>
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {lineSegments.map(([start, end], index) => (
+              <View key={index} style={getLineStyle(start, end, imageSize)} />
+            ))}
+          </View>
+
+          {Object.entries(visibleCorners).map(([corner, position]) => (
+            <DraggableHandle
+              key={corner}
+              label={`Move ${corner} crop corner`}
+              position={position}
+              size={imageSize}
+              onDrag={(nextPosition) => updateCorner(corner, nextPosition)}
+            />
+          ))}
+
+          {Object.entries(edgePositions).map(([edge, position]) => (
+            <DraggableHandle
+              key={edge}
+              label={`Move ${edge} crop edge`}
+              position={position}
+              size={imageSize}
+              isEdge
+              onDrag={(nextPosition) => updateEdge(edge, nextPosition)}
+            />
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function DraggableHandle({ label, position, size, isEdge = false, onDrag }) {
+  const positionRef = useRef(position);
+  const startPositionRef = useRef(position);
+  const onDragRef = useRef(onDrag);
+
+  positionRef.current = position;
+  onDragRef.current = onDrag;
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {
+        startPositionRef.current = positionRef.current;
+      },
+      onPanResponderMove: (_, gestureState) => {
+        onDragRef.current({
+          x: startPositionRef.current.x + gestureState.dx / size.width,
+          y: startPositionRef.current.y + gestureState.dy / size.height,
+        });
+      },
+      onPanResponderTerminationRequest: () => false,
+    })
+  ).current;
+
+  const handleSize = isEdge ? 18 : 22;
+
+  return (
+    <View
+      accessible
+      accessibilityLabel={label}
+      {...panResponder.panHandlers}
+      style={[
+        styles.cropHandle,
+        isEdge && styles.edgeHandle,
+        {
+          left: position.x * size.width - handleSize / 2,
+          top: position.y * size.height - handleSize / 2,
+          width: handleSize,
+          height: handleSize,
+          borderRadius: handleSize / 2,
+        },
+      ]}
+    />
+  );
+}
+
+function clampPoint(point) {
+  return {
+    x: Math.max(0, Math.min(1, point.x)),
+    y: Math.max(0, Math.min(1, point.y)),
+  };
+}
+
+function getDefaultCorners(size) {
+  const horizontalInset = size.width ? 11 / size.width : 0;
+  const verticalInset = size.height ? 11 / size.height : 0;
+
+  return {
+    topLeft: { x: horizontalInset, y: verticalInset },
+    topRight: { x: 1 - horizontalInset, y: verticalInset },
+    bottomRight: { x: 1 - horizontalInset, y: 1 - verticalInset },
+    bottomLeft: { x: horizontalInset, y: 1 - verticalInset },
+  };
+}
+
+function getImageViewport(frameSize, aspectRatio) {
+  if (!frameSize.width || !frameSize.height || !aspectRatio) {
+    return { width: 0, height: 0, left: 0, top: 0 };
+  }
+
+  const frameRatio = frameSize.width / frameSize.height;
+
+  if (frameRatio > aspectRatio) {
+    const height = frameSize.height;
+    const width = height * aspectRatio;
+    return {
+      width,
+      height,
+      left: (frameSize.width - width) / 2,
+      top: 0,
+    };
+  }
+
+  const width = frameSize.width;
+  const height = width / aspectRatio;
+  return {
+    width,
+    height,
+    left: 0,
+    top: (frameSize.height - height) / 2,
+  };
+}
+
+function getLineStyle(start, end, size) {
+  const startX = start.x * size.width;
+  const startY = start.y * size.height;
+  const endX = end.x * size.width;
+  const endY = end.y * size.height;
+  const deltaX = endX - startX;
+  const deltaY = endY - startY;
+  const length = Math.sqrt(deltaX ** 2 + deltaY ** 2);
+  const angle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
+
+  return {
+    position: 'absolute',
+    left: (startX + endX) / 2 - length / 2,
+    top: (startY + endY) / 2 - 1,
+    width: length,
+    height: 2,
+    backgroundColor: '#ffffff',
+    opacity: 0.9,
+    transform: [{ rotate: `${angle}deg` }],
+  };
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -207,6 +528,80 @@ const styles = StyleSheet.create({
   },
   statusText: {
     textAlign: 'center',
+  },
+  reviewContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  reviewSafeArea: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.three,
+  },
+  reviewTitle: {
+    color: Colors.light.background,
+    textAlign: 'center',
+    marginBottom: Spacing.three,
+  },
+  imageFrame: {
+    width: '100%',
+    flex: 1,
+    minHeight: 1,
+    position: 'relative',
+    borderRadius: Spacing.two,
+    overflow: 'hidden',
+    backgroundColor: '#111111',
+  },
+  reviewImage: {
+    flex: 1,
+    width: '100%',
+  },
+  cropOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 2,
+  },
+  cropViewport: {
+    position: 'absolute',
+  },
+  cropHandle: {
+    position: 'absolute',
+    zIndex: 3,
+    backgroundColor: '#3c87f7',
+    borderWidth: 3,
+    borderColor: '#ffffff',
+  },
+  edgeHandle: {
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: '#3c87f7',
+  },
+  reviewActions: {
+    width: '100%',
+    flexDirection: 'row',
+    gap: Spacing.two,
+    paddingTop: Spacing.three,
+  },
+  actionButton: {
+    flex: 1,
+    minHeight: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.three,
+  },
+  discardButton: {
+    backgroundColor: '#2b2b2b',
+  },
+  saveButton: {
+    backgroundColor: '#3c87f7',
+  },
+  saveButtonText: {
+    color: Colors.light.background,
   },
   controls: {
     position: 'absolute',
