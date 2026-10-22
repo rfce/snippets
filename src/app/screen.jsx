@@ -289,12 +289,6 @@ const edgeConnections = {
 function CropOverlay({ aspectRatio }) {
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
   const [corners, setCorners] = useState(null);
-  const [edgeOffsets, setEdgeOffsets] = useState({
-    top: { x: 0, y: 0 },
-    right: { x: 0, y: 0 },
-    bottom: { x: 0, y: 0 },
-    left: { x: 0, y: 0 },
-  });
 
   const imageSize = getImageViewport(frameSize, aspectRatio);
   const visibleCorners = corners ?? getDefaultCorners();
@@ -307,9 +301,8 @@ function CropOverlay({ aspectRatio }) {
         x: (first.x + second.x) / 2,
         y: (first.y + second.y) / 2,
       };
-      const offset = edgeOffsets[edge];
 
-      return [edge, clampPoint({ x: midpoint.x + offset.x, y: midpoint.y + offset.y })];
+      return [edge, midpoint];
     })
   );
 
@@ -322,21 +315,39 @@ function CropOverlay({ aspectRatio }) {
 
   const updateEdge = (edge, position) => {
     const [firstCorner, secondCorner] = edgeConnections[edge];
-    const first = visibleCorners[firstCorner];
-    const second = visibleCorners[secondCorner];
-    const midpoint = {
-      x: (first.x + second.x) / 2,
-      y: (first.y + second.y) / 2,
-    };
-    const nextPosition = clampPoint(position);
+    setCorners((current) => {
+      const next = current ?? getDefaultCorners();
+      const currentFirst = next[firstCorner];
+      const currentSecond = next[secondCorner];
+      const midpoint = {
+        x: (currentFirst.x + currentSecond.x) / 2,
+        y: (currentFirst.y + currentSecond.y) / 2,
+      };
+      const requestedDelta = {
+        x: position.x - midpoint.x,
+        y: position.y - midpoint.y,
+      };
+      const minX = Math.min(currentFirst.x, currentSecond.x);
+      const maxX = Math.max(currentFirst.x, currentSecond.x);
+      const minY = Math.min(currentFirst.y, currentSecond.y);
+      const maxY = Math.max(currentFirst.y, currentSecond.y);
+      const delta = {
+        x: clamp(requestedDelta.x, -minX, 1 - maxX),
+        y: clamp(requestedDelta.y, -minY, 1 - maxY),
+      };
 
-    setEdgeOffsets((current) => ({
-      ...current,
-      [edge]: {
-        x: nextPosition.x - midpoint.x,
-        y: nextPosition.y - midpoint.y,
-      },
-    }));
+      return {
+        ...next,
+        [firstCorner]: {
+          x: next[firstCorner].x + delta.x,
+          y: next[firstCorner].y + delta.y,
+        },
+        [secondCorner]: {
+          x: next[secondCorner].x + delta.x,
+          y: next[secondCorner].y + delta.y,
+        },
+      };
+    });
   };
 
   const lineSegments = Object.entries(edgeConnections).flatMap(([edge, [firstCorner, secondCorner]]) => [
@@ -448,6 +459,10 @@ function clampPoint(point) {
     x: Math.max(0, Math.min(1, point.x)),
     y: Math.max(0, Math.min(1, point.y)),
   };
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 function getDefaultCorners() {
