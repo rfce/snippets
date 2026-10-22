@@ -151,6 +151,7 @@ function CameraScreen() {
         <CameraView
           ref={cameraRef}
           facing="back"
+          ratio={Platform.OS === 'android' ? '4:3' : undefined}
           onCameraReady={() => setIsCameraReady(true)}
           onMountError={(event) => {
             setCameraError(event?.nativeEvent?.message ?? 'The camera preview could not start.');
