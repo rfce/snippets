@@ -2,7 +2,7 @@
 
 /**
  * This script is used to reset the project to a blank state.
- * It deletes or moves the /src and /scripts directories to /example based on user input and creates a new /src/app directory with an index.tsx and _layout.tsx file.
+ * It deletes or moves the /src and /scripts directories to /example based on user input and creates a new /src/app directory with an index.jsx and _layout.jsx file.
  * Demo images in /assets/images are deleted or moved along with them.
  * You can remove the `reset-project` script from package.json and safely delete this file after running it.
  */
@@ -34,7 +34,7 @@ const indexContent = `import { Text, View, StyleSheet } from "react-native";
 export default function Index() {
   return (
     <View style={styles.container}>
-      <Text>Edit src/app/index.tsx to edit this screen.</Text>
+      <Text>Edit src/app/index.jsx to edit this screen.</Text>
     </View>
   );
 }
@@ -108,19 +108,19 @@ const moveDirectories = async (userInput) => {
     await fs.promises.mkdir(newAppDirPath, { recursive: true });
     console.log("\n📁 New /src/app directory created.");
 
-    // Create index.tsx
-    const indexPath = path.join(newAppDirPath, "index.tsx");
+    // Create index.jsx
+    const indexPath = path.join(newAppDirPath, "index.jsx");
     await fs.promises.writeFile(indexPath, indexContent);
-    console.log("📄 src/app/index.tsx created.");
+    console.log("📄 src/app/index.jsx created.");
 
-    // Create _layout.tsx
-    const layoutPath = path.join(newAppDirPath, "_layout.tsx");
+    // Create _layout.jsx
+    const layoutPath = path.join(newAppDirPath, "_layout.jsx");
     await fs.promises.writeFile(layoutPath, layoutContent);
-    console.log("📄 src/app/_layout.tsx created.");
+    console.log("📄 src/app/_layout.jsx created.");
 
     console.log("\n✅ Project reset complete. Next steps:");
     console.log(
-      `1. Run \`npx expo start\` to start a development server.\n2. Edit src/app/index.tsx to edit the main screen.\n3. Put all your application code in /src, only screens and layout files should be in /src/app.${
+      `1. Run \`npm start\` to start a development server.\n2. Edit src/app/index.jsx to edit the main screen.\n3. Put all your application code in /src, only screens and layout files should be in /src/app.${
         userInput === "y"
           ? `\n4. Delete the /${exampleDir} directory when you're done referencing it.`
           : ""

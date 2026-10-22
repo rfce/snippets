@@ -1,13 +1,14 @@
 import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
+import { SymbolView } from 'expo-symbols';
+import { Platform, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AnimatedIcon } from '@/components/animated-icon';
 import { HintRow } from '@/components/hint-row';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
 
 function getDevMenuHint() {
   if (Platform.OS === 'web') {
@@ -29,11 +30,27 @@ function getDevMenuHint() {
 }
 
 export default function HomeScreen() {
+  const theme = useTheme();
+
+  const handleCameraPress = () => {
+    console.log('Hello');
+  };
+
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
+          <Pressable
+            accessibilityLabel="Open camera"
+            accessibilityRole="button"
+            onPress={handleCameraPress}
+            style={({ pressed }) => [styles.cameraButton, pressed && styles.pressed]}>
+            <SymbolView
+              name={{ ios: 'camera.fill', android: 'photo_camera', web: 'photo_camera' }}
+              tintColor={theme.background}
+              size={48}
+            />
+          </Pressable>
           <ThemedText type="title" style={styles.title}>
             Welcome to&nbsp;Expo
           </ThemedText>
@@ -46,7 +63,7 @@ export default function HomeScreen() {
         <ThemedView type="backgroundElement" style={styles.stepContainer}>
           <HintRow
             title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
+            hint={<ThemedText type="code">src/app/index.jsx</ThemedText>}
           />
           <HintRow title="Dev tools" hint={getDevMenuHint()} />
           <HintRow
@@ -84,6 +101,17 @@ const styles = StyleSheet.create({
   },
   title: {
     textAlign: 'center',
+  },
+  cameraButton: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3c87f7',
+  },
+  pressed: {
+    opacity: 0.7,
   },
   code: {
     textTransform: 'uppercase',

@@ -27,6 +27,14 @@ export default function AppTabs() {
           renderingMode="template"
         />
       </NativeTabs.Trigger>
+
+      <NativeTabs.Trigger name="screen">
+        <NativeTabs.Trigger.Label>Screen</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon
+          sf={{ default: 'camera', selected: 'camera.fill' }}
+          md="photo_camera"
+        />
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }

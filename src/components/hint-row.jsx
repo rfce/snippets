@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { View, StyleSheet } from 'react-native';
 
 import { ThemedText } from './themed-text';
@@ -6,12 +5,7 @@ import { ThemedView } from './themed-view';
 
 import { Spacing } from '@/constants/theme';
 
-type HintRowProps = {
-  title?: string;
-  hint?: ReactNode;
-};
-
-export function HintRow({ title = 'Try editing', hint = 'app/index.tsx' }: HintRowProps) {
+export function HintRow({ title = 'Try editing', hint = 'app/index.jsx' }) {
   return (
     <View style={styles.stepRow}>
       <ThemedText type="small">{title}</ThemedText>
