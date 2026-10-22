@@ -297,7 +297,7 @@ function CropOverlay({ aspectRatio }) {
   });
 
   const imageSize = getImageViewport(frameSize, aspectRatio);
-  const visibleCorners = corners ?? getDefaultCorners(imageSize);
+  const visibleCorners = corners ?? getDefaultCorners();
 
   const edgePositions = Object.fromEntries(
     Object.entries(edgeConnections).map(([edge, [firstCorner, secondCorner]]) => {
@@ -315,7 +315,7 @@ function CropOverlay({ aspectRatio }) {
 
   const updateCorner = (corner, position) => {
     setCorners((current) => ({
-      ...(current ?? getDefaultCorners(imageSize)),
+      ...(current ?? getDefaultCorners()),
       [corner]: clampPoint(position),
     }));
   };
@@ -450,15 +450,12 @@ function clampPoint(point) {
   };
 }
 
-function getDefaultCorners(size) {
-  const horizontalInset = size.width ? 11 / size.width : 0;
-  const verticalInset = size.height ? 11 / size.height : 0;
-
+function getDefaultCorners() {
   return {
-    topLeft: { x: horizontalInset, y: verticalInset },
-    topRight: { x: 1 - horizontalInset, y: verticalInset },
-    bottomRight: { x: 1 - horizontalInset, y: 1 - verticalInset },
-    bottomLeft: { x: horizontalInset, y: 1 - verticalInset },
+    topLeft: { x: 0, y: 0 },
+    topRight: { x: 1, y: 0 },
+    bottomRight: { x: 1, y: 1 },
+    bottomLeft: { x: 0, y: 1 },
   };
 }
 
@@ -550,8 +547,8 @@ const styles = StyleSheet.create({
     minHeight: 1,
     position: 'relative',
     borderRadius: Spacing.two,
-    overflow: 'hidden',
     backgroundColor: '#111111',
+    overflow: 'hidden',
   },
   reviewImage: {
     flex: 1,
