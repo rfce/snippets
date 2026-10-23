@@ -592,16 +592,21 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
   uniform float uThresholdBias;
   varying vec2 vOutputUv;
 
+  float redInkDominance(vec3 color) {
+    return max(0.0, color.r - max(color.g, color.b));
+  }
+
   float inkIntensity(vec3 color) {
     // Luminance makes saturated red ink look much lighter than navy ink.
-    // The darkest channel is a better measure of ink coverage on a white page:
-    // red, blue, black, and gray ink all become dark while white paper stays
-    // bright in every channel.
-    return min(color.r, min(color.g, color.b));
+    // Start with the darkest channel, then give red-dominant pixels a small
+    // extra boost so anti-aliased red stroke edges are not lost.
+    float darkestChannel = min(color.r, min(color.g, color.b));
+    return max(0.0, darkestChannel - redInkDominance(color) * 0.75);
   }
 
   void main() {
-    float center = inkIntensity(texture2D(uTexture, vOutputUv).rgb);
+    vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
+    float center = inkIntensity(centerColor);
     float localSum = 0.0;
     vec2 sampleOffset = uTexelSize * uSampleStep;
 
@@ -623,6 +628,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     // strokes. Use a closer support sample so thin text strokes are not
     // accidentally treated as isolated pixels.
     float inkNeighborCount = 0.0;
+    float redInkNeighborCount = 0.0;
     vec2 supportStep = uTexelSize;
 
     for (int x = -1; x <= 1; x += 1) {
@@ -632,8 +638,11 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           vec2(0.0),
           vec2(1.0)
         );
-        float neighbor = inkIntensity(texture2D(uTexture, sampleUv).rgb);
-        inkNeighborCount += 1.0 - step(localThreshold, neighbor);
+        vec3 neighborColor = texture2D(uTexture, sampleUv).rgb;
+        float neighbor = inkIntensity(neighborColor);
+        float neighborIsInk = 1.0 - step(localThreshold, neighbor);
+        inkNeighborCount += neighborIsInk;
+        redInkNeighborCount += neighborIsInk * step(0.08, redInkDominance(neighborColor));
       }
     }
 
@@ -641,7 +650,9 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     // immediate neighbors light, and fill small white gaps inside a stroke.
     float strongInk = 1.0 - step(localThreshold - 0.04, center);
     float supportedInk = centerIsInk * step(2.0, inkNeighborCount);
-    float gapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
+    float regularGapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
+    float redGapFill = (1.0 - centerIsInk) * step(2.0, redInkNeighborCount);
+    float gapFill = max(regularGapFill, redGapFill);
     float inkMask = max(strongInk, max(supportedInk, gapFill));
     float inkColor = 0.3019608; // #4d4d4d
     gl_FragColor = vec4(mix(vec3(1.0), vec3(inkColor), inkMask), 1.0);
