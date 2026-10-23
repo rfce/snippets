@@ -16,6 +16,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { renderPerspectiveCropAsync } from '@/perspective-crop';
 
 const cameraModule = getCameraModule();
 const mediaLibraryModule = getMediaLibraryModule();
@@ -82,6 +83,7 @@ function CameraScreen() {
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
+  const [cropCorners, setCropCorners] = useState(null);
   const [cameraError, setCameraError] = useState(null);
 
   useFocusEffect(
@@ -114,6 +116,7 @@ function CameraScreen() {
       if (!photo?.uri) return;
 
       setCapturedPhoto(photo);
+      setCropCorners(null);
     } catch {
       Alert.alert('Capture failed', 'We could not capture the image. Please try again.');
     } finally {
@@ -123,6 +126,7 @@ function CameraScreen() {
 
   const discardPhoto = () => {
     setCapturedPhoto(null);
+    setCropCorners(null);
     setIsCameraReady(false);
     setCameraError(null);
   };
@@ -131,9 +135,19 @@ function CameraScreen() {
     if (!capturedPhoto?.uri || isCapturing) return;
 
     setIsCapturing(true);
+    const customCrop = hasCustomCrop(cropCorners);
+
+    console.log('[screen] Save requested', {
+      hasCapturedPhoto: Boolean(capturedPhoto.uri),
+      sourceWidth: capturedPhoto.width ?? null,
+      sourceHeight: capturedPhoto.height ?? null,
+      customCrop,
+      corners: cropCorners ?? 'default',
+    });
 
     try {
       if (Platform.OS === 'web') {
+        console.warn('[screen] Perspective crop save skipped on web.');
         Alert.alert('Not available', 'Saving photos is available on a mobile device.');
         return;
       }
@@ -144,16 +158,57 @@ function CameraScreen() {
       }
 
       if (!permission.granted) {
+        console.warn('[screen] Media-library permission was not granted.');
         Alert.alert('Permission needed', 'Allow photo access to save captured images.');
         return;
       }
 
-      await mediaLibraryModule.Asset.create(capturedPhoto.uri);
+      const selectedPhoto = customCrop
+        ? await renderPerspectiveCropAsync({
+            uri: capturedPhoto.uri,
+            corners: cropCorners,
+            sourceWidth: capturedPhoto.width,
+            sourceHeight: capturedPhoto.height,
+          })
+        : capturedPhoto;
+
+      console.log('[screen] Image ready for media-library save', {
+        uriAvailable: Boolean(selectedPhoto?.uri),
+        width: selectedPhoto?.width ?? null,
+        height: selectedPhoto?.height ?? null,
+        customCrop,
+      });
+
+      const savedAsset = await mediaLibraryModule.Asset.create(selectedPhoto.uri);
+      const savedWidth = typeof savedAsset?.getWidth === 'function'
+        ? await savedAsset.getWidth()
+        : savedAsset?.width ?? selectedPhoto.width ?? null;
+      const savedHeight = typeof savedAsset?.getHeight === 'function'
+        ? await savedAsset.getHeight()
+        : savedAsset?.height ?? selectedPhoto.height ?? null;
+      console.log('[screen] Media-library asset created', {
+        id: savedAsset?.id ?? null,
+        uri: savedAsset?.uri ?? selectedPhoto.uri,
+        width: savedWidth,
+        height: savedHeight,
+      });
       setCapturedPhoto(null);
+      setCropCorners(null);
       setIsCameraReady(false);
-      Alert.alert('Photo saved', 'The captured image was saved to your device.');
-    } catch {
-      Alert.alert('Capture failed', 'We could not save the captured image. Please try again.');
+      console.log('[screen] Image saved successfully.');
+      Alert.alert('Photo saved', 'The cropped image was saved to your device.');
+    } catch (error) {
+      const details = getErrorDetails(error);
+      console.error('[screen] Save failed', details);
+      if (details.stack) {
+        console.error('[screen] Save failed stack\n' + details.stack);
+      }
+      Alert.alert(
+        'Capture failed',
+        __DEV__
+          ? `We could not save the captured image.\n\n${details.message}`
+          : 'We could not save the captured image. Please try again.'
+      );
     } finally {
       setIsCapturing(false);
     }
@@ -179,6 +234,8 @@ function CameraScreen() {
                   ? capturedPhoto.width / capturedPhoto.height
                   : 4 / 3
               }
+              corners={cropCorners}
+              onCornersChange={setCropCorners}
             />
           </View>
 
@@ -286,9 +343,8 @@ const edgeConnections = {
   left: ['bottomLeft', 'topLeft'],
 };
 
-function CropOverlay({ aspectRatio }) {
+function CropOverlay({ aspectRatio, corners, onCornersChange }) {
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
-  const [corners, setCorners] = useState(null);
 
   const imageSize = getImageViewport(frameSize, aspectRatio);
   const visibleCorners = corners ?? getDefaultCorners();
@@ -307,7 +363,7 @@ function CropOverlay({ aspectRatio }) {
   );
 
   const updateCorner = (corner, position) => {
-    setCorners((current) => ({
+    onCornersChange((current) => ({
       ...(current ?? getDefaultCorners()),
       [corner]: clampPoint(position),
     }));
@@ -315,7 +371,7 @@ function CropOverlay({ aspectRatio }) {
 
   const updateEdge = (edge, position) => {
     const [firstCorner, secondCorner] = edgeConnections[edge];
-    setCorners((current) => {
+    onCornersChange((current) => {
       const next = current ?? getDefaultCorners();
       const currentFirst = next[firstCorner];
       const currentSecond = next[secondCorner];
@@ -463,6 +519,34 @@ function clampPoint(point) {
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function hasCustomCrop(corners) {
+  if (!corners) return false;
+
+  const defaults = getDefaultCorners();
+  return Object.keys(defaults).some((corner) => {
+    if (!corners[corner]) return true;
+
+    return (
+      Math.abs(corners[corner].x - defaults[corner].x) > 0.0001 ||
+      Math.abs(corners[corner].y - defaults[corner].y) > 0.0001
+    );
+  });
+}
+
+function getErrorDetails(error) {
+  if (error instanceof Error) {
+    return {
+      message: error.message || 'Unknown error',
+      stack: error.stack || null,
+    };
+  }
+
+  return {
+    message: String(error || 'Unknown error'),
+    stack: null,
+  };
 }
 
 function getDefaultCorners() {
