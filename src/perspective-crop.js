@@ -592,12 +592,16 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
   uniform float uThresholdBias;
   varying vec2 vOutputUv;
 
-  float luminance(vec3 color) {
-    return dot(color, vec3(0.299, 0.587, 0.114));
+  float inkIntensity(vec3 color) {
+    // Luminance makes saturated red ink look much lighter than navy ink.
+    // The darkest channel is a better measure of ink coverage on a white page:
+    // red, blue, black, and gray ink all become dark while white paper stays
+    // bright in every channel.
+    return min(color.r, min(color.g, color.b));
   }
 
   void main() {
-    float center = luminance(texture2D(uTexture, vOutputUv).rgb);
+    float center = inkIntensity(texture2D(uTexture, vOutputUv).rgb);
     float localSum = 0.0;
     vec2 sampleOffset = uTexelSize * uSampleStep;
 
@@ -608,7 +612,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           vec2(0.0),
           vec2(1.0)
         );
-        localSum += luminance(texture2D(uTexture, sampleUv).rgb);
+        localSum += inkIntensity(texture2D(uTexture, sampleUv).rgb);
       }
     }
 
@@ -628,7 +632,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           vec2(0.0),
           vec2(1.0)
         );
-        float neighbor = luminance(texture2D(uTexture, sampleUv).rgb);
+        float neighbor = inkIntensity(texture2D(uTexture, sampleUv).rgb);
         inkNeighborCount += 1.0 - step(localThreshold, neighbor);
       }
     }
