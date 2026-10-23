@@ -1,5 +1,6 @@
 import { router, useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
+import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -41,6 +42,24 @@ function getMediaLibraryModule() {
     return null;
   }
 }
+
+const FLASH_MODES = [
+  {
+    value: 'off',
+    label: 'Flash disabled',
+    icon: { ios: 'bolt.slash.fill', android: 'flash_off', web: 'flash_off' },
+  },
+  {
+    value: 'flash',
+    label: 'Flash on for capture',
+    icon: { ios: 'bolt.fill', android: 'flash_on', web: 'flash_on' },
+  },
+  {
+    value: 'torch',
+    label: 'Torch on continuously',
+    icon: { ios: 'flashlight.on.fill', android: 'flashlight_on', web: 'flashlight_on' },
+  },
+];
 
 export default function ScreenTab() {
   if (
@@ -86,6 +105,7 @@ function CameraScreen() {
   const [isFocused, setIsFocused] = useState(true);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [flashMode, setFlashMode] = useState('off');
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [savedPhoto, setSavedPhoto] = useState(null);
   const [savedImageMode, setSavedImageMode] = useState('original');
@@ -508,7 +528,9 @@ function CameraScreen() {
       {isFocused && (
         <CameraView
           ref={cameraRef}
+          enableTorch={flashMode === 'torch'}
           facing="back"
+          flash={flashMode === 'flash' ? 'on' : 'off'}
           ratio={Platform.OS === 'android' ? '4:3' : undefined}
           onCameraReady={() => setIsCameraReady(true)}
           onMountError={(event) => {
@@ -516,6 +538,36 @@ function CameraScreen() {
           }}
           style={styles.camera}
         />
+      )}
+
+      {isFocused && (
+        <View
+          pointerEvents="box-none"
+          style={[styles.flashControls, { top: insets.top + Spacing.three }]}>
+          {FLASH_MODES.map((mode) => {
+            const isActive = flashMode === mode.value;
+
+            return (
+              <Pressable
+                key={mode.value}
+                accessibilityLabel={mode.label}
+                accessibilityRole="button"
+                accessibilityState={{ selected: isActive }}
+                onPress={() => setFlashMode(mode.value)}
+                style={({ pressed }) => [
+                  styles.flashModeButton,
+                  isActive && styles.flashModeButtonActive,
+                  pressed && styles.pressed,
+                ]}>
+                <SymbolView
+                  name={mode.icon}
+                  size={22}
+                  tintColor={isActive ? Colors.light.background : '#dedede'}
+                />
+              </Pressable>
+            );
+          })}
+        </View>
       )}
 
       <View
@@ -997,6 +1049,28 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'flex-end',
     backgroundColor: 'transparent',
+  },
+  flashControls: {
+    position: 'absolute',
+    right: Spacing.three,
+    flexDirection: 'row',
+    gap: Spacing.one,
+    alignItems: 'center',
+  },
+  flashModeButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.58)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.45)',
+  },
+  flashModeButtonActive: {
+    backgroundColor: '#3c87f7',
+    borderColor: Colors.light.background,
+    borderWidth: 2,
   },
   errorOverlay: {
     position: 'absolute',
