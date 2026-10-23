@@ -83,6 +83,7 @@ function CameraScreen() {
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
+  const [savedPhoto, setSavedPhoto] = useState(null);
   const [cropCorners, setCropCorners] = useState(null);
   const [cameraError, setCameraError] = useState(null);
 
@@ -127,6 +128,12 @@ function CameraScreen() {
   const discardPhoto = () => {
     setCapturedPhoto(null);
     setCropCorners(null);
+    setIsCameraReady(false);
+    setCameraError(null);
+  };
+
+  const closeSavedPhoto = () => {
+    setSavedPhoto(null);
     setIsCameraReady(false);
     setCameraError(null);
   };
@@ -192,11 +199,11 @@ function CameraScreen() {
         width: savedWidth,
         height: savedHeight,
       });
+      setSavedPhoto(selectedPhoto);
       setCapturedPhoto(null);
       setCropCorners(null);
       setIsCameraReady(false);
       console.log('[screen] Image saved successfully.');
-      Alert.alert('Photo saved', 'The cropped image was saved to your device.');
     } catch (error) {
       const details = getErrorDetails(error);
       console.error('[screen] Save failed', details);
@@ -213,6 +220,39 @@ function CameraScreen() {
       setIsCapturing(false);
     }
   };
+
+  if (savedPhoto) {
+    return (
+      <View style={styles.savedImageContainer}>
+        <SafeAreaView style={styles.savedImageSafeArea}>
+          <ThemedText type="subtitle" style={styles.savedImageTitle}>
+            Saved image
+          </ThemedText>
+
+          <View style={styles.savedImageFrame}>
+            <Image
+              contentFit="contain"
+              source={{ uri: savedPhoto.uri }}
+              style={styles.savedImage}
+            />
+          </View>
+
+          <Pressable
+            accessibilityLabel="Close saved image"
+            accessibilityRole="button"
+            onPress={closeSavedPhoto}
+            style={({ pressed }) => [
+              styles.savedImageCloseButton,
+              pressed && styles.pressed,
+            ]}>
+            <ThemedText type="smallBold" style={styles.savedImageCloseText}>
+              Close
+            </ThemedText>
+          </Pressable>
+        </SafeAreaView>
+      </View>
+    );
+  }
 
   if (capturedPhoto) {
     return (
@@ -629,13 +669,28 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000000',
   },
+  savedImageContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
   reviewSafeArea: {
     flex: 1,
     alignItems: 'center',
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
   },
+  savedImageSafeArea: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.three,
+  },
   reviewTitle: {
+    color: Colors.light.background,
+    textAlign: 'center',
+    marginBottom: Spacing.three,
+  },
+  savedImageTitle: {
     color: Colors.light.background,
     textAlign: 'center',
     marginBottom: Spacing.three,
@@ -650,6 +705,18 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   reviewImage: {
+    flex: 1,
+    width: '100%',
+  },
+  savedImageFrame: {
+    width: '100%',
+    flex: 1,
+    minHeight: 1,
+    borderRadius: Spacing.two,
+    backgroundColor: '#111111',
+    overflow: 'hidden',
+  },
+  savedImage: {
     flex: 1,
     width: '100%',
   },
@@ -697,6 +764,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#3c87f7',
   },
   saveButtonText: {
+    color: Colors.light.background,
+  },
+  savedImageCloseButton: {
+    width: '100%',
+    minHeight: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    marginTop: Spacing.three,
+    backgroundColor: '#3c87f7',
+  },
+  savedImageCloseText: {
     color: Colors.light.background,
   },
   controls: {
