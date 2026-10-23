@@ -16,7 +16,10 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { renderPerspectiveCropAsync } from '@/perspective-crop';
+import {
+  renderAdaptiveThresholdAsync,
+  renderPerspectiveCropAsync,
+} from '@/perspective-crop';
 
 const cameraModule = getCameraModule();
 const mediaLibraryModule = getMediaLibraryModule();
@@ -84,6 +87,10 @@ function CameraScreen() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [savedPhoto, setSavedPhoto] = useState(null);
+  const [savedImageMode, setSavedImageMode] = useState('original');
+  const [blackAndWhitePhoto, setBlackAndWhitePhoto] = useState(null);
+  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [isSavingPreview, setIsSavingPreview] = useState(false);
   const [cropCorners, setCropCorners] = useState(null);
   const [cameraError, setCameraError] = useState(null);
 
@@ -134,8 +141,81 @@ function CameraScreen() {
 
   const closeSavedPhoto = () => {
     setSavedPhoto(null);
+    setSavedImageMode('original');
+    setBlackAndWhitePhoto(null);
     setIsCameraReady(false);
     setCameraError(null);
+  };
+
+  const displayedSavedPhoto =
+    savedImageMode === 'blackAndWhite' && blackAndWhitePhoto ? blackAndWhitePhoto : savedPhoto;
+
+  const selectSavedImageMode = async (mode) => {
+    setSavedImageMode(mode);
+
+    if (mode !== 'blackAndWhite' || blackAndWhitePhoto || isEnhancing || !savedPhoto) return;
+
+    setIsEnhancing(true);
+
+    try {
+      const enhancedPhoto = await renderAdaptiveThresholdAsync({
+        uri: savedPhoto.uri,
+        sourceWidth: savedPhoto.width,
+        sourceHeight: savedPhoto.height,
+      });
+      setBlackAndWhitePhoto(enhancedPhoto);
+    } catch (error) {
+      const details = getErrorDetails(error);
+      console.error('[screen] Black & white enhancement failed', details);
+      setSavedImageMode('original');
+      Alert.alert(
+        'Enhancement failed',
+        __DEV__
+          ? `We could not create the black-and-white preview.\n\n${details.message}`
+          : 'We could not create the black-and-white preview. Please try again.'
+      );
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
+
+  const saveSavedImage = async () => {
+    if (!displayedSavedPhoto?.uri || isSavingPreview || isEnhancing) return;
+
+    if (savedImageMode === 'original') {
+      closeSavedPhoto();
+      return;
+    }
+
+    setIsSavingPreview(true);
+
+    try {
+      let permission = mediaPermission;
+      if (!permission?.granted) {
+        permission = await requestMediaPermission();
+      }
+
+      if (!permission.granted) {
+        Alert.alert('Permission needed', 'Allow photo access to save this image.');
+        return;
+      }
+
+      await mediaLibraryModule.Asset.create(displayedSavedPhoto.uri);
+      console.log('[screen] Selected image preview saved', {
+        mode: savedImageMode,
+        uri: displayedSavedPhoto.uri,
+      });
+      closeSavedPhoto();
+    } catch (error) {
+      const details = getErrorDetails(error);
+      console.error('[screen] Selected image save failed', details);
+      Alert.alert(
+        'Save failed',
+        __DEV__ ? `We could not save this image.\n\n${details.message}` : 'We could not save this image.'
+      );
+    } finally {
+      setIsSavingPreview(false);
+    }
   };
 
   const savePhoto = async () => {
@@ -200,6 +280,8 @@ function CameraScreen() {
         height: savedHeight,
       });
       setSavedPhoto(selectedPhoto);
+      setSavedImageMode('original');
+      setBlackAndWhitePhoto(null);
       setCapturedPhoto(null);
       setCropCorners(null);
       setIsCameraReady(false);
@@ -232,23 +314,84 @@ function CameraScreen() {
           <View style={styles.savedImageFrame}>
             <Image
               contentFit="contain"
-              source={{ uri: savedPhoto.uri }}
+              source={{ uri: displayedSavedPhoto?.uri ?? savedPhoto.uri }}
               style={styles.savedImage}
             />
+            {isEnhancing && (
+              <View style={styles.savedImageLoadingOverlay}>
+                <ActivityIndicator color={Colors.light.background} />
+              </View>
+            )}
           </View>
 
-          <Pressable
-            accessibilityLabel="Close saved image"
-            accessibilityRole="button"
-            onPress={closeSavedPhoto}
-            style={({ pressed }) => [
-              styles.savedImageCloseButton,
-              pressed && styles.pressed,
-            ]}>
-            <ThemedText type="smallBold" style={styles.savedImageCloseText}>
-              Close
-            </ThemedText>
-          </Pressable>
+          <View style={styles.savedImageToggleRow}>
+            {[
+              { label: 'Original', value: 'original' },
+              { label: 'Black & White', value: 'blackAndWhite' },
+              { label: 'Magic Color', value: 'magicColor' },
+            ].map((option) => {
+              const isActive = savedImageMode === option.value;
+
+              return (
+                <Pressable
+                  key={option.value}
+                  accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
+                  accessibilityRole="button"
+                  disabled={isEnhancing || isSavingPreview}
+                  onPress={() => selectSavedImageMode(option.value)}
+                  style={({ pressed }) => [
+                    styles.savedImageToggleButton,
+                    isActive && styles.savedImageToggleButtonActive,
+                    pressed && styles.pressed,
+                  ]}>
+                  <ThemedText
+                    type="smallBold"
+                    style={[
+                      styles.savedImageToggleText,
+                      isActive && styles.savedImageToggleTextActive,
+                    ]}>
+                    {option.label}
+                  </ThemedText>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.savedImageActions}>
+            <Pressable
+              accessibilityLabel="Retake photo"
+              accessibilityRole="button"
+              disabled={isEnhancing || isSavingPreview}
+              onPress={closeSavedPhoto}
+              style={({ pressed }) => [
+                styles.savedImageActionButton,
+                styles.retakeButton,
+                pressed && styles.pressed,
+                (isEnhancing || isSavingPreview) && styles.disabled,
+              ]}>
+              <ThemedText type="smallBold">Retake</ThemedText>
+            </Pressable>
+
+            <Pressable
+              accessibilityLabel="Save selected image"
+              accessibilityRole="button"
+              disabled={isEnhancing || isSavingPreview}
+              onPress={saveSavedImage}
+              style={({ pressed }) => [
+                styles.savedImageActionButton,
+                styles.saveButton,
+                pressed && styles.pressed,
+                (isEnhancing || isSavingPreview) && styles.disabled,
+              ]}>
+              {isSavingPreview ? (
+                <ActivityIndicator color={Colors.light.background} />
+              ) : (
+                <ThemedText type="smallBold" style={styles.saveButtonText}>
+                  Save
+                </ThemedText>
+              )}
+            </Pressable>
+          </View>
         </SafeAreaView>
       </View>
     );
@@ -712,6 +855,7 @@ const styles = StyleSheet.create({
     width: '100%',
     flex: 1,
     minHeight: 1,
+    position: 'relative',
     borderRadius: Spacing.two,
     backgroundColor: '#111111',
     overflow: 'hidden',
@@ -719,6 +863,38 @@ const styles = StyleSheet.create({
   savedImage: {
     flex: 1,
     width: '100%',
+  },
+  savedImageLoadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+  },
+  savedImageToggleRow: {
+    width: '100%',
+    flexDirection: 'row',
+    gap: Spacing.two,
+    marginTop: Spacing.three,
+  },
+  savedImageToggleButton: {
+    flex: 1,
+    minHeight: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    borderWidth: 1,
+    borderColor: '#5c5c5c',
+    paddingHorizontal: Spacing.two,
+  },
+  savedImageToggleButtonActive: {
+    borderWidth: 2,
+    borderColor: '#3c87f7',
+  },
+  savedImageToggleText: {
+    color: '#b9b9b9',
+  },
+  savedImageToggleTextActive: {
+    color: Colors.light.background,
   },
   cropOverlay: {
     position: 'absolute',
@@ -766,18 +942,22 @@ const styles = StyleSheet.create({
   saveButtonText: {
     color: Colors.light.background,
   },
-  savedImageCloseButton: {
+  savedImageActions: {
     width: '100%',
+    flexDirection: 'row',
+    gap: Spacing.two,
+    marginTop: Spacing.three,
+  },
+  savedImageActionButton: {
+    flex: 1,
     minHeight: 52,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: Spacing.two,
     paddingHorizontal: Spacing.three,
-    marginTop: Spacing.three,
-    backgroundColor: '#3c87f7',
   },
-  savedImageCloseText: {
-    color: Colors.light.background,
+  retakeButton: {
+    backgroundColor: '#2b2b2b',
   },
   controls: {
     position: 'absolute',

@@ -130,6 +130,116 @@ export async function renderPerspectiveCropAsync({
   }
 }
 
+export async function renderAdaptiveThresholdAsync({
+  uri,
+  sourceWidth,
+  sourceHeight,
+}) {
+  if (!uri) {
+    throw new Error('A source image is required for black-and-white enhancement.');
+  }
+
+  const width = sourceWidth || 1;
+  const height = sourceHeight || 1;
+  const outputSize = getScaledOutputSize(width, height);
+  console.log('[perspective-crop] Starting adaptive threshold', {
+    uri,
+    sourceWidth: width,
+    sourceHeight: height,
+    outputSize,
+  });
+
+  const GLView = getGLView();
+  const gl = await GLView.createContextAsync();
+  let sourceTexture;
+  let outputTexture;
+  let framebuffer;
+  let program;
+  let positionBuffer;
+
+  try {
+    program = createProgram(gl, VERTEX_SHADER, ADAPTIVE_THRESHOLD_FRAGMENT_SHADER);
+    sourceTexture = createSourceTexture(gl, uri);
+    outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
+    framebuffer = createFramebuffer(gl, outputTexture);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.viewport(0, 0, outputSize.width, outputSize.height);
+    gl.useProgram(program);
+    gl.clearColor(1, 1, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW
+    );
+
+    const positionLocation = gl.getAttribLocation(program, 'aPosition');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+
+    const texelSizeLocation = gl.getUniformLocation(program, 'uTexelSize');
+    const sampleStepLocation = gl.getUniformLocation(program, 'uSampleStep');
+    const biasLocation = gl.getUniformLocation(program, 'uThresholdBias');
+
+    if (texelSizeLocation === null || sampleStepLocation === null || biasLocation === null) {
+      throw new Error('The adaptive-threshold shader uniforms are unavailable.');
+    }
+
+    gl.uniform2f(texelSizeLocation, 1 / width, 1 / height);
+    gl.uniform1f(sampleStepLocation, 8);
+    gl.uniform1f(biasLocation, 0.08);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.finish?.();
+    gl.flush();
+    gl.flushEXP?.();
+    checkGlError(gl, 'rendering the adaptive threshold');
+
+    const snapshot = await GLView.takeSnapshotAsync(gl, {
+      framebuffer,
+      format: 'jpeg',
+      compress: 0.95,
+      flip: false,
+    });
+    const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
+
+    if (!snapshotUri || typeof snapshotUri !== 'string') {
+      throw new Error('Adaptive threshold completed without producing an image file.');
+    }
+
+    console.log('[perspective-crop] Adaptive threshold snapshot created', {
+      uri: snapshotUri,
+      width: outputSize.width,
+      height: outputSize.height,
+    });
+
+    return {
+      uri: snapshotUri,
+      width: outputSize.width,
+      height: outputSize.height,
+    };
+  } finally {
+    try {
+      if (positionBuffer) gl.deleteBuffer(positionBuffer);
+      if (framebuffer) gl.deleteFramebuffer(framebuffer);
+      if (outputTexture) gl.deleteTexture(outputTexture);
+      if (sourceTexture) gl.deleteTexture(sourceTexture);
+      if (program) gl.deleteProgram(program);
+      await GLView.destroyContextAsync(gl);
+    } catch (cleanupError) {
+      console.warn('[perspective-crop] Adaptive threshold cleanup failed', cleanupError);
+    }
+  }
+}
+
 function getGLView() {
   try {
     const module = require('expo-gl');
@@ -187,6 +297,15 @@ function getAxisAlignedTransform(crop) {
     [0, crop.bottom - crop.top, crop.top],
     [0, 0, 1],
   ];
+}
+
+function getScaledOutputSize(width, height) {
+  const scale = Math.min(1, MAX_OUTPUT_EDGE / Math.max(width, height));
+
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
 }
 
 function getOutputSize(corners, sourceWidth, sourceHeight) {
@@ -458,5 +577,40 @@ const FRAGMENT_SHADER = `
     // coordinate order. Do not invert Y here; doing so swaps top and bottom
     // crop selections when only a horizontal edge is moved.
     gl_FragColor = texture2D(uTexture, sourceUv);
+  }
+`;
+
+const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
+  precision mediump float;
+
+  uniform sampler2D uTexture;
+  uniform vec2 uTexelSize;
+  uniform float uSampleStep;
+  uniform float uThresholdBias;
+  varying vec2 vOutputUv;
+
+  float luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+  }
+
+  void main() {
+    float center = luminance(texture2D(uTexture, vOutputUv).rgb);
+    float localSum = 0.0;
+    vec2 sampleOffset = uTexelSize * uSampleStep;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        vec2 sampleUv = clamp(
+          vOutputUv + vec2(float(x), float(y)) * sampleOffset,
+          vec2(0.0),
+          vec2(1.0)
+        );
+        localSum += luminance(texture2D(uTexture, sampleUv).rgb);
+      }
+    }
+
+    float localThreshold = (localSum / 9.0) - uThresholdBias;
+    float binaryValue = step(localThreshold, center);
+    gl_FragColor = vec4(vec3(binaryValue), 1.0);
   }
 `;
