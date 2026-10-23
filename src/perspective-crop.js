@@ -194,8 +194,11 @@ export async function renderAdaptiveThresholdAsync({
     }
 
     gl.uniform2f(texelSizeLocation, 1 / width, 1 / height);
-    gl.uniform1f(sampleStepLocation, 8);
-    gl.uniform1f(biasLocation, 0.08);
+    // Use a wider local background estimate and require a clearer contrast
+    // before classifying a pixel as ink. This suppresses tiny paper speckles
+    // without changing the adaptive-threshold flow.
+    gl.uniform1f(sampleStepLocation, 12);
+    gl.uniform1f(biasLocation, 0.12);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.finish?.();
@@ -610,7 +613,33 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     }
 
     float localThreshold = (localSum / 9.0) - uThresholdBias;
-    float binaryValue = step(localThreshold, center);
-    gl_FragColor = vec4(vec3(binaryValue), 1.0);
+    float centerIsInk = 1.0 - step(localThreshold, center);
+
+    // Remove isolated dark pixels from the paper while keeping connected ink
+    // strokes. Use a closer support sample so thin text strokes are not
+    // accidentally treated as isolated pixels.
+    float inkNeighborCount = 0.0;
+    vec2 supportStep = uTexelSize;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        vec2 sampleUv = clamp(
+          vOutputUv + vec2(float(x), float(y)) * supportStep,
+          vec2(0.0),
+          vec2(1.0)
+        );
+        float neighbor = luminance(texture2D(uTexture, sampleUv).rgb);
+        inkNeighborCount += 1.0 - step(localThreshold, neighbor);
+      }
+    }
+
+    // Preserve strongly dark text pixels even when anti-aliasing makes their
+    // immediate neighbors light, and fill small white gaps inside a stroke.
+    float strongInk = 1.0 - step(localThreshold - 0.04, center);
+    float supportedInk = centerIsInk * step(2.0, inkNeighborCount);
+    float gapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
+    float inkMask = max(strongInk, max(supportedInk, gapFill));
+    float inkColor = 0.3019608; // #4d4d4d
+    gl_FragColor = vec4(mix(vec3(1.0), vec3(inkColor), inkMask), 1.0);
   }
 `;
