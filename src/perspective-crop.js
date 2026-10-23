@@ -605,23 +605,60 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return max(0.0, darkestChannel - redInkDominance(color) * 0.75);
   }
 
-  float sampleInkIntensity(vec2 uv) {
-    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
-    return inkIntensity(texture2D(uTexture, clampedUv).rgb);
+  float paperBrightness(vec3 color) {
+    return min(color.r, min(color.g, color.b));
   }
 
-  float blurredIntensity(vec2 centerUv) {
+  float samplePaperBrightness(vec2 uv) {
+    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
+    return paperBrightness(texture2D(uTexture, clampedUv).rgb);
+  }
+
+  float estimateLocalIllumination(vec2 centerUv) {
+    // Sample a broad neighborhood. Taking the brightest sample makes dark
+    // text contribute very little to the illumination estimate while still
+    // tracking slow page-wide shadows.
+    vec2 illuminationStep = uTexelSize * 48.0;
+    float illumination = 0.0;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        illumination = max(
+          illumination,
+          samplePaperBrightness(
+            centerUv + vec2(float(x), float(y)) * illuminationStep
+          )
+        );
+      }
+    }
+
+    return max(illumination, 0.5);
+  }
+
+  vec3 correctForIllumination(vec3 color, float illumination, float enabled) {
+    float scale = min(1.45, 1.0 / max(illumination, 0.5));
+    scale = mix(1.0, scale, enabled);
+    return min(color * scale, vec3(1.0));
+  }
+
+  float sampleInkIntensity(vec2 uv, float illumination, float enabled) {
+    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
+    vec3 color = texture2D(uTexture, clampedUv).rgb;
+    return inkIntensity(correctForIllumination(color, illumination, enabled));
+  }
+
+  float blurredIntensity(vec2 centerUv, float illumination, float enabled) {
     vec2 blurStep = uTexelSize;
-    float center = sampleInkIntensity(centerUv);
+    float center = sampleInkIntensity(centerUv, illumination, enabled);
     float sum = center * 4.0;
-    sum += sampleInkIntensity(centerUv + vec2(-blurStep.x, 0.0));
-    sum += sampleInkIntensity(centerUv + vec2(blurStep.x, 0.0));
-    sum += sampleInkIntensity(centerUv + vec2(0.0, -blurStep.y));
-    sum += sampleInkIntensity(centerUv + vec2(0.0, blurStep.y));
+    sum += sampleInkIntensity(centerUv + vec2(-blurStep.x, 0.0), illumination, enabled);
+    sum += sampleInkIntensity(centerUv + vec2(blurStep.x, 0.0), illumination, enabled);
+    sum += sampleInkIntensity(centerUv + vec2(0.0, -blurStep.y), illumination, enabled);
+    sum += sampleInkIntensity(centerUv + vec2(0.0, blurStep.y), illumination, enabled);
     return sum / 8.0;
   }
 
-  float estimateGlobalIntensity() {
+  float estimateGlobalBackgroundBrightness() {
     float sum = 0.0;
 
     for (int x = 0; x < 3; x += 1) {
@@ -630,7 +667,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           (float(x) + 0.5) / 3.0,
           (float(y) + 0.5) / 3.0
         );
-        sum += inkIntensity(texture2D(uTexture, sampleUv).rgb);
+        sum += paperBrightness(texture2D(uTexture, sampleUv).rgb);
       }
     }
 
@@ -639,12 +676,27 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
 
   void main() {
     vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
-    float originalCenter = inkIntensity(centerColor);
-    float blurredCenter = blurredIntensity(vOutputUv);
-    // Conservative unsharp masking: a small amount of local contrast is
-    // restored after the blur so text edges become clearer without halos.
+    // Determine polarity from the paper/background brightness, not ink
+    // intensity. Saturated red ink can look very dark to the ink detector and
+    // must not make a mostly white page switch into inverted mode.
+    float backgroundIsDark = 1.0 - step(0.45, estimateGlobalBackgroundBrightness());
+    float illuminationCorrectionEnabled = 1.0 - backgroundIsDark;
+    float localIllumination = estimateLocalIllumination(vOutputUv);
+    vec3 correctedCenterColor = correctForIllumination(
+      centerColor,
+      localIllumination,
+      illuminationCorrectionEnabled
+    );
+    float originalCenter = inkIntensity(correctedCenterColor);
+    float blurredCenter = blurredIntensity(
+      vOutputUv,
+      localIllumination,
+      illuminationCorrectionEnabled
+    );
+    // Very conservative unsharp masking: restore only a small amount of local
+    // contrast so text edges stay clear without creating dark halos.
     float center = clamp(
-      originalCenter + 0.28 * (originalCenter - blurredCenter),
+      originalCenter + 0.12 * (originalCenter - blurredCenter),
       0.0,
       1.0
     );
@@ -658,14 +710,17 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           vec2(0.0),
           vec2(1.0)
         );
-        localSum += inkIntensity(texture2D(uTexture, sampleUv).rgb);
+        localSum += sampleInkIntensity(
+          sampleUv,
+          localIllumination,
+          illuminationCorrectionEnabled
+        );
       }
     }
 
     float localMean = localSum / 9.0;
     float darkInkThreshold = localMean - uThresholdBias;
     float lightInkThreshold = localMean + uThresholdBias;
-    float backgroundIsDark = 1.0 - step(0.55, estimateGlobalIntensity());
     float darkCenterIsInk = 1.0 - step(darkInkThreshold, center);
     float lightCenterIsInk = step(lightInkThreshold, center);
     float centerIsInk = mix(darkCenterIsInk, lightCenterIsInk, backgroundIsDark);
@@ -684,7 +739,12 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           vec2(1.0)
         );
         vec3 neighborColor = texture2D(uTexture, sampleUv).rgb;
-        float neighbor = inkIntensity(neighborColor);
+        vec3 correctedNeighborColor = correctForIllumination(
+          neighborColor,
+          localIllumination,
+          illuminationCorrectionEnabled
+        );
+        float neighbor = inkIntensity(correctedNeighborColor);
         float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
         float lightNeighborIsInk = step(lightInkThreshold, neighbor);
         float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
@@ -700,7 +760,12 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     float strongInk = mix(strongDarkInk, strongLightInk, backgroundIsDark);
     float supportedInk = centerIsInk * step(2.0, inkNeighborCount);
     float regularGapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
-    float redGapFill = (1.0 - centerIsInk) * step(2.0, redInkNeighborCount);
+    // Only fill red-ink gaps when the center pixel itself still carries a
+    // little red signal. This repairs anti-aliased holes without expanding
+    // the red stroke into a dark halo on neutral paper pixels.
+    float centerHasRedSignal = step(0.02, redInkDominance(centerColor));
+    float redGapFill =
+      (1.0 - centerIsInk) * centerHasRedSignal * step(2.0, redInkNeighborCount);
     float gapFill = max(regularGapFill, redGapFill);
     float inkMask = max(strongInk, max(supportedInk, gapFill));
     float inkColor = 0.3019608; // #4d4d4d
