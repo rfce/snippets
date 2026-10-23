@@ -604,6 +604,22 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return max(0.0, darkestChannel - redInkDominance(color) * 0.75);
   }
 
+  float estimateGlobalIntensity() {
+    float sum = 0.0;
+
+    for (int x = 0; x < 3; x += 1) {
+      for (int y = 0; y < 3; y += 1) {
+        vec2 sampleUv = vec2(
+          (float(x) + 0.5) / 3.0,
+          (float(y) + 0.5) / 3.0
+        );
+        sum += inkIntensity(texture2D(uTexture, sampleUv).rgb);
+      }
+    }
+
+    return sum / 9.0;
+  }
+
   void main() {
     vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
     float center = inkIntensity(centerColor);
@@ -621,12 +637,16 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
       }
     }
 
-    float localThreshold = (localSum / 9.0) - uThresholdBias;
-    float centerIsInk = 1.0 - step(localThreshold, center);
+    float localMean = localSum / 9.0;
+    float darkInkThreshold = localMean - uThresholdBias;
+    float lightInkThreshold = localMean + uThresholdBias;
+    float backgroundIsDark = 1.0 - step(0.55, estimateGlobalIntensity());
+    float darkCenterIsInk = 1.0 - step(darkInkThreshold, center);
+    float lightCenterIsInk = step(lightInkThreshold, center);
+    float centerIsInk = mix(darkCenterIsInk, lightCenterIsInk, backgroundIsDark);
 
-    // Remove isolated dark pixels from the paper while keeping connected ink
-    // strokes. Use a closer support sample so thin text strokes are not
-    // accidentally treated as isolated pixels.
+    // Remove isolated ink pixels while keeping connected strokes. Use a closer
+    // support sample so thin text strokes are not accidentally discarded.
     float inkNeighborCount = 0.0;
     float redInkNeighborCount = 0.0;
     vec2 supportStep = uTexelSize;
@@ -640,15 +660,19 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
         );
         vec3 neighborColor = texture2D(uTexture, sampleUv).rgb;
         float neighbor = inkIntensity(neighborColor);
-        float neighborIsInk = 1.0 - step(localThreshold, neighbor);
+        float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
+        float lightNeighborIsInk = step(lightInkThreshold, neighbor);
+        float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
         inkNeighborCount += neighborIsInk;
         redInkNeighborCount += neighborIsInk * step(0.08, redInkDominance(neighborColor));
       }
     }
 
-    // Preserve strongly dark text pixels even when anti-aliasing makes their
-    // immediate neighbors light, and fill small white gaps inside a stroke.
-    float strongInk = 1.0 - step(localThreshold - 0.04, center);
+    // Preserve strongly contrasted text pixels even when anti-aliasing makes
+    // their immediate neighbors light, and fill small gaps inside a stroke.
+    float strongDarkInk = 1.0 - step(darkInkThreshold - 0.04, center);
+    float strongLightInk = step(lightInkThreshold + 0.04, center);
+    float strongInk = mix(strongDarkInk, strongLightInk, backgroundIsDark);
     float supportedInk = centerIsInk * step(2.0, inkNeighborCount);
     float regularGapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
     float redGapFill = (1.0 - centerIsInk) * step(2.0, redInkNeighborCount);
