@@ -17,6 +17,7 @@ import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
+  renderMagicColorAsync,
   renderAdaptiveThresholdAsync,
   renderPerspectiveCropAsync,
 } from '@/perspective-crop';
@@ -89,6 +90,7 @@ function CameraScreen() {
   const [savedPhoto, setSavedPhoto] = useState(null);
   const [savedImageMode, setSavedImageMode] = useState('original');
   const [blackAndWhitePhoto, setBlackAndWhitePhoto] = useState(null);
+  const [magicColorPhoto, setMagicColorPhoto] = useState(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isSavingPreview, setIsSavingPreview] = useState(false);
   const [cropCorners, setCropCorners] = useState(null);
@@ -143,36 +145,63 @@ function CameraScreen() {
     setSavedPhoto(null);
     setSavedImageMode('original');
     setBlackAndWhitePhoto(null);
+    setMagicColorPhoto(null);
     setIsCameraReady(false);
     setCameraError(null);
   };
 
   const displayedSavedPhoto =
-    savedImageMode === 'blackAndWhite' && blackAndWhitePhoto ? blackAndWhitePhoto : savedPhoto;
+    savedImageMode === 'blackAndWhite' && blackAndWhitePhoto
+      ? blackAndWhitePhoto
+      : savedImageMode === 'magicColor' && magicColorPhoto
+        ? magicColorPhoto
+        : savedPhoto;
 
   const selectSavedImageMode = async (mode) => {
     setSavedImageMode(mode);
 
-    if (mode !== 'blackAndWhite' || blackAndWhitePhoto || isEnhancing || !savedPhoto) return;
+    const hasCachedPreview =
+      (mode === 'blackAndWhite' && blackAndWhitePhoto) ||
+      (mode === 'magicColor' && magicColorPhoto);
+
+    if (
+      (mode !== 'blackAndWhite' && mode !== 'magicColor') ||
+      hasCachedPreview ||
+      isEnhancing ||
+      !savedPhoto
+    ) {
+      return;
+    }
 
     setIsEnhancing(true);
 
     try {
-      const enhancedPhoto = await renderAdaptiveThresholdAsync({
-        uri: savedPhoto.uri,
-        sourceWidth: savedPhoto.width,
-        sourceHeight: savedPhoto.height,
-      });
-      setBlackAndWhitePhoto(enhancedPhoto);
+      const enhancedPhoto = mode === 'blackAndWhite'
+        ? await renderAdaptiveThresholdAsync({
+            uri: savedPhoto.uri,
+            sourceWidth: savedPhoto.width,
+            sourceHeight: savedPhoto.height,
+          })
+        : await renderMagicColorAsync({
+            uri: savedPhoto.uri,
+            sourceWidth: savedPhoto.width,
+            sourceHeight: savedPhoto.height,
+          });
+
+      if (mode === 'blackAndWhite') {
+        setBlackAndWhitePhoto(enhancedPhoto);
+      } else {
+        setMagicColorPhoto(enhancedPhoto);
+      }
     } catch (error) {
       const details = getErrorDetails(error);
-      console.error('[screen] Black & white enhancement failed', details);
+      console.error(`[screen] ${mode} enhancement failed`, details);
       setSavedImageMode('original');
       Alert.alert(
         'Enhancement failed',
         __DEV__
-          ? `We could not create the black-and-white preview.\n\n${details.message}`
-          : 'We could not create the black-and-white preview. Please try again.'
+          ? `We could not create the ${mode === 'magicColor' ? 'magic color' : 'black-and-white'} preview.\n\n${details.message}`
+          : `We could not create the ${mode === 'magicColor' ? 'magic color' : 'black-and-white'} preview. Please try again.`
       );
     } finally {
       setIsEnhancing(false);
@@ -282,6 +311,7 @@ function CameraScreen() {
       setSavedPhoto(selectedPhoto);
       setSavedImageMode('original');
       setBlackAndWhitePhoto(null);
+      setMagicColorPhoto(null);
       setCapturedPhoto(null);
       setCropCorners(null);
       setIsCameraReady(false);

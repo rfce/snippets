@@ -244,6 +244,119 @@ export async function renderAdaptiveThresholdAsync({
   }
 }
 
+export async function renderMagicColorAsync({
+  uri,
+  sourceWidth,
+  sourceHeight,
+}) {
+  if (!uri) {
+    throw new Error('A source image is required for magic-color enhancement.');
+  }
+
+  const width = sourceWidth || 1;
+  const height = sourceHeight || 1;
+  const outputSize = getScaledOutputSize(width, height);
+  console.log('[perspective-crop] Starting magic color enhancement', {
+    uri,
+    sourceWidth: width,
+    sourceHeight: height,
+    outputSize,
+  });
+
+  const GLView = getGLView();
+  const gl = await GLView.createContextAsync();
+  let sourceTexture;
+  let outputTexture;
+  let framebuffer;
+  let program;
+  let positionBuffer;
+
+  try {
+    program = createProgram(gl, VERTEX_SHADER, MAGIC_COLOR_FRAGMENT_SHADER);
+    sourceTexture = createSourceTexture(gl, uri);
+    outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
+    framebuffer = createFramebuffer(gl, outputTexture);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.viewport(0, 0, outputSize.width, outputSize.height);
+    gl.useProgram(program);
+    gl.clearColor(1, 1, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW
+    );
+
+    const positionLocation = gl.getAttribLocation(program, 'aPosition');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+
+    const texelSizeLocation = gl.getUniformLocation(program, 'uTexelSize');
+    const sampleStepLocation = gl.getUniformLocation(program, 'uSampleStep');
+    const thresholdBiasLocation = gl.getUniformLocation(program, 'uThresholdBias');
+
+    if (
+      texelSizeLocation === null ||
+      sampleStepLocation === null ||
+      thresholdBiasLocation === null
+    ) {
+      throw new Error('The magic-color shader uniforms are unavailable.');
+    }
+
+    gl.uniform2f(texelSizeLocation, 1 / width, 1 / height);
+    gl.uniform1f(sampleStepLocation, 12);
+    gl.uniform1f(thresholdBiasLocation, 0.12);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.finish?.();
+    gl.flush();
+    gl.flushEXP?.();
+    checkGlError(gl, 'rendering magic color');
+
+    const snapshot = await GLView.takeSnapshotAsync(gl, {
+      framebuffer,
+      format: 'png',
+      flip: false,
+    });
+    const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
+
+    if (!snapshotUri || typeof snapshotUri !== 'string') {
+      throw new Error('Magic-color enhancement completed without producing an image file.');
+    }
+
+    console.log('[perspective-crop] Magic color snapshot created', {
+      uri: snapshotUri,
+      width: outputSize.width,
+      height: outputSize.height,
+    });
+
+    return {
+      uri: snapshotUri,
+      width: outputSize.width,
+      height: outputSize.height,
+    };
+  } finally {
+    try {
+      if (positionBuffer) gl.deleteBuffer(positionBuffer);
+      if (framebuffer) gl.deleteFramebuffer(framebuffer);
+      if (outputTexture) gl.deleteTexture(outputTexture);
+      if (sourceTexture) gl.deleteTexture(sourceTexture);
+      if (program) gl.deleteProgram(program);
+      await GLView.destroyContextAsync(gl);
+    } catch (cleanupError) {
+      console.warn('[perspective-crop] Magic color cleanup failed', cleanupError);
+    }
+  }
+}
+
 function getGLView() {
   try {
     const module = require('expo-gl');
@@ -770,5 +883,250 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     float inkMask = max(strongInk, max(supportedInk, gapFill));
     float inkColor = 0.3019608; // #4d4d4d
     gl_FragColor = vec4(mix(vec3(1.0), vec3(inkColor), inkMask), 1.0);
+  }
+`;
+
+const MAGIC_COLOR_FRAGMENT_SHADER = `
+  precision mediump float;
+
+  uniform sampler2D uTexture;
+  uniform vec2 uTexelSize;
+  uniform float uSampleStep;
+  uniform float uThresholdBias;
+  varying vec2 vOutputUv;
+
+  float redInkDominance(vec3 color) {
+    return max(0.0, color.r - max(color.g, color.b));
+  }
+
+  float inkIntensity(vec3 color) {
+    // Use the darkest channel so saturated red, blue, and green ink remain
+    // detectable even though their luminance can be close to paper white.
+    float darkestChannel = min(color.r, min(color.g, color.b));
+    return max(0.0, darkestChannel - redInkDominance(color) * 0.75);
+  }
+
+  float paperBrightness(vec3 color) {
+    return min(color.r, min(color.g, color.b));
+  }
+
+  float luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+  }
+
+  vec3 sampleCorrectedColor(
+    vec2 uv,
+    float illumination,
+    float illuminationCorrectionEnabled
+  ) {
+    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
+    vec3 color = texture2D(uTexture, clampedUv).rgb;
+    float scale = min(1.45, 1.0 / max(illumination, 0.5));
+    scale = mix(1.0, scale, illuminationCorrectionEnabled);
+    return min(color * scale, vec3(1.0));
+  }
+
+  float samplePaperBrightness(vec2 uv) {
+    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
+    return paperBrightness(texture2D(uTexture, clampedUv).rgb);
+  }
+
+  float estimateGlobalBackgroundBrightness() {
+    float sum = 0.0;
+
+    for (int x = 0; x < 3; x += 1) {
+      for (int y = 0; y < 3; y += 1) {
+        vec2 sampleUv = vec2(
+          (float(x) + 0.5) / 3.0,
+          (float(y) + 0.5) / 3.0
+        );
+        sum += samplePaperBrightness(sampleUv);
+      }
+    }
+
+    return sum / 9.0;
+  }
+
+  float estimateLocalIllumination(vec2 centerUv) {
+    vec2 illuminationStep = uTexelSize * 48.0;
+    float sum = 0.0;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        vec2 sampleUv = clamp(
+          centerUv + vec2(float(x), float(y)) * illuminationStep,
+          vec2(0.0),
+          vec2(1.0)
+        );
+        sum += samplePaperBrightness(sampleUv);
+      }
+    }
+
+    return max(sum / 9.0, 0.5);
+  }
+
+  float sampleInkIntensity(
+    vec2 uv,
+    float illumination,
+    float illuminationCorrectionEnabled
+  ) {
+    return inkIntensity(sampleCorrectedColor(
+      uv,
+      illumination,
+      illuminationCorrectionEnabled
+    ));
+  }
+
+  float inkStrength(
+    float value,
+    float localMean,
+    float backgroundIsDark
+  ) {
+    float threshold = mix(
+      localMean - uThresholdBias,
+      localMean + uThresholdBias,
+      backgroundIsDark
+    );
+    float separation = mix(
+      threshold - value,
+      value - threshold,
+      backgroundIsDark
+    );
+    return smoothstep(-0.04, 0.08, separation);
+  }
+
+  vec3 increaseSaturation(vec3 color, float amount) {
+    float gray = luminance(color);
+    return clamp(
+      vec3(gray) + (color - vec3(gray)) * amount,
+      vec3(0.0),
+      vec3(0.995)
+    );
+  }
+
+  void main() {
+    vec3 originalCenterColor = texture2D(uTexture, vOutputUv).rgb;
+    float backgroundIsDark = 1.0 - step(
+      0.45,
+      estimateGlobalBackgroundBrightness()
+    );
+    float illuminationCorrectionEnabled = 1.0 - backgroundIsDark;
+    float localIllumination = estimateLocalIllumination(vOutputUv);
+    vec3 correctedCenterColor = sampleCorrectedColor(
+      vOutputUv,
+      localIllumination,
+      illuminationCorrectionEnabled
+    );
+    float center = inkIntensity(correctedCenterColor);
+    float localSum = 0.0;
+    vec2 sampleOffset = uTexelSize * uSampleStep;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        vec2 sampleUv = clamp(
+          vOutputUv + vec2(float(x), float(y)) * sampleOffset,
+          vec2(0.0),
+          vec2(1.0)
+        );
+        localSum += sampleInkIntensity(
+          sampleUv,
+          localIllumination,
+          illuminationCorrectionEnabled
+        );
+      }
+    }
+
+    float localMean = localSum / 9.0;
+    float centerInk = inkStrength(center, localMean, backgroundIsDark);
+    float strongInk = smoothstep(0.04, 0.14, mix(
+      (localMean - uThresholdBias) - center,
+      center - (localMean + uThresholdBias),
+      backgroundIsDark
+    ));
+
+    // Build a connected-stroke support mask exactly like the black-and-white
+    // path, but keep the original color for pixels that survive the mask.
+    float inkNeighborCount = 0.0;
+    float redInkNeighborCount = 0.0;
+    vec3 neighborInkColor = vec3(0.0);
+    float neighborInkWeight = 0.0;
+    vec2 supportStep = uTexelSize;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        vec2 sampleUv = clamp(
+          vOutputUv + vec2(float(x), float(y)) * supportStep,
+          vec2(0.0),
+          vec2(1.0)
+        );
+        vec3 neighborColor = sampleCorrectedColor(
+          sampleUv,
+          localIllumination,
+          illuminationCorrectionEnabled
+        );
+        float neighborIntensity = inkIntensity(neighborColor);
+        float neighborStrength = inkStrength(
+          neighborIntensity,
+          localMean,
+          backgroundIsDark
+        );
+        inkNeighborCount += neighborStrength;
+        redInkNeighborCount += neighborStrength * smoothstep(
+          0.025,
+          0.14,
+          redInkDominance(neighborColor)
+        );
+        neighborInkColor += neighborColor * neighborStrength;
+        neighborInkWeight += neighborStrength;
+      }
+    }
+
+    float supportedInk = centerInk * smoothstep(1.5, 2.8, inkNeighborCount);
+    float regularGapFill = (1.0 - centerInk) *
+      smoothstep(2.5, 4.5, inkNeighborCount);
+    float redCenterSignal = smoothstep(
+      0.025,
+      0.14,
+      redInkDominance(originalCenterColor)
+    );
+    float redGapFill = (1.0 - centerInk) *
+      smoothstep(2.0, 4.0, redInkNeighborCount) *
+      (1.0 - redCenterSignal);
+    float inkMask = max(
+      strongInk,
+      max(supportedInk, max(regularGapFill, redGapFill))
+    );
+
+    vec3 estimatedInkColor = neighborInkColor / max(neighborInkWeight, 0.001);
+    vec3 inkColor = mix(
+      correctedCenterColor,
+      estimatedInkColor,
+      max(regularGapFill, redGapFill)
+    );
+    inkColor = increaseSaturation(inkColor, 1.10);
+
+    float redInkSignal = smoothstep(
+      0.025,
+      0.14,
+      redInkDominance(inkColor)
+    );
+    vec3 brighterRed = clamp(
+      vec3(
+        inkColor.r * 1.14 + 0.02,
+        inkColor.g * 0.84,
+        inkColor.b * 0.84
+      ),
+      vec3(0.0),
+      vec3(0.995)
+    );
+    inkColor = mix(inkColor, brighterRed, 0.75 * redInkSignal);
+
+    // The matte is intentionally white everywhere outside connected ink.
+    // This is the key difference from a color filter: paper, shadows, wood,
+    // and other background pixels never pass through to the output image.
+    gl_FragColor = vec4(
+      mix(vec3(1.0), clamp(inkColor, vec3(0.0), vec3(0.995)), inkMask),
+      1.0
+    );
   }
 `;
