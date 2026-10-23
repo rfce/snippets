@@ -1,4 +1,7 @@
-const MAX_OUTPUT_EDGE = 2048;
+// Keep the processed document close to the camera's native resolution so
+// letters do not lose pixels before the user zooms in. PNG snapshots below
+// preserve those pixels without introducing JPEG block artifacts.
+const MAX_OUTPUT_EDGE = 4096;
 
 export async function renderPerspectiveCropAsync({
   uri,
@@ -95,8 +98,7 @@ export async function renderPerspectiveCropAsync({
     console.log('[perspective-crop] Taking framebuffer snapshot');
     const snapshot = await GLView.takeSnapshotAsync(gl, {
       framebuffer,
-      format: 'jpeg',
-      compress: 0.95,
+      format: 'png',
       flip: false,
     });
     console.log('[perspective-crop] Snapshot created', {
@@ -208,8 +210,7 @@ export async function renderAdaptiveThresholdAsync({
 
     const snapshot = await GLView.takeSnapshotAsync(gl, {
       framebuffer,
-      format: 'jpeg',
-      compress: 0.95,
+      format: 'png',
       flip: false,
     });
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
@@ -604,6 +605,22 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return max(0.0, darkestChannel - redInkDominance(color) * 0.75);
   }
 
+  float sampleInkIntensity(vec2 uv) {
+    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
+    return inkIntensity(texture2D(uTexture, clampedUv).rgb);
+  }
+
+  float blurredIntensity(vec2 centerUv) {
+    vec2 blurStep = uTexelSize;
+    float center = sampleInkIntensity(centerUv);
+    float sum = center * 4.0;
+    sum += sampleInkIntensity(centerUv + vec2(-blurStep.x, 0.0));
+    sum += sampleInkIntensity(centerUv + vec2(blurStep.x, 0.0));
+    sum += sampleInkIntensity(centerUv + vec2(0.0, -blurStep.y));
+    sum += sampleInkIntensity(centerUv + vec2(0.0, blurStep.y));
+    return sum / 8.0;
+  }
+
   float estimateGlobalIntensity() {
     float sum = 0.0;
 
@@ -622,7 +639,15 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
 
   void main() {
     vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
-    float center = inkIntensity(centerColor);
+    float originalCenter = inkIntensity(centerColor);
+    float blurredCenter = blurredIntensity(vOutputUv);
+    // Conservative unsharp masking: a small amount of local contrast is
+    // restored after the blur so text edges become clearer without halos.
+    float center = clamp(
+      originalCenter + 0.28 * (originalCenter - blurredCenter),
+      0.0,
+      1.0
+    );
     float localSum = 0.0;
     vec2 sampleOffset = uTexelSize * uSampleStep;
 
