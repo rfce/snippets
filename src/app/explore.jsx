@@ -17,6 +17,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { SelectionContext } from '@/context/SelectionContext';
+import { TabBarContext } from '@/context/TabBarContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSnippetsAlbum } from '@/snippets-library';
 
@@ -36,6 +37,7 @@ export default function ExploreScreen() {
   const theme = useTheme();
   const safeAreaInsets = useSafeAreaInsets();
   const { selectedImageIds, setSelectedImageIds } = useContext(SelectionContext);
+  const { setIsTabBarHidden } = useContext(TabBarContext);
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
   const hasMoreRef = useRef(true);
@@ -57,6 +59,16 @@ export default function ExploreScreen() {
     savedImages.length > 0 &&
     !hasMoreImages &&
     savedImages.every((image) => selectedImageIds.has(getAssetKey(image)));
+
+  useEffect(() => {
+    setIsTabBarHidden(isSelectionMode);
+  }, [isSelectionMode, setIsTabBarHidden]);
+
+  useEffect(() => {
+    return () => {
+      setIsTabBarHidden(false);
+    };
+  }, [setIsTabBarHidden]);
 
   useEffect(() => {
     mediaPermissionRef.current = mediaPermission;
@@ -193,6 +205,17 @@ export default function ExploreScreen() {
     try {
       if (!mediaLibraryModule?.Asset?.delete || !mediaLibraryModule?.Asset) {
         throw new Error('The media-library delete API is unavailable in this build.');
+      }
+
+      let permission = permissionRef.current ?? mediaPermissionRef.current;
+      if (!permission?.granted) {
+        permission = await requestMediaPermission?.();
+        permissionRef.current = permission;
+        mediaPermissionRef.current = permission;
+      }
+
+      if (!permission?.granted) {
+        throw new Error('Photo-library permission is required to delete saved images.');
       }
 
       const assetsToDelete = selectedImages.map((image) => new mediaLibraryModule.Asset(image.id));
@@ -672,7 +695,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   galleryRow: {
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
     marginBottom: Spacing.one,
   },
   galleryTile: {

@@ -1,17 +1,20 @@
 import { NativeTabs } from 'expo-router/native-tabs';
-import { memo } from 'react';
+import { memo, useContext } from 'react';
 import { useColorScheme as useNativeColorScheme } from 'react-native';
 
 import { Colors } from '@/constants/theme';
+import { TabBarContext } from '@/context/TabBarContext';
 
 function AppTabs() {
   const scheme = useNativeColorScheme();
   const colors = Colors[scheme === 'dark' ? 'dark' : 'light'];
+  const { isTabBarHidden } = useContext(TabBarContext);
 
   return (
     <NativeTabs
       backgroundColor={colors.background}
       indicatorColor={colors.backgroundElement}
+      hidden={isTabBarHidden}
       labelStyle={{ selected: { color: colors.text } }}>
       <NativeTabs.Trigger name="index" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>

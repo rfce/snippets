@@ -556,7 +556,11 @@ function CameraScreen() {
     return (
       <>
         <View style={styles.savedImageContainer}>
-          <SafeAreaView style={styles.savedImageSafeArea}>
+          <SafeAreaView
+            style={[
+              styles.savedImageSafeArea,
+              { paddingBottom: BottomTabInset + Spacing.three },
+            ]}>
             <ThemedText type="subtitle" style={styles.savedImageTitle}>
               Saved image
             </ThemedText>
@@ -653,7 +657,11 @@ function CameraScreen() {
     return (
       <>
         <View style={styles.reviewContainer}>
-          <SafeAreaView style={styles.reviewSafeArea}>
+          <SafeAreaView
+            style={[
+              styles.reviewSafeArea,
+              { paddingBottom: BottomTabInset + Spacing.three },
+            ]}>
             <ThemedText type="subtitle" style={styles.reviewTitle}>
               Review capture
             </ThemedText>

@@ -5,21 +5,24 @@ import {
   TabSlot,
 } from 'expo-router/ui';
 import { SymbolView } from 'expo-symbols';
-import { memo } from 'react';
+import { memo, useContext } from 'react';
 import { Pressable, useColorScheme, View, StyleSheet } from 'react-native';
 
 import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+import { TabBarContext } from '@/context/TabBarContext';
 
 import { ExternalLink } from './external-link';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
 
 function AppTabs() {
+  const { isTabBarHidden } = useContext(TabBarContext);
+
   return (
     <Tabs>
       <TabSlot style={{ height: '100%' }} />
       <TabList asChild>
-        <CustomTabList>
+        <CustomTabList hidden={isTabBarHidden}>
           <TabTrigger name="home" href="/" asChild>
             <TabButton>Home</TabButton>
           </TabTrigger>
@@ -51,12 +54,12 @@ export function TabButton({ children, isFocused, ...props }) {
   );
 }
 
-export function CustomTabList(props) {
+export function CustomTabList({ hidden, ...props }) {
   const scheme = useColorScheme();
   const colors = Colors[scheme === 'dark' ? 'dark' : 'light'];
 
   return (
-    <View {...props} style={styles.tabListContainer}>
+    <View {...props} style={[styles.tabListContainer, hidden && styles.hiddenTabList]}>
       <ThemedView type="backgroundElement" style={styles.innerContainer}>
         <ThemedText type="smallBold" style={styles.brandText}>
           Expo Starter
@@ -87,6 +90,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     flexDirection: 'row',
+  },
+  hiddenTabList: {
+    display: 'none',
   },
   innerContainer: {
     paddingVertical: Spacing.two,

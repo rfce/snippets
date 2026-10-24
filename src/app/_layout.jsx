@@ -1,6 +1,6 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useColorScheme as useNativeColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
@@ -13,11 +13,16 @@ SplashScreen.preventAutoHideAsync();
 export default function TabLayout() {
   const colorScheme = useNativeColorScheme();
   const [selectedImageIds, setSelectedImageIds] = useState(() => new Set());
+  const [isTabBarHidden, setIsTabBarHidden] = useState(false);
+  const tabBarContextValue = useMemo(
+    () => ({ isTabBarHidden, setIsTabBarHidden }),
+    [isTabBarHidden]
+  );
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <AnimatedSplashOverlay />
-      <TabBarContext.Provider value={{}}>
+      <TabBarContext.Provider value={tabBarContextValue}>
         <SelectionContext.Provider value={{ selectedImageIds, setSelectedImageIds }}>
           <AppTabs />
         </SelectionContext.Provider>
