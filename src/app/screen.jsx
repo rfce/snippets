@@ -24,6 +24,7 @@ import {
   renderAdaptiveThresholdAsync,
   renderPerspectiveCropAsync,
 } from '@/perspective-crop';
+import { saveToSnippetsAlbum } from '@/snippets-library';
 
 const cameraModule = getCameraModule();
 const mediaLibraryModule = getMediaLibraryModule();
@@ -369,11 +370,6 @@ function CameraScreen() {
   const saveSavedImage = async () => {
     if (!displayedSavedPhoto?.uri || isSavingPreview || isEnhancing) return;
 
-    if (savedImageMode === 'original') {
-      closeSavedPhoto();
-      return;
-    }
-
     setIsSavingPreview(true);
 
     try {
@@ -382,21 +378,21 @@ function CameraScreen() {
         permission = await requestMediaPermission();
       }
 
-      if (!permission.granted) {
+      if (!permission?.granted) {
         Alert.alert('Permission needed', 'Allow photo access to save this image.');
         return;
       }
 
-      await mediaLibraryModule.Asset.create(displayedSavedPhoto.uri);
-      console.log('[screen] Selected image preview saved', {
+      await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
+      console.log('[screen] Final image saved', {
         mode: savedImageMode,
         uri: displayedSavedPhoto.uri,
       });
       closeSavedPhoto();
     } catch (error) {
       const details = getErrorDetails(error);
-      console.error('[screen] Selected image save failed', details);
-      reportDiagnostic('Save selected image', error, {
+      console.error('[screen] Final image save failed', details);
+      reportDiagnostic('Save final image', error, {
         mode: savedImageMode,
         sourceUri: displayedSavedPhoto?.uri ?? null,
       });
@@ -405,13 +401,13 @@ function CameraScreen() {
     }
   };
 
-  const savePhoto = async () => {
+  const continueToSavedImage = async () => {
     if (!capturedPhoto?.uri || isCapturing) return;
 
     setIsCapturing(true);
     const customCrop = hasCustomCrop(cropCorners);
 
-    console.log('[screen] Save requested', {
+    console.log('[screen] Next requested', {
       hasCapturedPhoto: Boolean(capturedPhoto.uri),
       sourceWidth: capturedPhoto.width ?? null,
       sourceHeight: capturedPhoto.height ?? null,
@@ -420,20 +416,9 @@ function CameraScreen() {
     });
 
     try {
-      if (Platform.OS === 'web') {
-        console.warn('[screen] Perspective crop save skipped on web.');
-        Alert.alert('Not available', 'Saving photos is available on a mobile device.');
-        return;
-      }
-
-      let permission = mediaPermission;
-      if (!permission?.granted) {
-        permission = await requestMediaPermission();
-      }
-
-      if (!permission.granted) {
-        console.warn('[screen] Media-library permission was not granted.');
-        Alert.alert('Permission needed', 'Allow photo access to save captured images.');
+      if (customCrop && Platform.OS === 'web') {
+        console.warn('[screen] Perspective crop skipped on web.');
+        Alert.alert('Not available', 'Perspective cropping is available on a mobile device.');
         return;
       }
 
@@ -446,26 +431,13 @@ function CameraScreen() {
           })
         : capturedPhoto;
 
-      console.log('[screen] Image ready for media-library save', {
+      console.log('[screen] Image ready for enhancement', {
         uriAvailable: Boolean(selectedPhoto?.uri),
         width: selectedPhoto?.width ?? null,
         height: selectedPhoto?.height ?? null,
         customCrop,
       });
 
-      const savedAsset = await mediaLibraryModule.Asset.create(selectedPhoto.uri);
-      const savedWidth = typeof savedAsset?.getWidth === 'function'
-        ? await savedAsset.getWidth()
-        : savedAsset?.width ?? selectedPhoto.width ?? null;
-      const savedHeight = typeof savedAsset?.getHeight === 'function'
-        ? await savedAsset.getHeight()
-        : savedAsset?.height ?? selectedPhoto.height ?? null;
-      console.log('[screen] Media-library asset created', {
-        id: savedAsset?.id ?? null,
-        uri: savedAsset?.uri ?? selectedPhoto.uri,
-        width: savedWidth,
-        height: savedHeight,
-      });
       setSavedPhoto(selectedPhoto);
       setSavedImageMode('original');
       setBlackAndWhitePhoto(null);
@@ -473,14 +445,14 @@ function CameraScreen() {
       setCapturedPhoto(null);
       setCropCorners(null);
       setIsCameraReady(false);
-      console.log('[screen] Image saved successfully.');
+      console.log('[screen] Image prepared for final save.');
     } catch (error) {
       const details = getErrorDetails(error);
-      console.error('[screen] Save failed', details);
+      console.error('[screen] Preparing image failed', details);
       if (details.stack) {
         console.error('[screen] Save failed stack\n' + details.stack);
       }
-      reportDiagnostic('Save captured image', error, {
+      reportDiagnostic('Prepare captured image', error, {
         sourceUri: capturedPhoto?.uri ?? null,
         sourceWidth: capturedPhoto?.width ?? null,
         sourceHeight: capturedPhoto?.height ?? null,
@@ -719,10 +691,10 @@ function CameraScreen() {
               </Pressable>
 
               <Pressable
-                accessibilityLabel="Save captured image"
+                accessibilityLabel="Next"
                 accessibilityRole="button"
                 disabled={isCapturing}
-                onPress={savePhoto}
+                onPress={continueToSavedImage}
                 style={({ pressed }) => [
                   styles.actionButton,
                   styles.saveButton,
@@ -733,7 +705,7 @@ function CameraScreen() {
                   <ActivityIndicator color={Colors.light.background} />
                 ) : (
                   <ThemedText type="smallBold" style={styles.saveButtonText}>
-                    Save
+                    Next
                   </ThemedText>
                 )}
               </Pressable>
