@@ -1,13 +1,22 @@
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Pressable,
+  Share,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+import { TabBarContext } from '@/context/TabBarContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSnippetsAlbum } from '@/snippets-library';
 
@@ -26,18 +35,36 @@ function getMediaLibraryModule() {
 export default function ExploreScreen() {
   const theme = useTheme();
   const safeAreaInsets = useSafeAreaInsets();
+  const { setIsTabBarHidden, selectedImageIds, setSelectedImageIds } = useContext(TabBarContext);
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
   const hasMoreRef = useRef(true);
   const permissionRef = useRef(null);
+  const mediaPermissionRef = useRef(null);
+  const ignoreNextPressRef = useRef(false);
+  const ignoreNextPressTimerRef = useRef(null);
   const [mediaPermission, requestMediaPermission] = useMediaPermissions({
     writeOnly: false,
     granularPermissions: ['photo'],
   });
   const [savedImages, setSavedImages] = useState([]);
   const [hasMoreImages, setHasMoreImages] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const isSelectionMode = selectedImageIds.size > 0;
+  const allImagesSelected =
+    savedImages.length > 0 &&
+    !hasMoreImages &&
+    savedImages.every((image) => selectedImageIds.has(getAssetKey(image)));
+
+  useEffect(() => {
+    mediaPermissionRef.current = mediaPermission;
+  }, [mediaPermission]);
+
+  useEffect(() => {
+    setIsTabBarHidden(isSelectionMode);
+  }, [isSelectionMode, setIsTabBarHidden]);
 
   const loadSavedImages = useCallback(async (reset = false) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return;
@@ -55,7 +82,7 @@ export default function ExploreScreen() {
         throw new Error('The media-library gallery API is unavailable in this build.');
       }
 
-      let permission = permissionRef.current ?? mediaPermission;
+      let permission = permissionRef.current ?? mediaPermissionRef.current;
       if (!permission?.granted) {
         permission = await requestMediaPermission?.();
         permissionRef.current = permission;
@@ -97,15 +124,138 @@ export default function ExploreScreen() {
       loadingRef.current = false;
       setIsLoading(false);
     }
-  }, [mediaPermission, requestMediaPermission]);
+  }, [requestMediaPermission]);
 
   useFocusEffect(
     useCallback(() => {
       loadSavedImages(true);
-    }, [loadSavedImages])
+
+      return () => {
+        setIsTabBarHidden(false);
+        if (ignoreNextPressTimerRef.current) {
+          clearTimeout(ignoreNextPressTimerRef.current);
+          ignoreNextPressTimerRef.current = null;
+        }
+        ignoreNextPressRef.current = false;
+      };
+    }, [loadSavedImages, setIsTabBarHidden])
   );
 
-  const bottomInset = safeAreaInsets.bottom + BottomTabInset + Spacing.three;
+  const startSelection = (image) => {
+    setSelectedImageIds(new Set([getAssetKey(image)]));
+  };
+
+  const toggleSelection = (image) => {
+    setSelectedImageIds((current) => {
+      const next = new Set(current);
+      const key = getAssetKey(image);
+
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+
+      return next;
+    });
+  };
+
+  const clearSelection = () => {
+    setSelectedImageIds(new Set());
+  };
+
+  const selectAllImages = async () => {
+    if (isLoading || isDeleting) return;
+
+    let attempts = 0;
+    while (hasMoreRef.current && attempts < 100) {
+      await loadSavedImages(false);
+      attempts += 1;
+    }
+
+    setSelectedImageIds(new Set(assetsRef.current.map(getAssetKey)));
+  };
+
+  const toggleSelectAll = () => {
+    if (allImagesSelected) {
+      clearSelection();
+      return;
+    }
+
+    selectAllImages();
+  };
+
+  const getSelectedImages = () => {
+    return assetsRef.current.filter((image) => selectedImageIds.has(getAssetKey(image)));
+  };
+
+  const deleteSelectedImages = async () => {
+    const selectedImages = getSelectedImages();
+    if (!selectedImages.length || isDeleting) return;
+
+    setIsDeleting(true);
+
+    try {
+      if (!mediaLibraryModule?.Asset?.delete || !mediaLibraryModule?.Asset) {
+        throw new Error('The media-library delete API is unavailable in this build.');
+      }
+
+      const assetsToDelete = selectedImages.map((image) => new mediaLibraryModule.Asset(image.id));
+      await mediaLibraryModule.Asset.delete(assetsToDelete);
+
+      const deletedIds = new Set(selectedImages.map(getAssetKey));
+      const remainingImages = assetsRef.current.filter((image) => !deletedIds.has(getAssetKey(image)));
+      assetsRef.current = remainingImages;
+      setSavedImages(remainingImages);
+      clearSelection();
+      setLoadError(null);
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const confirmDeleteSelectedImages = () => {
+    const selectedCount = selectedImageIds.size;
+    if (!selectedCount || isDeleting) return;
+
+    Alert.alert(
+      'Delete saved images?',
+      `This will permanently delete ${selectedCount} ${selectedCount === 1 ? 'image' : 'images'}.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: deleteSelectedImages },
+      ]
+    );
+  };
+
+  const shareSelectedImages = async () => {
+    const selectedImages = getSelectedImages();
+    if (!selectedImages.length || isDeleting) return;
+
+    if (selectedImages.length > 1) {
+      Alert.alert(
+        'Share images',
+        'The current app build can share one local image at a time. Select one image to continue.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    try {
+      await Share.share({
+        title: 'Share Snippets image',
+        url: selectedImages[0].uri,
+      });
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    }
+  };
+
+  const bottomInset = isSelectionMode
+    ? safeAreaInsets.bottom + 96
+    : safeAreaInsets.bottom + BottomTabInset + Spacing.three;
 
   return (
     <ThemedView style={styles.container}>
@@ -122,22 +272,75 @@ export default function ExploreScreen() {
           ]}
           columnWrapperStyle={styles.galleryRow}
           renderItem={({ item }) => (
-            <View style={styles.galleryTile}>
+            <Pressable
+              accessibilityLabel={
+                isSelectionMode
+                  ? `${selectedImageIds.has(getAssetKey(item)) ? 'Unselect' : 'Select'} ${item.fileName || 'saved image'}`
+                  : `Select ${item.fileName || 'saved image'}`
+              }
+              accessibilityRole="button"
+              delayLongPress={300}
+              onLongPress={() => {
+                if (!isSelectionMode) {
+                  ignoreNextPressRef.current = true;
+                  if (ignoreNextPressTimerRef.current) {
+                    clearTimeout(ignoreNextPressTimerRef.current);
+                  }
+                  ignoreNextPressTimerRef.current = setTimeout(() => {
+                    ignoreNextPressRef.current = false;
+                    ignoreNextPressTimerRef.current = null;
+                  }, 750);
+                  startSelection(item);
+                }
+              }}
+              onPress={() => {
+                if (ignoreNextPressRef.current) {
+                  ignoreNextPressRef.current = false;
+                  if (ignoreNextPressTimerRef.current) {
+                    clearTimeout(ignoreNextPressTimerRef.current);
+                    ignoreNextPressTimerRef.current = null;
+                  }
+                  return;
+                }
+
+                if (isSelectionMode) toggleSelection(item);
+              }}
+              style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
               <Image
                 accessibilityLabel={item.fileName || 'Saved image'}
                 contentFit="cover"
                 source={{ uri: item.uri }}
                 style={styles.galleryImage}
               />
-            </View>
+              {selectedImageIds.has(getAssetKey(item)) && (
+                <View style={styles.selectionCheckmark}>
+                  <SymbolView
+                    name={{ ios: 'checkmark', android: 'check', web: 'check' }}
+                    size={16}
+                    tintColor={Colors.light.background}
+                  />
+                </View>
+              )}
+            </Pressable>
           )}
           ListHeaderComponent={
-            <View style={styles.header}>
-              <ThemedText type="title">Saved images</ThemedText>
-              <ThemedText themeColor="textSecondary" style={styles.subtitle}>
-                Your previously saved images
-              </ThemedText>
-            </View>
+            isSelectionMode ? (
+              <SelectionHeader
+                selectedCount={selectedImageIds.size}
+                allSelected={allImagesSelected}
+                onClose={clearSelection}
+                onToggleSelectAll={toggleSelectAll}
+                isLoading={isLoading}
+                textColor={theme.text}
+              />
+            ) : (
+              <View style={styles.header}>
+                <ThemedText type="title">Saved images</ThemedText>
+                <ThemedText themeColor="textSecondary" style={styles.subtitle}>
+                  Your previously saved images
+                </ThemedText>
+              </View>
+            )
           }
           ListEmptyComponent={
             <ExploreEmptyState
@@ -160,10 +363,97 @@ export default function ExploreScreen() {
           onEndReached={() => loadSavedImages(false)}
           onEndReachedThreshold={0.6}
           onRefresh={() => loadSavedImages(true)}
-          refreshing={isLoading && savedImages.length > 0}
+          refreshing={isLoading && savedImages.length > 0 && !isSelectionMode}
         />
       </SafeAreaView>
+      {isSelectionMode && (
+        <SelectionActionBar
+          bottomInset={safeAreaInsets.bottom}
+          disabled={isDeleting}
+          onDelete={confirmDeleteSelectedImages}
+          onShare={shareSelectedImages}
+          backgroundColor={theme.background}
+          textColor={theme.text}
+        />
+      )}
     </ThemedView>
+  );
+}
+
+function SelectionHeader({
+  selectedCount,
+  allSelected,
+  onClose,
+  onToggleSelectAll,
+  isLoading,
+  textColor,
+}) {
+  return (
+    <View style={styles.selectionHeader}>
+      <Pressable
+        accessibilityLabel="Close image selection"
+        accessibilityRole="button"
+        onPress={onClose}
+        style={({ pressed }) => [styles.headerIconButton, pressed && styles.pressed]}>
+        <SymbolView
+          name={{ ios: 'xmark', android: 'close', web: 'close' }}
+          size={22}
+          tintColor={textColor}
+        />
+      </Pressable>
+      <ThemedText type="subtitle" style={styles.selectedCountText}>
+        {selectedCount} selected
+      </ThemedText>
+      <Pressable
+        accessibilityLabel={allSelected ? 'Unselect all images' : 'Select all images'}
+        accessibilityRole="button"
+        disabled={isLoading}
+        onPress={onToggleSelectAll}
+        style={({ pressed }) => [styles.selectAllButton, pressed && styles.pressed]}>
+        <ThemedText type="smallBold" style={styles.selectAllText}>
+          {allSelected ? 'Unselect all' : 'Select all'}
+        </ThemedText>
+      </Pressable>
+    </View>
+  );
+}
+
+function SelectionActionBar({ bottomInset, disabled, onDelete, onShare, backgroundColor, textColor }) {
+  return (
+    <View
+      style={[
+        styles.selectionActionBar,
+        { backgroundColor, paddingBottom: bottomInset + Spacing.two },
+      ]}>
+      <Pressable
+        accessibilityLabel="Delete selected images"
+        accessibilityRole="button"
+        disabled={disabled}
+        onPress={onDelete}
+        style={({ pressed }) => [styles.selectionAction, pressed && styles.pressed, disabled && styles.disabled]}>
+        <SymbolView
+          name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
+          size={27}
+          tintColor="#d92d20"
+        />
+        <ThemedText type="smallBold" style={styles.deleteActionText}>
+          Delete
+        </ThemedText>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="Share selected images"
+        accessibilityRole="button"
+        disabled={disabled}
+        onPress={onShare}
+        style={({ pressed }) => [styles.selectionAction, pressed && styles.pressed, disabled && styles.disabled]}>
+        <SymbolView
+          name={{ ios: 'square.and.arrow.up', android: 'share', web: 'share' }}
+          size={27}
+          tintColor={textColor}
+        />
+        <ThemedText type="smallBold">Share</ThemedText>
+      </Pressable>
+    </View>
   );
 }
 
@@ -330,6 +620,10 @@ function getErrorMessage(error) {
   return 'Unable to load saved images.';
 }
 
+function getAssetKey(asset) {
+  return asset.id || asset.uri;
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -352,6 +646,33 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
   },
+  selectionHeader: {
+    minHeight: 72,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.one,
+    paddingTop: Spacing.two,
+    paddingBottom: Spacing.two,
+    gap: Spacing.two,
+  },
+  headerIconButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+  },
+  selectedCountText: {
+    flex: 1,
+  },
+  selectAllButton: {
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+  },
+  selectAllText: {
+    color: '#3c87f7',
+  },
   subtitle: {
     fontSize: 15,
   },
@@ -369,6 +690,41 @@ const styles = StyleSheet.create({
   galleryImage: {
     width: '100%',
     height: '100%',
+  },
+  selectionCheckmark: {
+    position: 'absolute',
+    top: Spacing.two,
+    right: Spacing.two,
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+    backgroundColor: '#3c87f7',
+    borderWidth: 2,
+    borderColor: Colors.light.background,
+  },
+  selectionActionBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    minHeight: 82,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#d0d0d0',
+  },
+  selectionAction: {
+    minWidth: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    paddingVertical: Spacing.one,
+  },
+  deleteActionText: {
+    color: '#d92d20',
   },
   emptyState: {
     flex: 1,
@@ -398,6 +754,9 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.7,
+  },
+  disabled: {
+    opacity: 0.45,
   },
   footerState: {
     alignItems: 'center',

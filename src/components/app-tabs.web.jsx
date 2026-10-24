@@ -5,31 +5,37 @@ import {
   TabSlot,
 } from 'expo-router/ui';
 import { SymbolView } from 'expo-symbols';
+import { useContext } from 'react';
 import { Pressable, useColorScheme, View, StyleSheet } from 'react-native';
 
 import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+import { TabBarContext } from '@/context/TabBarContext';
 
 import { ExternalLink } from './external-link';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
 
 export default function AppTabs() {
+  const { isTabBarHidden } = useContext(TabBarContext);
+
   return (
     <Tabs>
       <TabSlot style={{ height: '100%' }} />
-      <TabList asChild>
-        <CustomTabList>
-          <TabTrigger name="home" href="/" asChild>
-            <TabButton>Home</TabButton>
-          </TabTrigger>
-          <TabTrigger name="explore" href="/explore" asChild>
-            <TabButton>Explore</TabButton>
-          </TabTrigger>
-          <TabTrigger name="screen" href="/screen" asChild>
-            <TabButton>Screen</TabButton>
-          </TabTrigger>
-        </CustomTabList>
-      </TabList>
+      {!isTabBarHidden && (
+        <TabList asChild>
+          <CustomTabList>
+            <TabTrigger name="home" href="/" asChild>
+              <TabButton>Home</TabButton>
+            </TabTrigger>
+            <TabTrigger name="explore" href="/explore" asChild>
+              <TabButton>Explore</TabButton>
+            </TabTrigger>
+            <TabTrigger name="screen" href="/screen" asChild>
+              <TabButton>Screen</TabButton>
+            </TabTrigger>
+          </CustomTabList>
+        </TabList>
+      )}
     </Tabs>
   );
 }
