@@ -1,22 +1,19 @@
 import { NativeTabs } from 'expo-router/native-tabs';
-import { useContext } from 'react';
+import { memo } from 'react';
 import { useColorScheme as useNativeColorScheme } from 'react-native';
 
 import { Colors } from '@/constants/theme';
-import { TabBarContext } from '@/context/TabBarContext';
 
-export default function AppTabs() {
+function AppTabs() {
   const scheme = useNativeColorScheme();
   const colors = Colors[scheme === 'dark' ? 'dark' : 'light'];
-  const { isTabBarHidden } = useContext(TabBarContext);
 
   return (
     <NativeTabs
       backgroundColor={colors.background}
       indicatorColor={colors.backgroundElement}
-      hidden={isTabBarHidden}
       labelStyle={{ selected: { color: colors.text } }}>
-      <NativeTabs.Trigger name="index">
+      <NativeTabs.Trigger name="index" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           src={require('@/assets/images/tabIcons/home.png')}
@@ -24,7 +21,7 @@ export default function AppTabs() {
         />
       </NativeTabs.Trigger>
 
-      <NativeTabs.Trigger name="explore">
+      <NativeTabs.Trigger name="explore" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Label>Explore</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           src={require('@/assets/images/tabIcons/explore.png')}
@@ -32,7 +29,7 @@ export default function AppTabs() {
         />
       </NativeTabs.Trigger>
 
-      <NativeTabs.Trigger name="screen">
+      <NativeTabs.Trigger name="screen" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Label>Screen</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           sf={{ default: 'camera', selected: 'camera.fill' }}
@@ -42,3 +39,5 @@ export default function AppTabs() {
     </NativeTabs>
   );
 }
+
+export default memo(AppTabs);

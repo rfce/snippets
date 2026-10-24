@@ -16,7 +16,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
-import { TabBarContext } from '@/context/TabBarContext';
+import { SelectionContext } from '@/context/SelectionContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSnippetsAlbum } from '@/snippets-library';
 
@@ -35,7 +35,7 @@ function getMediaLibraryModule() {
 export default function ExploreScreen() {
   const theme = useTheme();
   const safeAreaInsets = useSafeAreaInsets();
-  const { setIsTabBarHidden, selectedImageIds, setSelectedImageIds } = useContext(TabBarContext);
+  const { selectedImageIds, setSelectedImageIds } = useContext(SelectionContext);
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
   const hasMoreRef = useRef(true);
@@ -61,10 +61,6 @@ export default function ExploreScreen() {
   useEffect(() => {
     mediaPermissionRef.current = mediaPermission;
   }, [mediaPermission]);
-
-  useEffect(() => {
-    setIsTabBarHidden(isSelectionMode);
-  }, [isSelectionMode, setIsTabBarHidden]);
 
   const loadSavedImages = useCallback(async (reset = false) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return;
@@ -131,14 +127,13 @@ export default function ExploreScreen() {
       loadSavedImages(true);
 
       return () => {
-        setIsTabBarHidden(false);
         if (ignoreNextPressTimerRef.current) {
           clearTimeout(ignoreNextPressTimerRef.current);
           ignoreNextPressTimerRef.current = null;
         }
         ignoreNextPressRef.current = false;
       };
-    }, [loadSavedImages, setIsTabBarHidden])
+    }, [loadSavedImages])
   );
 
   const startSelection = (image) => {
@@ -715,6 +710,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-evenly',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#d0d0d0',
+    zIndex: 20,
+    elevation: 20,
   },
   selectionAction: {
     minWidth: 120,
