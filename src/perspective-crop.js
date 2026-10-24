@@ -365,7 +365,7 @@ function getGLView() {
   } catch (error) {
     console.error('[perspective-crop] expo-gl is unavailable', error);
     throw new Error(
-      'Perspective cropping requires a development build with expo-gl installed and rebuilt.'
+      'Image processing requires expo-gl in the native build. Rebuild the preview or development client with expo-gl included.'
     );
   }
 }

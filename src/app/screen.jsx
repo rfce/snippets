@@ -5,9 +5,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Platform,
   PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   View,
 } from 'react-native';
@@ -61,6 +63,8 @@ const FLASH_MODES = [
   },
 ];
 
+const GALLERY_PAGE_SIZE = 60;
+
 export default function ScreenTab() {
   if (
     !cameraModule?.CameraView ||
@@ -72,6 +76,33 @@ export default function ScreenTab() {
   }
 
   return <CameraScreen />;
+}
+
+export function ErrorBoundary({ error, retry }) {
+  const diagnostic = createDiagnosticDetails('Screen render', error);
+
+  return (
+    <View style={styles.diagnosticScreen}>
+      <SafeAreaView style={styles.diagnosticScreenSafeArea}>
+        <ThemedText type="subtitle" style={styles.diagnosticTitle}>
+          Screen error
+        </ThemedText>
+        <ThemedText style={styles.diagnosticIntro}>
+          The screen could not render. The full preview-build error is shown below.
+        </ThemedText>
+        <DiagnosticDetails diagnostic={diagnostic} />
+        <Pressable
+          accessibilityLabel="Retry screen"
+          accessibilityRole="button"
+          onPress={retry}
+          style={({ pressed }) => [styles.diagnosticRetryButton, pressed && styles.pressed]}>
+          <ThemedText type="smallBold" style={styles.saveButtonText}>
+            Retry
+          </ThemedText>
+        </Pressable>
+      </SafeAreaView>
+    </View>
+  );
 }
 
 function CameraModuleUnavailable() {
@@ -98,9 +129,11 @@ function CameraScreen() {
   const insets = useSafeAreaInsets();
   const cameraRef = useRef(null);
   const cameraRequestStarted = useRef(false);
+  const galleryLoadingRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = cameraModule.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = mediaLibraryModule.usePermissions({
-    writeOnly: true,
+    writeOnly: false,
+    granularPermissions: ['photo'],
   });
   const [isFocused, setIsFocused] = useState(true);
   const [isCameraReady, setIsCameraReady] = useState(false);
@@ -115,6 +148,106 @@ function CameraScreen() {
   const [isSavingPreview, setIsSavingPreview] = useState(false);
   const [cropCorners, setCropCorners] = useState(null);
   const [cameraError, setCameraError] = useState(null);
+  const [diagnosticError, setDiagnosticError] = useState(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [galleryAssets, setGalleryAssets] = useState([]);
+  const [hasMoreGallery, setHasMoreGallery] = useState(true);
+  const [isLoadingGallery, setIsLoadingGallery] = useState(false);
+
+  const reportDiagnostic = useCallback((operation, error, context = {}) => {
+    const diagnostic = createDiagnosticDetails(operation, error, context);
+    console.error('[screen] Runtime diagnostic', diagnostic);
+    setDiagnosticError(diagnostic);
+    return diagnostic;
+  }, []);
+
+  const diagnosticOverlay = diagnosticError ? (
+    <VerboseErrorNotice
+      diagnostic={diagnosticError}
+      onDismiss={() => setDiagnosticError(null)}
+    />
+  ) : null;
+
+  const loadGalleryPage = useCallback(async (reset = false) => {
+    if (galleryLoadingRef.current || (!reset && !hasMoreGallery)) return;
+
+    galleryLoadingRef.current = true;
+    setIsLoadingGallery(true);
+
+    try {
+      let permission = mediaPermission;
+      if (!permission?.granted) {
+        permission = await requestMediaPermission();
+      }
+
+      if (!permission?.granted) {
+        throw new Error('Photo-library permission was not granted.');
+      }
+
+      const offset = reset ? 0 : galleryAssets.length;
+      const page = await queryGalleryPage(offset, GALLERY_PAGE_SIZE);
+      const normalizedAssets = await Promise.all(
+        page.assets.map((asset) => normalizeGalleryAsset(asset))
+      );
+      const usableAssets = normalizedAssets.filter((asset) => asset?.uri);
+
+      setGalleryAssets((current) => {
+        const next = reset ? usableAssets : [...current, ...usableAssets];
+        const uniqueAssets = [];
+        const seenIds = new Set();
+
+        next.forEach((asset) => {
+          const key = asset.id || asset.uri;
+          if (!seenIds.has(key)) {
+            seenIds.add(key);
+            uniqueAssets.push(asset);
+          }
+        });
+
+        return uniqueAssets;
+      });
+      setHasMoreGallery(page.hasNextPage ?? usableAssets.length === GALLERY_PAGE_SIZE);
+    } catch (error) {
+      reportDiagnostic('Load gallery images', error, {
+        reset,
+        requestedOffset: reset ? 0 : galleryAssets.length,
+        pageSize: GALLERY_PAGE_SIZE,
+      });
+    } finally {
+      galleryLoadingRef.current = false;
+      setIsLoadingGallery(false);
+    }
+  }, [
+    galleryAssets.length,
+    hasMoreGallery,
+    mediaPermission,
+    requestMediaPermission,
+    reportDiagnostic,
+  ]);
+
+  const openImportImage = async () => {
+    setIsImporting(true);
+    setGalleryAssets([]);
+    setHasMoreGallery(true);
+    await loadGalleryPage(true);
+  };
+
+  const closeImportImage = () => {
+    setIsImporting(false);
+    setIsCameraReady(false);
+  };
+
+  const selectGalleryImage = (asset) => {
+    setCapturedPhoto({
+      uri: asset.uri,
+      width: asset.width,
+      height: asset.height,
+      fileName: asset.fileName ?? null,
+    });
+    setCropCorners(null);
+    setIsImporting(false);
+    setIsCameraReady(false);
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -143,12 +276,17 @@ function CameraScreen() {
     try {
       const photo = await cameraRef.current.takePictureAsync({ format: 'png' });
 
-      if (!photo?.uri) return;
+      if (!photo?.uri) {
+        throw new Error('Camera capture completed without returning a photo URI.');
+      }
 
       setCapturedPhoto(photo);
       setCropCorners(null);
-    } catch {
-      Alert.alert('Capture failed', 'We could not capture the image. Please try again.');
+    } catch (error) {
+      reportDiagnostic('Capture photo', error, {
+        flashMode,
+        cameraReady: isCameraReady,
+      });
     } finally {
       setIsCapturing(false);
     }
@@ -217,12 +355,12 @@ function CameraScreen() {
       const details = getErrorDetails(error);
       console.error(`[screen] ${mode} enhancement failed`, details);
       setSavedImageMode('original');
-      Alert.alert(
-        'Enhancement failed',
-        __DEV__
-          ? `We could not create the ${mode === 'magicColor' ? 'magic color' : 'black-and-white'} preview.\n\n${details.message}`
-          : `We could not create the ${mode === 'magicColor' ? 'magic color' : 'black-and-white'} preview. Please try again.`
-      );
+      reportDiagnostic(`${mode} enhancement`, error, {
+        mode,
+        sourceUri: savedPhoto?.uri ?? null,
+        sourceWidth: savedPhoto?.width ?? null,
+        sourceHeight: savedPhoto?.height ?? null,
+      });
     } finally {
       setIsEnhancing(false);
     }
@@ -258,10 +396,10 @@ function CameraScreen() {
     } catch (error) {
       const details = getErrorDetails(error);
       console.error('[screen] Selected image save failed', details);
-      Alert.alert(
-        'Save failed',
-        __DEV__ ? `We could not save this image.\n\n${details.message}` : 'We could not save this image.'
-      );
+      reportDiagnostic('Save selected image', error, {
+        mode: savedImageMode,
+        sourceUri: displayedSavedPhoto?.uri ?? null,
+      });
     } finally {
       setIsSavingPreview(false);
     }
@@ -342,173 +480,268 @@ function CameraScreen() {
       if (details.stack) {
         console.error('[screen] Save failed stack\n' + details.stack);
       }
-      Alert.alert(
-        'Capture failed',
-        __DEV__
-          ? `We could not save the captured image.\n\n${details.message}`
-          : 'We could not save the captured image. Please try again.'
-      );
+      reportDiagnostic('Save captured image', error, {
+        sourceUri: capturedPhoto?.uri ?? null,
+        sourceWidth: capturedPhoto?.width ?? null,
+        sourceHeight: capturedPhoto?.height ?? null,
+        customCrop,
+        cropCorners,
+      });
     } finally {
       setIsCapturing(false);
     }
   };
 
-  if (savedPhoto) {
+  if (isImporting) {
     return (
-      <View style={styles.savedImageContainer}>
-        <SafeAreaView style={styles.savedImageSafeArea}>
-          <ThemedText type="subtitle" style={styles.savedImageTitle}>
-            Saved image
-          </ThemedText>
+      <>
+        <View style={styles.importContainer}>
+          <SafeAreaView style={styles.importSafeArea}>
+            <View style={styles.importHeader}>
+              <Pressable
+                accessibilityLabel="Close import image gallery"
+                accessibilityRole="button"
+                onPress={closeImportImage}
+                style={({ pressed }) => [styles.importBackButton, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+                  size={22}
+                  tintColor={Colors.light.background}
+                />
+              </Pressable>
+              <ThemedText type="subtitle" style={styles.importTitle}>
+                Import Image
+              </ThemedText>
+              <View style={styles.importHeaderSpacer} />
+            </View>
 
-          <View style={styles.savedImageFrame}>
-            <Image
-              contentFit="contain"
-              source={{ uri: displayedSavedPhoto?.uri ?? savedPhoto.uri }}
-              style={styles.savedImage}
-            />
-            {isEnhancing && (
-              <View style={styles.savedImageLoadingOverlay}>
+            {galleryAssets.length === 0 && isLoadingGallery ? (
+              <View style={styles.importEmptyState}>
                 <ActivityIndicator color={Colors.light.background} />
+                <ThemedText style={styles.importEmptyText}>
+                  Loading gallery images…
+                </ThemedText>
               </View>
-            )}
-          </View>
-
-          <View style={styles.savedImageToggleRow}>
-            {[
-              { label: 'Original', value: 'original' },
-              { label: 'Black & White', value: 'blackAndWhite' },
-              { label: 'Magic Color', value: 'magicColor' },
-            ].map((option) => {
-              const isActive = savedImageMode === option.value;
-
-              return (
+            ) : galleryAssets.length === 0 ? (
+              <View style={styles.importEmptyState}>
+                <SymbolView
+                  name={{ ios: 'photo.on.rectangle.angled', android: 'photo_library', web: 'photo_library' }}
+                  size={48}
+                  tintColor="#b9b9b9"
+                />
+                <ThemedText style={styles.importEmptyText}>
+                  No gallery images were found.
+                </ThemedText>
                 <Pressable
-                  key={option.value}
-                  accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
+                  accessibilityLabel="Retry loading gallery images"
                   accessibilityRole="button"
-                  disabled={isEnhancing || isSavingPreview}
-                  onPress={() => selectSavedImageMode(option.value)}
-                  style={({ pressed }) => [
-                    styles.savedImageToggleButton,
-                    isActive && styles.savedImageToggleButtonActive,
-                    pressed && styles.pressed,
-                  ]}>
-                  <ThemedText
-                    type="smallBold"
-                    style={[
-                      styles.savedImageToggleText,
-                      isActive && styles.savedImageToggleTextActive,
-                    ]}>
-                    {option.label}
+                  onPress={() => loadGalleryPage(true)}
+                  style={({ pressed }) => [styles.importRetryButton, pressed && styles.pressed]}>
+                  <ThemedText type="smallBold" style={styles.saveButtonText}>
+                    Retry
                   </ThemedText>
                 </Pressable>
-              );
-            })}
-          </View>
+              </View>
+            ) : (
+              <FlatList
+                data={galleryAssets}
+                keyExtractor={(item) => item.id || item.uri}
+                numColumns={3}
+                contentContainerStyle={styles.galleryGrid}
+                columnWrapperStyle={styles.galleryRow}
+                renderItem={({ item }) => (
+                  <Pressable
+                    accessibilityLabel={`Import image ${item.fileName || 'from gallery'}`}
+                    accessibilityRole="button"
+                    onPress={() => selectGalleryImage(item)}
+                    style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
+                    <Image
+                      contentFit="cover"
+                      source={{ uri: item.uri }}
+                      style={styles.galleryTileImage}
+                    />
+                  </Pressable>
+                )}
+                onEndReached={() => loadGalleryPage(false)}
+                onEndReachedThreshold={0.6}
+                ListFooterComponent={
+                  isLoadingGallery ? (
+                    <View style={styles.galleryLoadingFooter}>
+                      <ActivityIndicator color={Colors.light.background} />
+                    </View>
+                  ) : null
+                }
+              />
+            )}
+          </SafeAreaView>
+        </View>
+        {diagnosticOverlay}
+      </>
+    );
+  }
 
-          <View style={styles.savedImageActions}>
-            <Pressable
-              accessibilityLabel="Retake photo"
-              accessibilityRole="button"
-              disabled={isEnhancing || isSavingPreview}
-              onPress={closeSavedPhoto}
-              style={({ pressed }) => [
-                styles.savedImageActionButton,
-                styles.retakeButton,
-                pressed && styles.pressed,
-                (isEnhancing || isSavingPreview) && styles.disabled,
-              ]}>
-              <ThemedText type="smallBold">Retake</ThemedText>
-            </Pressable>
+  if (savedPhoto) {
+    return (
+      <>
+        <View style={styles.savedImageContainer}>
+          <SafeAreaView style={styles.savedImageSafeArea}>
+            <ThemedText type="subtitle" style={styles.savedImageTitle}>
+              Saved image
+            </ThemedText>
 
-            <Pressable
-              accessibilityLabel="Save selected image"
-              accessibilityRole="button"
-              disabled={isEnhancing || isSavingPreview}
-              onPress={saveSavedImage}
-              style={({ pressed }) => [
-                styles.savedImageActionButton,
-                styles.saveButton,
-                pressed && styles.pressed,
-                (isEnhancing || isSavingPreview) && styles.disabled,
-              ]}>
-              {isSavingPreview ? (
-                <ActivityIndicator color={Colors.light.background} />
-              ) : (
-                <ThemedText type="smallBold" style={styles.saveButtonText}>
-                  Save
-                </ThemedText>
+            <View style={styles.savedImageFrame}>
+              <Image
+                contentFit="contain"
+                source={{ uri: displayedSavedPhoto?.uri ?? savedPhoto.uri }}
+                style={styles.savedImage}
+              />
+              {isEnhancing && (
+                <View style={styles.savedImageLoadingOverlay}>
+                  <ActivityIndicator color={Colors.light.background} />
+                </View>
               )}
-            </Pressable>
-          </View>
-        </SafeAreaView>
-      </View>
+            </View>
+
+            <View style={styles.savedImageToggleRow}>
+              {[
+                { label: 'Original', value: 'original' },
+                { label: 'Black & White', value: 'blackAndWhite' },
+                { label: 'Magic Color', value: 'magicColor' },
+              ].map((option) => {
+                const isActive = savedImageMode === option.value;
+
+                return (
+                  <Pressable
+                    key={option.value}
+                    accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
+                    accessibilityRole="button"
+                    disabled={isEnhancing || isSavingPreview}
+                    onPress={() => selectSavedImageMode(option.value)}
+                    style={({ pressed }) => [
+                      styles.savedImageToggleButton,
+                      isActive && styles.savedImageToggleButtonActive,
+                      pressed && styles.pressed,
+                    ]}>
+                    <ThemedText
+                      type="smallBold"
+                      style={[
+                        styles.savedImageToggleText,
+                        isActive && styles.savedImageToggleTextActive,
+                      ]}>
+                      {option.label}
+                    </ThemedText>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.savedImageActions}>
+              <Pressable
+                accessibilityLabel="Retake photo"
+                accessibilityRole="button"
+                disabled={isEnhancing || isSavingPreview}
+                onPress={closeSavedPhoto}
+                style={({ pressed }) => [
+                  styles.savedImageActionButton,
+                  styles.retakeButton,
+                  pressed && styles.pressed,
+                  (isEnhancing || isSavingPreview) && styles.disabled,
+                ]}>
+                <ThemedText type="smallBold">Retake</ThemedText>
+              </Pressable>
+
+              <Pressable
+                accessibilityLabel="Save selected image"
+                accessibilityRole="button"
+                disabled={isEnhancing || isSavingPreview}
+                onPress={saveSavedImage}
+                style={({ pressed }) => [
+                  styles.savedImageActionButton,
+                  styles.saveButton,
+                  pressed && styles.pressed,
+                  (isEnhancing || isSavingPreview) && styles.disabled,
+                ]}>
+                {isSavingPreview ? (
+                  <ActivityIndicator color={Colors.light.background} />
+                ) : (
+                  <ThemedText type="smallBold" style={styles.saveButtonText}>
+                    Save
+                  </ThemedText>
+                )}
+              </Pressable>
+            </View>
+          </SafeAreaView>
+        </View>
+        {diagnosticOverlay}
+      </>
     );
   }
 
   if (capturedPhoto) {
     return (
-      <View style={styles.reviewContainer}>
-        <SafeAreaView style={styles.reviewSafeArea}>
-          <ThemedText type="subtitle" style={styles.reviewTitle}>
-            Review capture
-          </ThemedText>
+      <>
+        <View style={styles.reviewContainer}>
+          <SafeAreaView style={styles.reviewSafeArea}>
+            <ThemedText type="subtitle" style={styles.reviewTitle}>
+              Review capture
+            </ThemedText>
 
-          <View style={styles.imageFrame}>
-            <Image
-              contentFit="contain"
-              source={{ uri: capturedPhoto.uri }}
-              style={styles.reviewImage}
-            />
-            <CropOverlay
-              aspectRatio={
-                capturedPhoto.width && capturedPhoto.height
-                  ? capturedPhoto.width / capturedPhoto.height
-                  : 4 / 3
-              }
-              corners={cropCorners}
-              onCornersChange={setCropCorners}
-            />
-          </View>
+            <View style={styles.imageFrame}>
+              <Image
+                contentFit="contain"
+                source={{ uri: capturedPhoto.uri }}
+                style={styles.reviewImage}
+              />
+              <CropOverlay
+                aspectRatio={
+                  capturedPhoto.width && capturedPhoto.height
+                    ? capturedPhoto.width / capturedPhoto.height
+                    : 4 / 3
+                }
+                corners={cropCorners}
+                onCornersChange={setCropCorners}
+              />
+            </View>
 
-          <View style={styles.reviewActions}>
-            <Pressable
-              accessibilityLabel="Discard captured image"
-              accessibilityRole="button"
-              disabled={isCapturing}
-              onPress={discardPhoto}
-              style={({ pressed }) => [
-                styles.actionButton,
-                styles.discardButton,
-                pressed && styles.pressed,
-                isCapturing && styles.disabled,
-              ]}>
-              <ThemedText type="smallBold">Discard</ThemedText>
-            </Pressable>
+            <View style={styles.reviewActions}>
+              <Pressable
+                accessibilityLabel="Discard captured image"
+                accessibilityRole="button"
+                disabled={isCapturing}
+                onPress={discardPhoto}
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  styles.discardButton,
+                  pressed && styles.pressed,
+                  isCapturing && styles.disabled,
+                ]}>
+                <ThemedText type="smallBold">Discard</ThemedText>
+              </Pressable>
 
-            <Pressable
-              accessibilityLabel="Save captured image"
-              accessibilityRole="button"
-              disabled={isCapturing}
-              onPress={savePhoto}
-              style={({ pressed }) => [
-                styles.actionButton,
-                styles.saveButton,
-                pressed && styles.pressed,
-                isCapturing && styles.disabled,
-              ]}>
-              {isCapturing ? (
-                <ActivityIndicator color={Colors.light.background} />
-              ) : (
-                <ThemedText type="smallBold" style={styles.saveButtonText}>
-                  Save
-                </ThemedText>
-              )}
-            </Pressable>
-          </View>
-        </SafeAreaView>
-      </View>
+              <Pressable
+                accessibilityLabel="Save captured image"
+                accessibilityRole="button"
+                disabled={isCapturing}
+                onPress={savePhoto}
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  styles.saveButton,
+                  pressed && styles.pressed,
+                  isCapturing && styles.disabled,
+                ]}>
+                {isCapturing ? (
+                  <ActivityIndicator color={Colors.light.background} />
+                ) : (
+                  <ThemedText type="smallBold" style={styles.saveButtonText}>
+                    Save
+                  </ThemedText>
+                )}
+              </Pressable>
+            </View>
+          </SafeAreaView>
+        </View>
+        {diagnosticOverlay}
+      </>
     );
   }
 
@@ -534,62 +767,74 @@ function CameraScreen() {
           ratio={Platform.OS === 'android' ? '4:3' : undefined}
           onCameraReady={() => setIsCameraReady(true)}
           onMountError={(event) => {
-            setCameraError(event?.nativeEvent?.message ?? 'The camera preview could not start.');
+            const message = event?.nativeEvent?.message ?? 'The camera preview could not start.';
+            setCameraError(message);
+            reportDiagnostic('Camera startup', event?.nativeEvent ?? new Error(message), {
+              nativeEvent: event?.nativeEvent ?? null,
+            });
           }}
           style={styles.camera}
         />
       )}
 
       {isFocused && (
-        <View
-          pointerEvents="box-none"
-          style={[styles.flashControls, { top: insets.top + Spacing.three }]}>
-          {FLASH_MODES.map((mode) => {
-            const isActive = flashMode === mode.value;
-
-            return (
-              <Pressable
-                key={mode.value}
-                accessibilityLabel={mode.label}
-                accessibilityRole="button"
-                accessibilityState={{ selected: isActive }}
-                onPress={() => setFlashMode(mode.value)}
-                style={({ pressed }) => [
-                  styles.flashModeButton,
-                  isActive && styles.flashModeButtonActive,
-                  pressed && styles.pressed,
-                ]}>
-                <SymbolView
-                  name={mode.icon}
-                  size={22}
-                  tintColor={isActive ? Colors.light.background : '#dedede'}
-                />
-              </Pressable>
-            );
-          })}
-        </View>
+        <Pressable
+          accessibilityLabel={`Flash mode: ${getFlashModeLabel(flashMode)}. Tap to change.`}
+          accessibilityRole="button"
+          accessibilityState={{ selected: flashMode !== 'off' }}
+          onPress={() => setFlashMode(getNextFlashMode(flashMode))}
+          style={({ pressed }) => [
+            styles.flashModeButton,
+            flashMode !== 'off' && styles.flashModeButtonActive,
+            { top: insets.top + Spacing.three },
+            pressed && styles.pressed,
+          ]}>
+          <SymbolView
+            name={getFlashModeIcon(flashMode)}
+            size={22}
+            tintColor={flashMode === 'off' ? '#dedede' : Colors.light.background}
+          />
+        </Pressable>
       )}
 
       <View
         pointerEvents="box-none"
-        style={[styles.controls, { paddingBottom: insets.bottom + BottomTabInset + Spacing.three }]}>
-        <Pressable
-          accessibilityLabel="Capture photo"
-          accessibilityRole="button"
-          disabled={!isCameraReady || isCapturing}
-          onPress={capturePhoto}
-          style={({ pressed }) => [
-            styles.captureButton,
-            { borderColor: Colors.light.background },
-            pressed && styles.pressed,
-            (!isCameraReady || isCapturing) && styles.disabled,
-          ]}>
-          {isCapturing ? (
-            <ActivityIndicator color={Colors.light.text} />
-          ) : (
-            <View style={[styles.captureButtonInner, { backgroundColor: Colors.light.background }]} />
-          )}
-        </Pressable>
+        style={[styles.controls, { paddingBottom: insets.bottom + BottomTabInset + Spacing.three }]}> 
+        <View style={styles.captureControlsRow}>
+          <Pressable
+            accessibilityLabel="Import Image"
+            accessibilityRole="button"
+            disabled={isCapturing}
+            onPress={openImportImage}
+            style={({ pressed }) => [styles.importButton, pressed && styles.pressed]}>
+            <SymbolView
+              name={{ ios: 'photo.on.rectangle', android: 'photo_library', web: 'photo_library' }}
+              size={24}
+              tintColor={Colors.light.background}
+            />
+            <ThemedText type="smallBold" style={styles.importButtonText}>
+              Import Image
+            </ThemedText>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Capture photo"
+            accessibilityRole="button"
+            disabled={!isCameraReady || isCapturing}
+            onPress={capturePhoto}
+            style={({ pressed }) => [
+              styles.captureButton,
+              { borderColor: Colors.light.background },
+              pressed && styles.pressed,
+              (!isCameraReady || isCapturing) && styles.disabled,
+            ]}>
+            {isCapturing ? (
+              <ActivityIndicator color={Colors.light.text} />
+            ) : (
+              <View style={[styles.captureButtonInner, { backgroundColor: Colors.light.background }]} />
+            )}
+          </Pressable>
+        </View>
       </View>
 
       {cameraError && (
@@ -597,6 +842,7 @@ function CameraScreen() {
           <ThemedText style={styles.statusText}>{cameraError}</ThemedText>
         </View>
       )}
+      {diagnosticOverlay}
     </View>
   );
 }
@@ -814,6 +1060,172 @@ function getErrorDetails(error) {
   };
 }
 
+function getNextFlashMode(currentMode) {
+  const currentIndex = FLASH_MODES.findIndex((mode) => mode.value === currentMode);
+  return FLASH_MODES[(currentIndex + 1) % FLASH_MODES.length].value;
+}
+
+function getFlashModeLabel(mode) {
+  return FLASH_MODES.find((item) => item.value === mode)?.label ?? FLASH_MODES[0].label;
+}
+
+function getFlashModeIcon(mode) {
+  return FLASH_MODES.find((item) => item.value === mode)?.icon ?? FLASH_MODES[0].icon;
+}
+
+async function queryGalleryPage(offset, limit) {
+  const module = getMediaLibraryModule();
+  if (!module?.Query || !module?.AssetField || !module?.MediaType) {
+    throw new Error('The media-library gallery API is unavailable in this build.');
+  }
+
+  const assets = await new module.Query()
+    .eq(module.AssetField.MEDIA_TYPE, module.MediaType.IMAGE)
+    .limit(limit)
+    .offset(offset)
+    .orderBy({
+      key: module.AssetField.MODIFICATION_TIME,
+      ascending: false,
+    })
+    .exe();
+
+  return {
+    assets: assets ?? [],
+    hasNextPage: (assets?.length ?? 0) === limit,
+  };
+}
+
+async function normalizeGalleryAsset(asset) {
+  if (!asset) return null;
+
+  let info = asset;
+  let uri = null;
+
+  if (typeof asset.getUri === 'function') {
+    try {
+      uri = await asset.getUri();
+    } catch {
+      uri = null;
+    }
+  }
+
+  if (typeof asset.getInfo === 'function') {
+    try {
+      info = await asset.getInfo();
+    } catch {
+      info = asset;
+    }
+  } else if (typeof asset.getAssetInfoAsync === 'function') {
+    try {
+      info = await asset.getAssetInfoAsync();
+    } catch {
+      info = asset;
+    }
+  }
+
+  uri = uri ?? info?.localUri ?? info?.uri ?? asset.uri ?? asset.id;
+  if (!uri) return null;
+
+  return {
+    id: info?.id ?? asset.id ?? uri,
+    uri,
+    width: info?.width ?? asset.width ?? 1,
+    height: info?.height ?? asset.height ?? 1,
+    fileName: info?.filename ?? asset.filename ?? asset.fileName ?? null,
+  };
+}
+
+function createDiagnosticDetails(operation, error, context = {}) {
+  const details = getErrorDetails(error);
+  const runtime = {
+    operation,
+    message: details.message,
+    stack: details.stack,
+    platform: Platform.OS,
+    isDevelopment: typeof __DEV__ === 'boolean' ? __DEV__ : null,
+    timestamp: new Date().toISOString(),
+    context,
+  };
+
+  return {
+    ...runtime,
+    text: safeStringify(runtime),
+  };
+}
+
+function safeStringify(value) {
+  const seen = new WeakSet();
+
+  try {
+    return JSON.stringify(value, (key, nextValue) => {
+      if (nextValue && typeof nextValue === 'object') {
+        if (seen.has(nextValue)) return '[Circular]';
+        seen.add(nextValue);
+      }
+
+      return safeSerializeReplacer(key, nextValue);
+    }, 2);
+  } catch (serializationError) {
+    return `Unable to serialize diagnostic details: ${getErrorDetails(serializationError).message}`;
+  }
+}
+
+function safeSerializeReplacer(key, value) {
+  if (key.toLowerCase().includes('uri') && typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'bigint') return String(value);
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack || null,
+    };
+  }
+
+  return value;
+}
+
+function DiagnosticDetails({ diagnostic }) {
+  return (
+    <ScrollView
+      horizontal
+      contentContainerStyle={styles.diagnosticCodeContent}
+      style={styles.diagnosticCodeScroll}
+      showsHorizontalScrollIndicator
+      showsVerticalScrollIndicator>
+      <ThemedText type="code" style={styles.diagnosticCode}>
+        {diagnostic.text}
+      </ThemedText>
+    </ScrollView>
+  );
+}
+
+function VerboseErrorNotice({ diagnostic, onDismiss }) {
+  return (
+    <View style={styles.diagnosticNotice}>
+      <ThemedText type="subtitle" style={styles.diagnosticNoticeTitle}>
+        Preview build error
+      </ThemedText>
+      <ThemedText style={styles.diagnosticNoticeIntro}>
+        The operation failed without closing the app. Send this diagnostic output with the preview
+        build report.
+      </ThemedText>
+      <DiagnosticDetails diagnostic={diagnostic} />
+      <Pressable
+        accessibilityLabel="Dismiss diagnostic error"
+        accessibilityRole="button"
+        onPress={onDismiss}
+        style={({ pressed }) => [styles.diagnosticDismissButton, pressed && styles.pressed]}>
+        <ThemedText type="smallBold" style={styles.saveButtonText}>
+          Dismiss
+        </ThemedText>
+      </Pressable>
+    </View>
+  );
+}
+
 function getDefaultCorners() {
   return {
     topLeft: { x: 0, y: 0 },
@@ -877,6 +1289,79 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  diagnosticScreen: {
+    flex: 1,
+    backgroundColor: '#111111',
+  },
+  diagnosticScreenSafeArea: {
+    flex: 1,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.three,
+    gap: Spacing.two,
+  },
+  diagnosticTitle: {
+    color: Colors.light.background,
+  },
+  diagnosticIntro: {
+    color: '#dedede',
+  },
+  diagnosticRetryButton: {
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    backgroundColor: '#3c87f7',
+    paddingHorizontal: Spacing.three,
+  },
+  diagnosticNotice: {
+    position: 'absolute',
+    top: Spacing.three,
+    right: Spacing.three,
+    bottom: Spacing.three,
+    left: Spacing.three,
+    zIndex: 20,
+    elevation: 20,
+    padding: Spacing.three,
+    borderRadius: Spacing.three,
+    backgroundColor: '#1b1b1b',
+    borderWidth: 1,
+    borderColor: '#ff6b6b',
+    shadowColor: '#000000',
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 5 },
+  },
+  diagnosticNoticeTitle: {
+    color: '#ffb3b3',
+    marginBottom: Spacing.one,
+  },
+  diagnosticNoticeIntro: {
+    color: '#dedede',
+    marginBottom: Spacing.two,
+  },
+  diagnosticCodeScroll: {
+    flex: 1,
+    minHeight: 120,
+    borderRadius: Spacing.two,
+    backgroundColor: '#050505',
+  },
+  diagnosticCodeContent: {
+    padding: Spacing.two,
+  },
+  diagnosticCode: {
+    color: '#f2f2f2',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  diagnosticDismissButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    backgroundColor: '#3c87f7',
+    paddingHorizontal: Spacing.three,
+    marginTop: Spacing.two,
   },
   camera: {
     flex: 1,
@@ -1050,14 +1535,9 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     backgroundColor: 'transparent',
   },
-  flashControls: {
+  flashModeButton: {
     position: 'absolute',
     right: Spacing.three,
-    flexDirection: 'row',
-    gap: Spacing.one,
-    alignItems: 'center',
-  },
-  flashModeButton: {
     width: 44,
     height: 44,
     borderRadius: 22,
@@ -1071,6 +1551,100 @@ const styles = StyleSheet.create({
     backgroundColor: '#3c87f7',
     borderColor: Colors.light.background,
     borderWidth: 2,
+  },
+  captureControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.four,
+  },
+  importButton: {
+    width: 96,
+    height: 96,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    borderRadius: Spacing.two,
+    backgroundColor: 'rgba(0, 0, 0, 0.58)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.55)',
+    paddingHorizontal: Spacing.two,
+  },
+  importButtonText: {
+    color: Colors.light.background,
+    textAlign: 'center',
+  },
+  importContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  importSafeArea: {
+    flex: 1,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.three,
+  },
+  importHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.three,
+  },
+  importBackButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    backgroundColor: '#2b2b2b',
+  },
+  importTitle: {
+    color: Colors.light.background,
+  },
+  importHeaderSpacer: {
+    width: 44,
+  },
+  galleryGrid: {
+    paddingBottom: BottomTabInset + Spacing.three,
+  },
+  galleryRow: {
+    gap: Spacing.one,
+    marginBottom: Spacing.one,
+  },
+  galleryTile: {
+    flex: 1,
+    aspectRatio: 1,
+    maxWidth: '33.333%',
+    backgroundColor: '#1b1b1b',
+    overflow: 'hidden',
+    borderRadius: Spacing.one,
+  },
+  galleryTileImage: {
+    width: '100%',
+    height: '100%',
+  },
+  galleryLoadingFooter: {
+    minHeight: 64,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  importEmptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.four,
+  },
+  importEmptyText: {
+    color: '#dedede',
+    textAlign: 'center',
+  },
+  importRetryButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    backgroundColor: '#3c87f7',
+    paddingHorizontal: Spacing.three,
   },
   errorOverlay: {
     position: 'absolute',
