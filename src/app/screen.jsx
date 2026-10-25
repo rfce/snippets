@@ -71,11 +71,16 @@ const FLASH_MODES = [
 
 const GALLERY_PAGE_SIZE = 36;
 const TEAL_ACCENT = '#16C7B7';
-const SILVER_ACCENT = '#D6D9DE';
 const REVIEW_DISCARD_ACCENT = '#C2415A';
 const REVIEW_NEXT_ACCENT = '#3C78D8';
 const PREVIEW_RETAKE_ACCENT = '#C2415A';
 const PREVIEW_SAVE_ACCENT = '#2F9E72';
+const PREVIEW_BACKGROUND = '#F5F7FA';
+const PREVIEW_SURFACE = '#FFFFFF';
+const PREVIEW_IMAGE_SURFACE = '#E9EEF5';
+const PREVIEW_BORDER = '#DCE4ED';
+const PREVIEW_TEXT = '#122033';
+const PREVIEW_MUTED = '#667085';
 
 const SAVED_IMAGE_OPTIONS = [
   { label: 'Original', value: 'original' },
@@ -728,18 +733,24 @@ function CameraScreen() {
               })}
             </View>
 
-             <View style={[styles.savedImageActions, { paddingBottom: insets.bottom + Spacing.two }]}>
-               <Pressable
-                accessibilityLabel="Retake photo"
-                accessibilityRole="button"
-                disabled={isEnhancing || isSavingPreview}
-                onPress={closeSavedPhoto}
-                  style={({ pressed }) => [
-                    styles.savedImageActionButton,
-                    styles.previewActionButton,
-                    pressed && styles.pressed,
-                    (isEnhancing || isSavingPreview) && styles.disabled,
-                 ]}>
+              <View
+                style={[
+                  styles.savedImageActions,
+                  styles.previewActions,
+                  { paddingBottom: insets.bottom + Spacing.two },
+                ]}>
+                <Pressable
+                 accessibilityLabel="Retake photo"
+                 accessibilityRole="button"
+                 disabled={isEnhancing || isSavingPreview}
+                 onPress={closeSavedPhoto}
+                   style={({ pressed }) => [
+                     styles.savedImageActionButton,
+                     styles.previewActionButton,
+                     styles.previewRetakeButton,
+                     pressed && styles.pressed,
+                     (isEnhancing || isSavingPreview) && styles.disabled,
+                  ]}>
                   <SymbolView
                     name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }}
                     size={30}
@@ -758,11 +769,12 @@ function CameraScreen() {
                 accessibilityRole="button"
                 disabled={isEnhancing || isSavingPreview}
                 onPress={saveSavedImage}
-                  style={({ pressed }) => [
-                    styles.savedImageActionButton,
-                    styles.previewActionButton,
-                    pressed && styles.pressed,
-                    (isEnhancing || isSavingPreview) && styles.disabled,
+                   style={({ pressed }) => [
+                     styles.savedImageActionButton,
+                     styles.previewActionButton,
+                     styles.previewSaveButton,
+                     pressed && styles.pressed,
+                     (isEnhancing || isSavingPreview) && styles.disabled,
                  ]}>
                  {isSavingPreview ? (
                     <ActivityIndicator color={PREVIEW_SAVE_ACCENT} />
@@ -1524,7 +1536,7 @@ const styles = StyleSheet.create({
   },
   savedImageContainer: {
     flex: 1,
-    backgroundColor: '#061312',
+    backgroundColor: PREVIEW_BACKGROUND,
   },
   reviewSafeArea: {
     flex: 1,
@@ -1551,13 +1563,13 @@ const styles = StyleSheet.create({
     color: Colors.light.background,
   },
   savedImageTitle: {
-    color: Colors.light.background,
+    color: PREVIEW_TEXT,
     textAlign: 'center',
     marginBottom: Spacing.two,
-    fontSize: 20,
-    lineHeight: 26,
-    fontWeight: '400',
-    letterSpacing: 0.2,
+    fontSize: 24,
+    lineHeight: 30,
+    fontWeight: '600',
+    letterSpacing: 0.35,
   },
   imageFrame: {
     width: '100%',
@@ -1578,19 +1590,28 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 1,
     position: 'relative',
-    borderRadius: Spacing.two,
-    backgroundColor: '#081A19',
+    borderRadius: 28,
+    padding: Spacing.one,
+    backgroundColor: PREVIEW_IMAGE_SURFACE,
+    borderWidth: 1,
+    borderColor: PREVIEW_BORDER,
     overflow: 'hidden',
+    shadowColor: '#8C9AAF',
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   savedImage: {
     flex: 1,
     width: '100%',
+    borderRadius: 22,
   },
   savedImageLoadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(3, 19, 18, 0.58)',
+    backgroundColor: 'rgba(245, 247, 250, 0.78)',
   },
   savedImageToggleRow: {
     width: '100%',
@@ -1600,18 +1621,25 @@ const styles = StyleSheet.create({
     padding: Spacing.half,
     position: 'relative',
     overflow: 'hidden',
-    borderRadius: 999,
-    backgroundColor: 'transparent',
+    borderRadius: 18,
+    backgroundColor: '#E8EDF3',
+    borderWidth: 1,
+    borderColor: PREVIEW_BORDER,
+    shadowColor: '#A9B5C4',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   savedImageLiquid: {
     position: 'absolute',
     top: Spacing.half,
     bottom: Spacing.half,
     left: Spacing.half,
-    borderRadius: 999,
-    backgroundColor: SILVER_ACCENT,
-    shadowColor: '#B8BDC5',
-    shadowOpacity: 0.34,
+    borderRadius: 14,
+    backgroundColor: PREVIEW_SURFACE,
+    shadowColor: '#A9B5C4',
+    shadowOpacity: 0.2,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 },
     elevation: 3,
@@ -1619,24 +1647,24 @@ const styles = StyleSheet.create({
   },
   savedImageToggleButton: {
     flex: 1,
-    minHeight: 40,
+    minHeight: 38,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 999,
+    borderRadius: 14,
     backgroundColor: 'transparent',
     paddingHorizontal: Spacing.two,
     zIndex: 1,
   },
   savedImageToggleText: {
-    color: '#D6D9DE',
-    fontSize: 12,
-    lineHeight: 16,
-    fontWeight: '400',
+    color: PREVIEW_MUTED,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '500',
     textAlign: 'center',
   },
   savedImageToggleTextActive: {
-    color: '#061312',
-    fontWeight: '400',
+    color: PREVIEW_TEXT,
+    fontWeight: '600',
   },
   cropOverlay: {
     position: 'absolute',
@@ -1671,7 +1699,13 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.two,
     paddingBottom: Spacing.two,
     paddingHorizontal: 0,
-    backgroundColor: SILVER_ACCENT,
+    backgroundColor: PREVIEW_BACKGROUND,
+  },
+  previewActions: {
+    marginTop: Spacing.three,
+    backgroundColor: PREVIEW_BACKGROUND,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: PREVIEW_BORDER,
   },
   savedImageActionButton: {
     flex: 1,
@@ -1686,6 +1720,17 @@ const styles = StyleSheet.create({
   },
   previewActionButton: {
     flexDirection: 'row',
+    minHeight: 46,
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.four,
+  },
+  previewRetakeButton: {
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: PREVIEW_BORDER,
+  },
+  previewSaveButton: {
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: PREVIEW_BORDER,
   },
   previewRetakeText: {
     color: PREVIEW_RETAKE_ACCENT,
