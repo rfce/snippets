@@ -24,7 +24,6 @@ import {
   renderMagicColorAsync,
   renderAdaptiveThresholdAsync,
   renderPerspectiveCropAsync,
-  renderRotatedImageAsync,
 } from '@/perspective-crop';
 import {
   appendUniqueMediaLibraryImages,
@@ -172,7 +171,7 @@ function CameraScreen() {
   const [magicColorPhoto, setMagicColorPhoto] = useState(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isSavingPreview, setIsSavingPreview] = useState(false);
-  const [isRotating, setIsRotating] = useState(false);
+  const [capturedRotation, setCapturedRotation] = useState(0);
   const [cropCorners, setCropCorners] = useState(null);
   const [cameraError, setCameraError] = useState(null);
   const [diagnosticError, setDiagnosticError] = useState(null);
@@ -292,6 +291,7 @@ function CameraScreen() {
       fileName: asset.fileName ?? null,
     });
     setCropCorners(null);
+    setCapturedRotation(0);
     setIsImporting(false);
     setIsCameraReady(false);
   }, []);
@@ -344,6 +344,7 @@ function CameraScreen() {
 
       setCapturedPhoto(photo);
       setCropCorners(null);
+      setCapturedRotation(0);
     } catch (error) {
       reportDiagnostic('Capture photo', error, {
         flashMode,
@@ -357,42 +358,23 @@ function CameraScreen() {
   const discardPhoto = () => {
     setCapturedPhoto(null);
     setCropCorners(null);
-    setIsRotating(false);
+    setCapturedRotation(0);
     setIsCameraReady(false);
     setCameraError(null);
   };
 
-  const rotateCapturedPhoto = async () => {
-    if (!capturedPhoto?.uri || isCapturing || isRotating) return;
+  const rotateCapturedPhoto = () => {
+    if (!capturedPhoto?.uri || isCapturing) return;
 
     if (Platform.OS === 'web') {
       Alert.alert('Not available', 'Image rotation is available on a mobile device.');
       return;
     }
 
-    setIsRotating(true);
-
-    try {
-      const rotatedPhoto = await renderRotatedImageAsync({
-        uri: capturedPhoto.uri,
-        sourceWidth: capturedPhoto.width,
-        sourceHeight: capturedPhoto.height,
-      });
-
-      setCapturedPhoto((current) => ({
-        ...current,
-        ...rotatedPhoto,
-      }));
-      setCropCorners(null);
-    } catch (error) {
-      reportDiagnostic('Rotate captured image', error, {
-        sourceUri: capturedPhoto.uri,
-        sourceWidth: capturedPhoto.width ?? null,
-        sourceHeight: capturedPhoto.height ?? null,
-      });
-    } finally {
-      setIsRotating(false);
-    }
+    // Keep rotation as an instant display transform. The pixels are baked once
+    // on Next together with any perspective crop, avoiding a GL render per tap.
+    setCapturedRotation((current) => (current + 90) % 360);
+    setCropCorners(null);
   };
 
   const closeSavedPhoto = () => {
@@ -557,28 +539,31 @@ function CameraScreen() {
 
     setIsCapturing(true);
     const customCrop = hasCustomCrop(cropCorners);
+    const needsProcessing = customCrop || capturedRotation !== 0;
 
     console.log('[screen] Next requested', {
       hasCapturedPhoto: Boolean(capturedPhoto.uri),
       sourceWidth: capturedPhoto.width ?? null,
       sourceHeight: capturedPhoto.height ?? null,
       customCrop,
+      rotation: capturedRotation,
       corners: cropCorners ?? 'default',
     });
 
     try {
-      if (customCrop && Platform.OS === 'web') {
+      if (needsProcessing && Platform.OS === 'web') {
         console.warn('[screen] Perspective crop skipped on web.');
-        Alert.alert('Not available', 'Perspective cropping is available on a mobile device.');
+        Alert.alert('Not available', 'Image rotation and cropping are available on a mobile device.');
         return;
       }
 
-      const selectedPhoto = customCrop
+      const selectedPhoto = needsProcessing
         ? await renderPerspectiveCropAsync({
             uri: capturedPhoto.uri,
-            corners: cropCorners,
+            corners: cropCorners ?? getDefaultCorners(),
             sourceWidth: capturedPhoto.width,
             sourceHeight: capturedPhoto.height,
+            rotation: capturedRotation,
           })
         : capturedPhoto;
 
@@ -587,6 +572,7 @@ function CameraScreen() {
         width: selectedPhoto?.width ?? null,
         height: selectedPhoto?.height ?? null,
         customCrop,
+        rotation: capturedRotation,
       });
 
       setSavedPhoto(selectedPhoto);
@@ -595,6 +581,7 @@ function CameraScreen() {
       setMagicColorPhoto(null);
       setCapturedPhoto(null);
       setCropCorners(null);
+      setCapturedRotation(0);
       setIsCameraReady(false);
       console.log('[screen] Image prepared for final save.');
     } catch (error) {
@@ -854,14 +841,23 @@ function CameraScreen() {
             <View style={styles.imageFrame}>
               <Image
                 contentFit="contain"
-                source={{ uri: capturedPhoto.uri }}
-                style={styles.reviewImage}
+        source={{ uri: capturedPhoto.uri }}
+        style={[
+          styles.reviewImage,
+          capturedRotation !== 0 && {
+            transform: [{ rotate: `${capturedRotation}deg` }],
+          },
+        ]}
               />
               <CropOverlay
                 aspectRatio={
                   capturedPhoto.width && capturedPhoto.height
-                    ? capturedPhoto.width / capturedPhoto.height
-                    : 4 / 3
+                    ? capturedRotation % 180 === 0
+                      ? capturedPhoto.width / capturedPhoto.height
+                      : capturedPhoto.height / capturedPhoto.width
+                    : capturedRotation % 180 === 0
+                      ? 4 / 3
+                      : 3 / 4
                 }
                 corners={cropCorners}
                 onCornersChange={setCropCorners}
@@ -871,12 +867,12 @@ function CameraScreen() {
             <Pressable
               accessibilityLabel="Rotate image 90 degrees clockwise"
               accessibilityRole="button"
-              disabled={isCapturing || isRotating}
+              disabled={isCapturing}
               onPress={rotateCapturedPhoto}
               style={({ pressed }) => [
                 styles.reviewRotateButton,
                 pressed && styles.pressed,
-                (isCapturing || isRotating) && styles.disabled,
+                isCapturing && styles.disabled,
               ]}>
               <SymbolView
                 name={{ ios: 'arrow.clockwise', android: 'rotate_right', web: 'rotate_right' }}
@@ -892,13 +888,13 @@ function CameraScreen() {
               <Pressable
                 accessibilityLabel="Discard captured image"
                 accessibilityRole="button"
-                disabled={isCapturing || isRotating}
+                disabled={isCapturing}
                 onPress={discardPhoto}
                 style={({ pressed }) => [
                   styles.savedImageActionButton,
                   styles.reviewActionButton,
                   pressed && styles.pressed,
-                  (isCapturing || isRotating) && styles.disabled,
+                  isCapturing && styles.disabled,
                 ]}>
                 <SymbolView
                   name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
@@ -916,13 +912,13 @@ function CameraScreen() {
               <Pressable
                 accessibilityLabel="Next"
                 accessibilityRole="button"
-                disabled={isCapturing || isRotating}
+                disabled={isCapturing}
                 onPress={continueToSavedImage}
                 style={({ pressed }) => [
                   styles.savedImageActionButton,
                   styles.reviewActionButton,
                   pressed && styles.pressed,
-                  (isCapturing || isRotating) && styles.disabled,
+                  isCapturing && styles.disabled,
                 ]}>
                 <ThemedText
                   type="smallBold"

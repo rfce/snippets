@@ -12,6 +12,7 @@ export async function renderPerspectiveCropAsync({
   corners,
   sourceWidth,
   sourceHeight,
+  rotation = 0,
 }) {
   if (!uri) {
     throw new Error('A source image is required for perspective cropping.');
@@ -19,8 +20,14 @@ export async function renderPerspectiveCropAsync({
 
   validateCorners(corners);
 
-  const outputSize = getOutputSize(corners, sourceWidth, sourceHeight);
-  const axisAlignedCrop = getAxisAlignedCrop(corners);
+  const normalizedRotation = normalizeRotation(rotation);
+  const width = sourceWidth || 1;
+  const height = sourceHeight || 1;
+  const displayedWidth = normalizedRotation % 180 === 0 ? width : height;
+  const displayedHeight = normalizedRotation % 180 === 0 ? height : width;
+  const sourceCorners = mapCornersToSource(corners, normalizedRotation);
+  const outputSize = getOutputSize(corners, displayedWidth, displayedHeight);
+  const axisAlignedCrop = normalizedRotation === 0 ? getAxisAlignedCrop(sourceCorners) : null;
   const destinationToSource = axisAlignedCrop
     ? getAxisAlignedTransform(axisAlignedCrop)
     : solveHomography(
@@ -30,7 +37,12 @@ export async function renderPerspectiveCropAsync({
           { x: 1, y: 1 },
           { x: 0, y: 1 },
         ],
-        [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft]
+        [
+          sourceCorners.topLeft,
+          sourceCorners.topRight,
+          sourceCorners.bottomRight,
+          sourceCorners.bottomLeft,
+        ]
       );
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
@@ -100,20 +112,6 @@ export async function renderPerspectiveCropAsync({
       console.warn('[perspective-crop] GL cleanup failed after render', cleanupError);
     }
   }
-}
-
-export async function renderRotatedImageAsync({ uri, sourceWidth, sourceHeight }) {
-  return renderPerspectiveCropAsync({
-    uri,
-    sourceWidth,
-    sourceHeight,
-    corners: {
-      topLeft: { x: 0, y: 1 },
-      topRight: { x: 0, y: 0 },
-      bottomRight: { x: 1, y: 0 },
-      bottomLeft: { x: 1, y: 1 },
-    },
-  });
 }
 
 export async function renderAdaptiveThresholdAsync({
@@ -338,6 +336,30 @@ function validateCorners(corners) {
       throw new Error(`Crop handle ${name} is invalid.`);
     }
   });
+}
+
+function normalizeRotation(rotation) {
+  const normalized = ((rotation % 360) + 360) % 360;
+  return normalized - (normalized % 90);
+}
+
+function mapCornersToSource(corners, rotation) {
+  return Object.fromEntries(
+    Object.entries(corners).map(([corner, point]) => [corner, mapPointToSource(point, rotation)])
+  );
+}
+
+function mapPointToSource(point, rotation) {
+  switch (rotation) {
+    case 90:
+      return { x: point.y, y: 1 - point.x };
+    case 180:
+      return { x: 1 - point.x, y: 1 - point.y };
+    case 270:
+      return { x: 1 - point.y, y: point.x };
+    default:
+      return point;
+  }
 }
 
 function getAxisAlignedCrop(corners) {
