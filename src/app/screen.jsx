@@ -773,13 +773,12 @@ function CameraScreen() {
           accessibilityLabel={`Flash mode: ${getFlashModeLabel(flashMode)}. Tap to change.`}
           accessibilityRole="button"
           accessibilityState={{ selected: flashMode !== 'off' }}
-          onPress={() => setFlashMode(getNextFlashMode(flashMode))}
-          style={({ pressed }) => [
-            styles.flashModeButton,
-            flashMode !== 'off' && styles.flashModeButtonActive,
-            { top: insets.top + Spacing.three },
-            pressed && styles.pressed,
-          ]}>
+           onPress={() => setFlashMode(getNextFlashMode(flashMode))}
+           style={({ pressed }) => [
+             styles.flashModeButton,
+             { top: insets.top + Spacing.three },
+             pressed && styles.pressed,
+           ]}>
           <SymbolView
             name={getFlashModeIcon(flashMode)}
             size={22}
@@ -792,21 +791,11 @@ function CameraScreen() {
         pointerEvents="box-none"
         style={[styles.controls, { paddingBottom: insets.bottom + Spacing.three }]}> 
         <View style={styles.captureControlsRow}>
-          <Pressable
-            accessibilityLabel="Import Image"
-            accessibilityRole="button"
-            disabled={isCapturing}
-            onPress={openImportImage}
-            style={({ pressed }) => [styles.importButton, pressed && styles.pressed]}>
-            <SymbolView
-              name={{ ios: 'photo.on.rectangle', android: 'photo_library', web: 'photo_library' }}
-              size={24}
-              tintColor={Colors.light.background}
-            />
-            <ThemedText type="smallBold" style={styles.importButtonText}>
-              Import Image
-            </ThemedText>
-          </Pressable>
+          <View
+            accessible={false}
+            pointerEvents="none"
+            style={styles.importButtonSpacer}
+          />
 
           <Pressable
             accessibilityLabel="Capture photo"
@@ -815,7 +804,7 @@ function CameraScreen() {
             onPress={capturePhoto}
             style={({ pressed }) => [
               styles.captureButton,
-              { borderColor: Colors.light.background },
+              { borderColor: '#16C7B7' },
               pressed && styles.pressed,
               (!isCameraReady || isCapturing) && styles.disabled,
             ]}>
@@ -824,6 +813,30 @@ function CameraScreen() {
             ) : (
               <View style={[styles.captureButtonInner, { backgroundColor: Colors.light.background }]} />
             )}
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Import images"
+            accessibilityRole="button"
+            disabled={isCapturing}
+            onPress={openImportImage}
+            style={({ pressed }) => [
+              styles.importButton,
+              pressed && styles.pressed,
+              isCapturing && styles.disabled,
+            ]}>
+            <SymbolView
+              name={{ ios: 'photo.badge.arrow.down', android: 'photo_library', web: 'photo_library' }}
+              size={34}
+              tintColor={Colors.light.background}
+            />
+            <ThemedText
+              type="smallBold"
+              numberOfLines={2}
+              allowFontScaling={false}
+              style={styles.importButtonText}>
+              {'Import\nImages'}
+            </ThemedText>
           </Pressable>
         </View>
       </View>
@@ -1513,9 +1526,8 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.58)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.45)',
+    backgroundColor: 'transparent',
+    zIndex: 2,
   },
   cameraCloseButton: {
     position: 'absolute',
@@ -1525,37 +1537,32 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.58)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.45)',
+    backgroundColor: 'transparent',
     zIndex: 2,
-  },
-  flashModeButtonActive: {
-    backgroundColor: '#3c87f7',
-    borderColor: Colors.light.background,
-    borderWidth: 2,
   },
   captureControlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.four,
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: Spacing.three,
   },
   importButton: {
-    width: 96,
+    width: 116,
     height: 96,
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.one,
-    borderRadius: Spacing.two,
-    backgroundColor: 'rgba(0, 0, 0, 0.58)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.55)',
-    paddingHorizontal: Spacing.two,
   },
   importButtonText: {
     color: Colors.light.background,
+    fontSize: 16,
+    lineHeight: 21,
     textAlign: 'center',
+  },
+  importButtonSpacer: {
+    width: 116,
+    height: 96,
   },
   importContainer: {
     flex: 1,
@@ -1640,17 +1647,25 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.65)',
   },
   captureButton: {
-    width: 78,
-    height: 78,
-    borderRadius: 39,
-    borderWidth: 4,
+    width: 82,
+    height: 82,
+    borderRadius: 41,
+    borderWidth: 3,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    shadowColor: '#16C7B7',
+    shadowOpacity: 0.38,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
   },
   captureButtonInner: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.12)',
   },
   pressed: {
     opacity: 0.7,
