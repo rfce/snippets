@@ -51,6 +51,7 @@ export default function ExploreScreen() {
   const [hasMoreImages, setHasMoreImages] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [openedImage, setOpenedImage] = useState(null);
   const isSelectionMode = selectedImageIds.size > 0;
@@ -189,6 +190,7 @@ export default function ExploreScreen() {
     if (!images.length || isDeleting) return false;
 
     setIsDeleting(true);
+    setActionError(null);
 
     try {
       if (!mediaLibraryModule?.Asset?.delete || !mediaLibraryModule?.Asset) {
@@ -206,18 +208,21 @@ export default function ExploreScreen() {
         throw new Error('Photo-library permission is required to delete saved images.');
       }
 
-      const assetsToDelete = selectedImages.map((image) => new mediaLibraryModule.Asset(image.id));
+      const assetsToDelete = images.map((image) => new mediaLibraryModule.Asset(image.id));
       await mediaLibraryModule.Asset.delete(assetsToDelete);
 
-      const deletedIds = new Set(selectedImages.map(getAssetKey));
+      const deletedIds = new Set(images.map(getAssetKey));
       const remainingImages = assetsRef.current.filter((image) => !deletedIds.has(getAssetKey(image)));
       assetsRef.current = remainingImages;
       setSavedImages(remainingImages);
       clearSelection();
+      setActionError(null);
       setLoadError(null);
       return true;
     } catch (error) {
-      setLoadError(getErrorMessage(error));
+      const message = getErrorMessage(error);
+      setActionError(message);
+      Alert.alert('Could not delete image', message);
       return false;
     } finally {
       setIsDeleting(false);
@@ -261,7 +266,9 @@ export default function ExploreScreen() {
         url: selectedImages[0].uri,
       });
     } catch (error) {
-      setLoadError(getErrorMessage(error));
+      const message = getErrorMessage(error);
+      setActionError(message);
+      Alert.alert('Could not share image', message);
     }
   };
 
@@ -294,7 +301,9 @@ export default function ExploreScreen() {
         url: openedImage.uri,
       });
     } catch (error) {
-      setLoadError(getErrorMessage(error));
+      const message = getErrorMessage(error);
+      setActionError(message);
+      Alert.alert('Could not share image', message);
     }
   };
 
@@ -306,6 +315,7 @@ export default function ExploreScreen() {
         onBack={() => setOpenedImage(null)}
         onDelete={confirmDeleteOpenedImage}
         onShare={shareOpenedImage}
+        error={actionError}
       />
     );
   }
@@ -452,7 +462,7 @@ export default function ExploreScreen() {
   );
 }
 
-function OpenedImageView({ image, disabled, onBack, onDelete, onShare }) {
+function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) {
   return (
     <ThemedView style={styles.openedImageContainer}>
       <SafeAreaView style={styles.openedImageSafeArea}>
@@ -520,6 +530,11 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare }) {
             </ThemedText>
           </Pressable>
         </View>
+        {error ? (
+          <ThemedText style={styles.openedImageError}>
+            {error}
+          </ThemedText>
+        ) : null}
       </SafeAreaView>
     </ThemedView>
   );
@@ -841,6 +856,11 @@ const styles = StyleSheet.create({
   },
   openedImageActionText: {
     color: Colors.light.background,
+  },
+  openedImageError: {
+    marginTop: Spacing.two,
+    color: '#ffb4ab',
+    textAlign: 'center',
   },
   selectionHeader: {
     minHeight: 72,

@@ -264,9 +264,9 @@ function CameraScreen() {
     cameraRequestStarted.current = true;
     requestCameraPermission().then((permission) => {
       if (!permission.granted) {
-        router.replace('/');
+        router.replace('/explore');
       }
-    }).catch(() => router.replace('/'));
+    }).catch(() => router.replace('/explore'));
   }, [cameraPermission, requestCameraPermission]);
 
   const capturePhoto = async () => {

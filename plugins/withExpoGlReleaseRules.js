@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { withDangerousMod } = require('@expo/config-plugins');
+const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
 
 const EXPO_GL_RULES = `
 
@@ -10,7 +10,39 @@ const EXPO_GL_RULES = `
 -keep class expo.modules.gl.** { *; }
 `;
 
+function withSingleTaskMainActivity(config) {
+  return withAndroidManifest(config, (config) => {
+    const application = config.modResults.manifest.application?.[0];
+    const activities = application?.activity ?? [];
+    const mainActivity = activities.find((activity) => {
+      const name = activity.$?.['android:name'] ?? '';
+      const hasMainLauncherIntent = (activity['intent-filter'] ?? []).some((intentFilter) => {
+        const actions = intentFilter.action ?? [];
+        const categories = intentFilter.category ?? [];
+        const hasMainAction = actions.some((action) => action.$?.['android:name'] === 'android.intent.action.MAIN');
+        const hasLauncherCategory = categories.some(
+          (category) => category.$?.['android:name'] === 'android.intent.category.LAUNCHER'
+        );
+        return hasMainAction && hasLauncherCategory;
+      });
+
+      return name.endsWith('.MainActivity') || hasMainLauncherIntent;
+    });
+
+    if (mainActivity) {
+      mainActivity.$ = {
+        ...mainActivity.$,
+        'android:launchMode': 'singleTask',
+      };
+    }
+
+    return config;
+  });
+}
+
 module.exports = function withExpoGlReleaseRules(config) {
+  config = withSingleTaskMainActivity(config);
+
   return withDangerousMod(config, [
     'android',
     async (config) => {
