@@ -48,8 +48,7 @@ export default function ExploreScreen() {
   const hasMoreRef = useRef(true);
   const permissionRef = useRef(null);
   const mediaPermissionRef = useRef(null);
-  const ignoreNextPressRef = useRef(false);
-  const ignoreNextPressTimerRef = useRef(null);
+  const suppressedPressKeyRef = useRef(null);
   const openedImageRef = useRef(null);
   const [mediaPermission, requestMediaPermission] = useMediaPermissions({
     writeOnly: false,
@@ -147,11 +146,7 @@ export default function ExploreScreen() {
       loadSavedImages(true);
 
       return () => {
-        if (ignoreNextPressTimerRef.current) {
-          clearTimeout(ignoreNextPressTimerRef.current);
-          ignoreNextPressTimerRef.current = null;
-        }
-        ignoreNextPressRef.current = false;
+        suppressedPressKeyRef.current = null;
       };
     }, [loadSavedImages])
   );
@@ -203,14 +198,17 @@ export default function ExploreScreen() {
   }, []);
 
   const handleTilePress = useCallback((image) => {
-    if (ignoreNextPressRef.current) {
-      ignoreNextPressRef.current = false;
-      if (ignoreNextPressTimerRef.current) {
-        clearTimeout(ignoreNextPressTimerRef.current);
-        ignoreNextPressTimerRef.current = null;
-      }
+    const imageKey = getAssetKey(image);
+
+    // React Native can dispatch an onPress after onLongPress for the same
+    // tile. Ignore only that synthetic press; a tap on any other tile must
+    // continue through to selection immediately.
+    if (suppressedPressKeyRef.current === imageKey) {
+      suppressedPressKeyRef.current = null;
       return;
     }
+
+    suppressedPressKeyRef.current = null;
 
     if (isSelectionModeRef.current) {
       toggleSelection(image);
@@ -222,14 +220,7 @@ export default function ExploreScreen() {
   const handleTileLongPress = useCallback((image) => {
     if (isSelectionModeRef.current) return;
 
-    ignoreNextPressRef.current = true;
-    if (ignoreNextPressTimerRef.current) {
-      clearTimeout(ignoreNextPressTimerRef.current);
-    }
-    ignoreNextPressTimerRef.current = setTimeout(() => {
-      ignoreNextPressRef.current = false;
-      ignoreNextPressTimerRef.current = null;
-    }, 750);
+    suppressedPressKeyRef.current = getAssetKey(image);
     startSelection(image);
   }, [startSelection]);
 
