@@ -1566,11 +1566,12 @@ const styles = StyleSheet.create({
     position: 'relative',
     borderRadius: Spacing.two,
     backgroundColor: '#111111',
-    overflow: 'hidden',
+    overflow: 'visible',
   },
   reviewImage: {
     flex: 1,
     width: '100%',
+    borderRadius: Spacing.two,
   },
   savedImageFrame: {
     width: '100%',
