@@ -102,6 +102,20 @@ export async function renderPerspectiveCropAsync({
   }
 }
 
+export async function renderRotatedImageAsync({ uri, sourceWidth, sourceHeight }) {
+  return renderPerspectiveCropAsync({
+    uri,
+    sourceWidth,
+    sourceHeight,
+    corners: {
+      topLeft: { x: 0, y: 1 },
+      topRight: { x: 0, y: 0 },
+      bottomRight: { x: 1, y: 0 },
+      bottomLeft: { x: 1, y: 1 },
+    },
+  });
+}
+
 export async function renderAdaptiveThresholdAsync({
   uri,
   sourceWidth,

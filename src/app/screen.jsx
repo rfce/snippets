@@ -24,6 +24,7 @@ import {
   renderMagicColorAsync,
   renderAdaptiveThresholdAsync,
   renderPerspectiveCropAsync,
+  renderRotatedImageAsync,
 } from '@/perspective-crop';
 import {
   appendUniqueMediaLibraryImages,
@@ -171,6 +172,7 @@ function CameraScreen() {
   const [magicColorPhoto, setMagicColorPhoto] = useState(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isSavingPreview, setIsSavingPreview] = useState(false);
+  const [isRotating, setIsRotating] = useState(false);
   const [cropCorners, setCropCorners] = useState(null);
   const [cameraError, setCameraError] = useState(null);
   const [diagnosticError, setDiagnosticError] = useState(null);
@@ -355,8 +357,42 @@ function CameraScreen() {
   const discardPhoto = () => {
     setCapturedPhoto(null);
     setCropCorners(null);
+    setIsRotating(false);
     setIsCameraReady(false);
     setCameraError(null);
+  };
+
+  const rotateCapturedPhoto = async () => {
+    if (!capturedPhoto?.uri || isCapturing || isRotating) return;
+
+    if (Platform.OS === 'web') {
+      Alert.alert('Not available', 'Image rotation is available on a mobile device.');
+      return;
+    }
+
+    setIsRotating(true);
+
+    try {
+      const rotatedPhoto = await renderRotatedImageAsync({
+        uri: capturedPhoto.uri,
+        sourceWidth: capturedPhoto.width,
+        sourceHeight: capturedPhoto.height,
+      });
+
+      setCapturedPhoto((current) => ({
+        ...current,
+        ...rotatedPhoto,
+      }));
+      setCropCorners(null);
+    } catch (error) {
+      reportDiagnostic('Rotate captured image', error, {
+        sourceUri: capturedPhoto.uri,
+        sourceWidth: capturedPhoto.width ?? null,
+        sourceHeight: capturedPhoto.height ?? null,
+      });
+    } finally {
+      setIsRotating(false);
+    }
   };
 
   const closeSavedPhoto = () => {
@@ -832,17 +868,37 @@ function CameraScreen() {
               />
             </View>
 
+            <Pressable
+              accessibilityLabel="Rotate image 90 degrees clockwise"
+              accessibilityRole="button"
+              disabled={isCapturing || isRotating}
+              onPress={rotateCapturedPhoto}
+              style={({ pressed }) => [
+                styles.reviewRotateButton,
+                pressed && styles.pressed,
+                (isCapturing || isRotating) && styles.disabled,
+              ]}>
+              <SymbolView
+                name={{ ios: 'arrow.clockwise', android: 'rotate_right', web: 'rotate_right' }}
+                size={22}
+                tintColor={REVIEW_NEXT_ACCENT}
+              />
+              <ThemedText type="smallBold" style={styles.reviewRotateText}>
+                Rotate
+              </ThemedText>
+            </Pressable>
+
             <View style={styles.savedImageActions}>
               <Pressable
                 accessibilityLabel="Discard captured image"
                 accessibilityRole="button"
-                disabled={isCapturing}
+                disabled={isCapturing || isRotating}
                 onPress={discardPhoto}
                 style={({ pressed }) => [
                   styles.savedImageActionButton,
                   styles.reviewActionButton,
                   pressed && styles.pressed,
-                  isCapturing && styles.disabled,
+                  (isCapturing || isRotating) && styles.disabled,
                 ]}>
                 <SymbolView
                   name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
@@ -860,13 +916,13 @@ function CameraScreen() {
               <Pressable
                 accessibilityLabel="Next"
                 accessibilityRole="button"
-                disabled={isCapturing}
+                disabled={isCapturing || isRotating}
                 onPress={continueToSavedImage}
                 style={({ pressed }) => [
                   styles.savedImageActionButton,
                   styles.reviewActionButton,
                   pressed && styles.pressed,
-                  isCapturing && styles.disabled,
+                  (isCapturing || isRotating) && styles.disabled,
                 ]}>
                 <ThemedText
                   type="smallBold"
@@ -1558,6 +1614,24 @@ const styles = StyleSheet.create({
     lineHeight: 26,
     fontWeight: '400',
     letterSpacing: 0.2,
+  },
+  reviewRotateButton: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    marginTop: Spacing.two,
+    marginBottom: Spacing.one,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    borderRadius: 999,
+    backgroundColor: '#EEF4FF',
+    borderWidth: 1,
+    borderColor: '#C8D8F5',
+  },
+  reviewRotateText: {
+    color: REVIEW_NEXT_ACCENT,
   },
   saveButtonText: {
     color: Colors.light.background,
