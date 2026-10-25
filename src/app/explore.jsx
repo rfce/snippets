@@ -5,6 +5,7 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   FlatList,
   Pressable,
   Share,
@@ -43,6 +44,7 @@ export default function ExploreScreen() {
   const mediaPermissionRef = useRef(null);
   const ignoreNextPressRef = useRef(false);
   const ignoreNextPressTimerRef = useRef(null);
+  const openedImageRef = useRef(null);
   const [mediaPermission, requestMediaPermission] = useMediaPermissions({
     writeOnly: false,
     granularPermissions: ['photo'],
@@ -63,6 +65,10 @@ export default function ExploreScreen() {
   useEffect(() => {
     mediaPermissionRef.current = mediaPermission;
   }, [mediaPermission]);
+
+  useEffect(() => {
+    openedImageRef.current = openedImage;
+  }, [openedImage]);
 
   const loadSavedImages = useCallback(async (reset = false) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return;
@@ -138,6 +144,23 @@ export default function ExploreScreen() {
     }, [loadSavedImages])
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      if (!BackHandler?.addEventListener) return undefined;
+
+      const handleBackPress = () => {
+        if (!openedImageRef.current) return false;
+
+        closeOpenedImage();
+        return true;
+      };
+
+      const subscription = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
+
+      return () => subscription.remove();
+    }, [])
+  );
+
   const startSelection = (image) => {
     setSelectedImageIds(new Set([getAssetKey(image)]));
   };
@@ -159,6 +182,18 @@ export default function ExploreScreen() {
 
   const clearSelection = () => {
     setSelectedImageIds(new Set());
+  };
+
+  const openImage = (image) => {
+    openedImageRef.current = image;
+    setActionError(null);
+    setOpenedImage(image);
+  };
+
+  const closeOpenedImage = () => {
+    openedImageRef.current = null;
+    setActionError(null);
+    setOpenedImage(null);
   };
 
   const selectAllImages = async () => {
@@ -285,7 +320,7 @@ export default function ExploreScreen() {
           style: 'destructive',
           onPress: async () => {
             const deleted = await deleteImages([openedImage]);
-            if (deleted) setOpenedImage(null);
+            if (deleted) closeOpenedImage();
           },
         },
       ]
@@ -312,7 +347,7 @@ export default function ExploreScreen() {
       <OpenedImageView
         image={openedImage}
         disabled={isDeleting}
-        onBack={() => setOpenedImage(null)}
+        onBack={closeOpenedImage}
         onDelete={confirmDeleteOpenedImage}
         onShare={shareOpenedImage}
         error={actionError}
@@ -371,7 +406,7 @@ export default function ExploreScreen() {
                 if (isSelectionMode) {
                   toggleSelection(item);
                 } else {
-                  setOpenedImage(item);
+                  openImage(item);
                 }
               }}
               style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
