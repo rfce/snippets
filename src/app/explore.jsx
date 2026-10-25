@@ -1,5 +1,5 @@
-import { useFocusEffect, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
+import { useFocusEffect, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { SymbolView } from 'expo-symbols';
 import { memo, useCallback, useContext, useEffect, useRef, useState } from 'react';
@@ -560,6 +560,7 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
             onPress={onDelete}
             style={({ pressed }) => [
               styles.openedImageAction,
+              styles.horizontalAction,
               pressed && styles.pressed,
               disabled && styles.disabled,
             ]}>
@@ -580,6 +581,7 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
             onPress={onShare}
             style={({ pressed }) => [
               styles.openedImageAction,
+              styles.horizontalAction,
               pressed && styles.pressed,
               disabled && styles.disabled,
             ]}>
@@ -653,7 +655,12 @@ function SelectionActionBar({ bottomInset, disabled, onDelete, onShare, backgrou
         accessibilityRole="button"
         disabled={disabled}
         onPress={onDelete}
-        style={({ pressed }) => [styles.selectionAction, pressed && styles.pressed, disabled && styles.disabled]}>
+        style={({ pressed }) => [
+          styles.selectionAction,
+          styles.horizontalAction,
+          pressed && styles.pressed,
+          disabled && styles.disabled,
+        ]}>
         <SymbolView
           name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
           size={27}
@@ -668,7 +675,12 @@ function SelectionActionBar({ bottomInset, disabled, onDelete, onShare, backgrou
         accessibilityRole="button"
         disabled={disabled}
         onPress={onShare}
-        style={({ pressed }) => [styles.selectionAction, pressed && styles.pressed, disabled && styles.disabled]}>
+        style={({ pressed }) => [
+          styles.selectionAction,
+          styles.horizontalAction,
+          pressed && styles.pressed,
+          disabled && styles.disabled,
+        ]}>
         <SymbolView
           name={{ ios: 'square.and.arrow.up', android: 'share', web: 'share' }}
           size={27}
@@ -892,6 +904,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: Spacing.one,
     paddingVertical: Spacing.one,
+  },
+  horizontalAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   openedImageActionText: {
     color: Colors.light.background,

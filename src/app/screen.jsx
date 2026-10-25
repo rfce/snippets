@@ -72,6 +72,10 @@ const FLASH_MODES = [
 const GALLERY_PAGE_SIZE = 36;
 const TEAL_ACCENT = '#16C7B7';
 const SILVER_ACCENT = '#D6D9DE';
+const REVIEW_DISCARD_ACCENT = '#C2415A';
+const REVIEW_NEXT_ACCENT = '#3C78D8';
+const PREVIEW_RETAKE_ACCENT = '#C2415A';
+const PREVIEW_SAVE_ACCENT = '#2F9E72';
 
 const SAVED_IMAGE_OPTIONS = [
   { label: 'Original', value: 'original' },
@@ -730,22 +734,23 @@ function CameraScreen() {
                 accessibilityRole="button"
                 disabled={isEnhancing || isSavingPreview}
                 onPress={closeSavedPhoto}
-                 style={({ pressed }) => [
-                   styles.savedImageActionButton,
-                   pressed && styles.pressed,
-                   (isEnhancing || isSavingPreview) && styles.disabled,
+                  style={({ pressed }) => [
+                    styles.savedImageActionButton,
+                    styles.previewActionButton,
+                    pressed && styles.pressed,
+                    (isEnhancing || isSavingPreview) && styles.disabled,
                  ]}>
-                 <SymbolView
-                   name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }}
-                   size={30}
-                   tintColor="#111111"
-                 />
-                 <ThemedText
-                   type="smallBold"
-                   allowFontScaling={false}
-                   style={styles.savedImageActionText}>
-                   Retake
-                 </ThemedText>
+                  <SymbolView
+                    name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }}
+                    size={30}
+                    tintColor={PREVIEW_RETAKE_ACCENT}
+                  />
+                  <ThemedText
+                    type="smallBold"
+                    allowFontScaling={false}
+                    style={styles.previewRetakeText}>
+                    Retake
+                  </ThemedText>
               </Pressable>
 
               <Pressable
@@ -753,27 +758,28 @@ function CameraScreen() {
                 accessibilityRole="button"
                 disabled={isEnhancing || isSavingPreview}
                 onPress={saveSavedImage}
-                 style={({ pressed }) => [
-                   styles.savedImageActionButton,
-                   pressed && styles.pressed,
-                   (isEnhancing || isSavingPreview) && styles.disabled,
+                  style={({ pressed }) => [
+                    styles.savedImageActionButton,
+                    styles.previewActionButton,
+                    pressed && styles.pressed,
+                    (isEnhancing || isSavingPreview) && styles.disabled,
                  ]}>
                  {isSavingPreview ? (
-                   <ActivityIndicator color="#111111" />
-                 ) : (
-                   <SymbolView
-                     name={{ ios: 'square.and.arrow.down', android: 'save', web: 'save' }}
-                     size={30}
-                     tintColor="#111111"
-                   />
-                 )}
-                 {!isSavingPreview && (
-                   <ThemedText
-                     type="smallBold"
-                     allowFontScaling={false}
-                     style={styles.savedImageActionText}>
-                     Save
-                   </ThemedText>
+                    <ActivityIndicator color={PREVIEW_SAVE_ACCENT} />
+                  ) : (
+                    <SymbolView
+                      name={{ ios: 'square.and.arrow.down', android: 'save', web: 'save' }}
+                      size={30}
+                      tintColor={PREVIEW_SAVE_ACCENT}
+                    />
+                  )}
+                  {!isSavingPreview && (
+                    <ThemedText
+                      type="smallBold"
+                      allowFontScaling={false}
+                      style={styles.previewSaveText}>
+                      Save
+                    </ThemedText>
                  )}
               </Pressable>
             </View>
@@ -793,7 +799,7 @@ function CameraScreen() {
               styles.reviewSafeArea,
               { paddingBottom: Spacing.three },
             ]}>
-            <ThemedText type="subtitle" style={styles.reviewTitle}>
+            <ThemedText type="default" style={styles.reviewTitle}>
               Review capture
             </ThemedText>
 
@@ -814,19 +820,29 @@ function CameraScreen() {
               />
             </View>
 
-            <View style={styles.reviewActions}>
+            <View style={styles.savedImageActions}>
               <Pressable
                 accessibilityLabel="Discard captured image"
                 accessibilityRole="button"
                 disabled={isCapturing}
                 onPress={discardPhoto}
                 style={({ pressed }) => [
-                  styles.actionButton,
-                  styles.discardButton,
+                  styles.savedImageActionButton,
+                  styles.reviewActionButton,
                   pressed && styles.pressed,
                   isCapturing && styles.disabled,
                 ]}>
-                <ThemedText type="smallBold">Discard</ThemedText>
+                <SymbolView
+                  name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
+                  size={30}
+                  tintColor={REVIEW_DISCARD_ACCENT}
+                />
+                <ThemedText
+                  type="smallBold"
+                  allowFontScaling={false}
+                  style={styles.reviewDiscardText}>
+                  Discard
+                </ThemedText>
               </Pressable>
 
               <Pressable
@@ -835,17 +851,25 @@ function CameraScreen() {
                 disabled={isCapturing}
                 onPress={continueToSavedImage}
                 style={({ pressed }) => [
-                  styles.actionButton,
-                  styles.saveButton,
+                  styles.savedImageActionButton,
+                  styles.reviewActionButton,
                   pressed && styles.pressed,
                   isCapturing && styles.disabled,
                 ]}>
+                <ThemedText
+                  type="smallBold"
+                  allowFontScaling={false}
+                  style={styles.reviewNextText}>
+                  Next
+                </ThemedText>
                 {isCapturing ? (
-                  <ActivityIndicator color={Colors.light.background} />
+                  <ActivityIndicator color={REVIEW_NEXT_ACCENT} />
                 ) : (
-                  <ThemedText type="smallBold" style={styles.saveButtonText}>
-                    Next
-                  </ThemedText>
+                  <SymbolView
+                    name={{ ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' }}
+                    size={30}
+                    tintColor={REVIEW_NEXT_ACCENT}
+                  />
                 )}
               </Pressable>
             </View>
@@ -1518,6 +1542,13 @@ const styles = StyleSheet.create({
     color: Colors.light.background,
     textAlign: 'center',
     marginBottom: Spacing.three,
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: '400',
+    letterSpacing: 0.2,
+  },
+  saveButtonText: {
+    color: Colors.light.background,
   },
   savedImageTitle: {
     color: Colors.light.background,
@@ -1629,29 +1660,6 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#3c87f7',
   },
-  reviewActions: {
-    width: '100%',
-    flexDirection: 'row',
-    gap: Spacing.two,
-    paddingTop: Spacing.three,
-  },
-  actionButton: {
-    flex: 1,
-    minHeight: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: Spacing.two,
-    paddingHorizontal: Spacing.three,
-  },
-  discardButton: {
-    backgroundColor: '#2b2b2b',
-  },
-  saveButton: {
-    backgroundColor: '#3c87f7',
-  },
-  saveButtonText: {
-    color: Colors.light.background,
-  },
   savedImageActions: {
     alignSelf: 'stretch',
     flexDirection: 'row',
@@ -1671,8 +1679,23 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
     paddingHorizontal: Spacing.three,
   },
-  savedImageActionText: {
-    color: '#111111',
+  reviewActionButton: {
+    flexDirection: 'row',
+  },
+  previewActionButton: {
+    flexDirection: 'row',
+  },
+  previewRetakeText: {
+    color: PREVIEW_RETAKE_ACCENT,
+  },
+  previewSaveText: {
+    color: PREVIEW_SAVE_ACCENT,
+  },
+  reviewDiscardText: {
+    color: REVIEW_DISCARD_ACCENT,
+  },
+  reviewNextText: {
+    color: REVIEW_NEXT_ACCENT,
   },
   controls: {
     position: 'absolute',
