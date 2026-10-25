@@ -42,7 +42,8 @@
           "imageWidth": 76
         }
       ],
-      "./plugins/withExpoGlReleaseRules"
+      "./plugins/withExpoGlReleaseRules",
+      "expo-sharing"
     ],
     "experiments": {
       "reactCompiler": true

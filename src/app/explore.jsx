@@ -1,5 +1,6 @@
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
+import * as Sharing from 'expo-sharing';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
@@ -8,7 +9,6 @@ import {
   BackHandler,
   FlatList,
   Pressable,
-  Share,
   StyleSheet,
   View,
 } from 'react-native';
@@ -241,7 +241,7 @@ export default function ExploreScreen() {
       }
 
       if (!permission?.granted) {
-        throw new Error('Photo-library permission is required to delete saved images.');
+        throw new Error('Photo-library permission is required to delete snippets.');
       }
 
       const assetsToDelete = images.map((image) => new mediaLibraryModule.Asset(image.id));
@@ -274,7 +274,7 @@ export default function ExploreScreen() {
     if (!selectedCount || isDeleting) return;
 
     Alert.alert(
-      'Delete saved images?',
+      'Delete snippets?',
       `This will permanently delete ${selectedCount} ${selectedCount === 1 ? 'image' : 'images'}.`,
       [
         { text: 'Cancel', style: 'cancel' },
@@ -297,10 +297,7 @@ export default function ExploreScreen() {
     }
 
     try {
-      await Share.share({
-        title: 'Share Snippets image',
-        url: selectedImages[0].uri,
-      });
+      await shareImageFile(selectedImages[0]);
     } catch (error) {
       const message = getErrorMessage(error);
       setActionError(message);
@@ -312,7 +309,7 @@ export default function ExploreScreen() {
     if (!openedImage || isDeleting) return;
 
     Alert.alert(
-      'Delete saved image?',
+      'Delete snippet?',
       'This will permanently delete this image.',
       [
         { text: 'Cancel', style: 'cancel' },
@@ -332,10 +329,7 @@ export default function ExploreScreen() {
     if (!openedImage || isDeleting) return;
 
     try {
-      await Share.share({
-        title: 'Share Snippets image',
-        url: openedImage.uri,
-      });
+      await shareImageFile(openedImage);
     } catch (error) {
       const message = getErrorMessage(error);
       setActionError(message);
@@ -376,8 +370,8 @@ export default function ExploreScreen() {
             <Pressable
               accessibilityLabel={
                 isSelectionMode
-                  ? `${selectedImageIds.has(getAssetKey(item)) ? 'Unselect' : 'Select'} ${item.fileName || 'saved image'}`
-                : `Open ${item.fileName || 'saved image'}`
+                   ? `${selectedImageIds.has(getAssetKey(item)) ? 'Unselect' : 'Select'} ${item.fileName || 'snippet'}`
+                : `Open ${item.fileName || 'snippet'}`
               }
               accessibilityRole="button"
               delayLongPress={300}
@@ -412,7 +406,7 @@ export default function ExploreScreen() {
               }}
               style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
               <Image
-                accessibilityLabel={item.fileName || 'Saved image'}
+                accessibilityLabel={item.fileName || 'Snippet'}
                 contentFit="cover"
                 source={{ uri: item.uri }}
                 style={styles.galleryImage}
@@ -440,9 +434,9 @@ export default function ExploreScreen() {
               />
             ) : (
               <View style={styles.header}>
-                <ThemedText type="title">Saved images</ThemedText>
+                <ThemedText type="title">Snippets</ThemedText>
                 <ThemedText themeColor="textSecondary" style={styles.subtitle}>
-                  Your previously saved images
+                  Your saved snippets
                 </ThemedText>
               </View>
             )
@@ -518,7 +512,7 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
 
         <View style={styles.openedImageFrame}>
           <Image
-            accessibilityLabel={image.fileName || 'Opened saved image'}
+            accessibilityLabel={image.fileName || 'Opened snippet'}
             contentFit="contain"
             source={{ uri: image.uri }}
             style={styles.openedImage}
@@ -659,7 +653,7 @@ function ExploreEmptyState({ isLoading, error, onRetry, textColor }) {
       <View style={styles.emptyState}>
         <ActivityIndicator color={textColor} />
         <ThemedText themeColor="textSecondary" style={styles.emptyText}>
-          Loading saved images…
+          Loading snippets…
         </ThemedText>
       </View>
     );
@@ -677,7 +671,7 @@ function ExploreEmptyState({ isLoading, error, onRetry, textColor }) {
           {error}
         </ThemedText>
         <Pressable
-          accessibilityLabel="Retry loading saved images"
+          accessibilityLabel="Retry loading snippets"
           accessibilityRole="button"
           onPress={onRetry}
           style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}>
@@ -697,7 +691,7 @@ function ExploreEmptyState({ isLoading, error, onRetry, textColor }) {
         tintColor="#b9b9b9"
       />
       <ThemedText themeColor="textSecondary" style={styles.emptyText}>
-        No saved images yet.
+        No snippets yet.
       </ThemedText>
       <ThemedText themeColor="textSecondary" style={styles.emptyHint}>
         Images you save from the camera will appear here.
@@ -719,10 +713,10 @@ function GalleryFooter({ isLoading, hasMore, error, onRetry }) {
     return (
       <View style={styles.footerState}>
         <ThemedText themeColor="textSecondary" style={styles.footerText}>
-          Could not load more images.
+          Could not load more snippets.
         </ThemedText>
         <Pressable
-          accessibilityLabel="Retry loading more saved images"
+          accessibilityLabel="Retry loading more snippets"
           accessibilityRole="button"
           onPress={onRetry}
           style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}>
@@ -738,7 +732,7 @@ function GalleryFooter({ isLoading, hasMore, error, onRetry }) {
     return (
       <View style={styles.footerState}>
         <ThemedText themeColor="textSecondary" style={styles.footerText}>
-          All saved images are shown.
+          All snippets are shown.
         </ThemedText>
       </View>
     );
@@ -760,6 +754,31 @@ async function querySavedImagePage(album, offset, limit) {
     .exe();
 
   return assets ?? [];
+}
+
+async function shareImageFile(image) {
+  if (!image?.uri) {
+    throw new Error('The selected snippet does not have a shareable file.');
+  }
+
+  const isAvailable = await Sharing.isAvailableAsync();
+  if (!isAvailable) {
+    throw new Error('Image sharing is not available on this device.');
+  }
+
+  await Sharing.shareAsync(image.uri, {
+    dialogTitle: 'Share image',
+    mimeType: getImageMimeType(image.fileName ?? image.uri),
+  });
+}
+
+function getImageMimeType(fileNameOrUri) {
+  const extension = String(fileNameOrUri).split(/[?#]/)[0].split('.').pop()?.toLowerCase();
+
+  if (extension === 'png') return 'image/png';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'heic' || extension === 'heif') return 'image/heic';
+  return 'image/jpeg';
 }
 
 async function normalizeSavedImage(asset) {
@@ -813,7 +832,7 @@ function dedupeAssets(assets) {
 
 function getErrorMessage(error) {
   if (error instanceof Error && error.message) return error.message;
-  return 'Unable to load saved images.';
+  return 'Unable to load snippets.';
 }
 
 function getAssetKey(asset) {
