@@ -1,7 +1,7 @@
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -24,7 +24,11 @@ import {
   renderAdaptiveThresholdAsync,
   renderPerspectiveCropAsync,
 } from '@/perspective-crop';
-import { saveToSnippetsAlbum } from '@/snippets-library';
+import {
+  appendUniqueMediaLibraryImages,
+  normalizeMediaLibraryImage,
+  saveToSnippetsAlbum,
+} from '@/snippets-library';
 
 const cameraModule = getCameraModule();
 const mediaLibraryModule = getMediaLibraryModule();
@@ -64,7 +68,13 @@ const FLASH_MODES = [
   },
 ];
 
-const GALLERY_PAGE_SIZE = 60;
+const GALLERY_PAGE_SIZE = 36;
+
+const SAVED_IMAGE_OPTIONS = [
+  { label: 'Original', value: 'original' },
+  { label: 'Black & White', value: 'blackAndWhite' },
+  { label: 'Magic Color', value: 'magicColor' },
+];
 
 export default function ScreenTab() {
   if (
@@ -188,26 +198,14 @@ function CameraScreen() {
 
       const offset = reset ? 0 : galleryAssets.length;
       const page = await queryGalleryPage(offset, GALLERY_PAGE_SIZE);
-      const normalizedAssets = await Promise.all(
-        page.assets.map((asset) => normalizeGalleryAsset(asset))
-      );
+      const normalizedAssets = await Promise.all(page.assets.map(normalizeMediaLibraryImage));
       const usableAssets = normalizedAssets.filter((asset) => asset?.uri);
 
-      setGalleryAssets((current) => {
-        const next = reset ? usableAssets : [...current, ...usableAssets];
-        const uniqueAssets = [];
-        const seenIds = new Set();
-
-        next.forEach((asset) => {
-          const key = asset.id || asset.uri;
-          if (!seenIds.has(key)) {
-            seenIds.add(key);
-            uniqueAssets.push(asset);
-          }
-        });
-
-        return uniqueAssets;
-      });
+      setGalleryAssets((current) =>
+        reset
+          ? appendUniqueMediaLibraryImages([], usableAssets)
+          : appendUniqueMediaLibraryImages(current, usableAssets)
+      );
       setHasMoreGallery(page.hasNextPage ?? usableAssets.length === GALLERY_PAGE_SIZE);
     } catch (error) {
       reportDiagnostic('Load gallery images', error, {
@@ -239,7 +237,7 @@ function CameraScreen() {
     setIsCameraReady(false);
   };
 
-  const selectGalleryImage = (asset) => {
+  const selectGalleryImage = useCallback((asset) => {
     setCapturedPhoto({
       uri: asset.uri,
       width: asset.width,
@@ -249,7 +247,12 @@ function CameraScreen() {
     setCropCorners(null);
     setIsImporting(false);
     setIsCameraReady(false);
-  };
+  }, []);
+
+  const renderGalleryItem = useCallback(
+    ({ item }) => <GalleryImportTile item={item} onSelect={selectGalleryImage} />,
+    [selectGalleryImage]
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -276,7 +279,7 @@ function CameraScreen() {
     setIsCapturing(true);
 
     try {
-      const photo = await cameraRef.current.takePictureAsync({ format: 'png' });
+       const photo = await cameraRef.current.takePictureAsync({ format: 'jpg', quality: 0.92 });
 
       if (!photo?.uri) {
         throw new Error('Camera capture completed without returning a photo URI.');
@@ -522,19 +525,12 @@ function CameraScreen() {
                 numColumns={3}
                 contentContainerStyle={styles.galleryGrid}
                 columnWrapperStyle={styles.galleryRow}
-                renderItem={({ item }) => (
-                  <Pressable
-                    accessibilityLabel={`Import image ${item.fileName || 'from gallery'}`}
-                    accessibilityRole="button"
-                    onPress={() => selectGalleryImage(item)}
-                    style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
-                    <Image
-                      contentFit="cover"
-                      source={{ uri: item.uri }}
-                      style={styles.galleryTileImage}
-                    />
-                  </Pressable>
-                )}
+                renderItem={renderGalleryItem}
+                initialNumToRender={12}
+                maxToRenderPerBatch={9}
+                windowSize={5}
+                updateCellsBatchingPeriod={50}
+                removeClippedSubviews={Platform.OS === 'android'}
                 onEndReached={() => loadGalleryPage(false)}
                 onEndReachedThreshold={0.6}
                 ListFooterComponent={
@@ -580,11 +576,7 @@ function CameraScreen() {
             </View>
 
             <View style={styles.savedImageToggleRow}>
-              {[
-                { label: 'Original', value: 'original' },
-                { label: 'Black & White', value: 'blackAndWhite' },
-                { label: 'Magic Color', value: 'magicColor' },
-              ].map((option) => {
+              {SAVED_IMAGE_OPTIONS.map((option) => {
                 const isActive = savedImageMode === option.value;
 
                 return (
@@ -853,6 +845,25 @@ const edgeConnections = {
   left: ['bottomLeft', 'topLeft'],
 };
 
+const GalleryImportTile = memo(function GalleryImportTile({ item, onSelect }) {
+  return (
+    <Pressable
+      accessibilityLabel={`Import image ${item.fileName || 'from gallery'}`}
+      accessibilityRole="button"
+      onPress={() => onSelect(item)}
+      style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
+      <Image
+        contentFit="cover"
+        priority="low"
+        recyclingKey={item.id || item.uri}
+        source={item.uri}
+        style={styles.galleryTileImage}
+        transition={0}
+      />
+    </Pressable>
+  );
+});
+
 function CropOverlay({ aspectRatio, corners, onCornersChange }) {
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
 
@@ -1091,46 +1102,6 @@ async function queryGalleryPage(offset, limit) {
   return {
     assets: assets ?? [],
     hasNextPage: (assets?.length ?? 0) === limit,
-  };
-}
-
-async function normalizeGalleryAsset(asset) {
-  if (!asset) return null;
-
-  let info = asset;
-  let uri = null;
-
-  if (typeof asset.getUri === 'function') {
-    try {
-      uri = await asset.getUri();
-    } catch {
-      uri = null;
-    }
-  }
-
-  if (typeof asset.getInfo === 'function') {
-    try {
-      info = await asset.getInfo();
-    } catch {
-      info = asset;
-    }
-  } else if (typeof asset.getAssetInfoAsync === 'function') {
-    try {
-      info = await asset.getAssetInfoAsync();
-    } catch {
-      info = asset;
-    }
-  }
-
-  uri = uri ?? info?.localUri ?? info?.uri ?? asset.uri ?? asset.id;
-  if (!uri) return null;
-
-  return {
-    id: info?.id ?? asset.id ?? uri,
-    uri,
-    width: info?.width ?? asset.width ?? 1,
-    height: info?.height ?? asset.height ?? 1,
-    fileName: info?.filename ?? asset.filename ?? asset.fileName ?? null,
   };
 }
 

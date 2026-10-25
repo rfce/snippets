@@ -1,7 +1,11 @@
-// Keep the processed document close to the camera's native resolution so
-// letters do not lose pixels before the user zooms in. PNG snapshots below
-// preserve those pixels without introducing JPEG block artifacts.
+// Keep the processed document close to the camera's native resolution while
+// using JPEG snapshots to avoid the large files and decode cost of PNG.
 const MAX_OUTPUT_EDGE = 4096;
+const SNAPSHOT_OPTIONS = {
+  format: 'jpeg',
+  compress: 0.92,
+  flip: false,
+};
 
 export async function renderPerspectiveCropAsync({
   uri,
@@ -9,13 +13,6 @@ export async function renderPerspectiveCropAsync({
   sourceWidth,
   sourceHeight,
 }) {
-  console.log('[perspective-crop] Starting crop', {
-    uri,
-    sourceWidth: sourceWidth ?? null,
-    sourceHeight: sourceHeight ?? null,
-    corners,
-  });
-
   if (!uri) {
     throw new Error('A source image is required for perspective cropping.');
   }
@@ -23,8 +20,6 @@ export async function renderPerspectiveCropAsync({
   validateCorners(corners);
 
   const outputSize = getOutputSize(corners, sourceWidth, sourceHeight);
-  console.log('[perspective-crop] Output size calculated', outputSize);
-
   const axisAlignedCrop = getAxisAlignedCrop(corners);
   const destinationToSource = axisAlignedCrop
     ? getAxisAlignedTransform(axisAlignedCrop)
@@ -37,17 +32,7 @@ export async function renderPerspectiveCropAsync({
         ],
         [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft]
       );
-  console.log('[perspective-crop] Sampling transform type', axisAlignedCrop ? 'rectangle' : 'homography');
-  console.log('[perspective-crop] Homography solved', destinationToSource);
-  console.log('[perspective-crop] Homography corner mapping', {
-    outputTopLeft: applyHomography(destinationToSource, { x: 0, y: 0 }),
-    outputTopRight: applyHomography(destinationToSource, { x: 1, y: 0 }),
-    outputBottomRight: applyHomography(destinationToSource, { x: 1, y: 1 }),
-    outputBottomLeft: applyHomography(destinationToSource, { x: 0, y: 1 }),
-  });
-
   const GLView = getGLView();
-  console.log('[perspective-crop] Creating headless GL context');
   const gl = await GLView.createContextAsync();
   let sourceTexture;
   let outputTexture;
@@ -57,13 +42,9 @@ export async function renderPerspectiveCropAsync({
 
   try {
     program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
-    console.log('[perspective-crop] Shader program created');
     sourceTexture = createSourceTexture(gl, uri);
-    console.log('[perspective-crop] Source texture created');
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
-    console.log('[perspective-crop] Output texture created');
     framebuffer = createFramebuffer(gl, outputTexture);
-    console.log('[perspective-crop] Framebuffer created');
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     gl.viewport(0, 0, outputSize.width, outputSize.height);
@@ -93,20 +74,10 @@ export async function renderPerspectiveCropAsync({
     gl.flush();
     gl.flushEXP?.();
     checkGlError(gl, 'rendering the perspective crop');
-    console.log('[perspective-crop] Render completed');
-
-    console.log('[perspective-crop] Taking framebuffer snapshot');
     const snapshot = await GLView.takeSnapshotAsync(gl, {
+      ...SNAPSHOT_OPTIONS,
       framebuffer,
-      format: 'png',
-      flip: false,
     });
-    console.log('[perspective-crop] Snapshot created', {
-      uri: snapshot?.localUri ?? snapshot?.uri ?? null,
-      width: snapshot?.width ?? null,
-      height: snapshot?.height ?? null,
-    });
-
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
     if (!snapshotUri || typeof snapshotUri !== 'string') {
       throw new Error('Perspective crop completed without producing an image file.');
@@ -125,7 +96,6 @@ export async function renderPerspectiveCropAsync({
       if (sourceTexture) gl.deleteTexture(sourceTexture);
       if (program) gl.deleteProgram(program);
       await GLView.destroyContextAsync(gl);
-      console.log('[perspective-crop] GL resources released');
     } catch (cleanupError) {
       console.warn('[perspective-crop] GL cleanup failed after render', cleanupError);
     }
@@ -144,13 +114,6 @@ export async function renderAdaptiveThresholdAsync({
   const width = sourceWidth || 1;
   const height = sourceHeight || 1;
   const outputSize = getScaledOutputSize(width, height);
-  console.log('[perspective-crop] Starting adaptive threshold', {
-    uri,
-    sourceWidth: width,
-    sourceHeight: height,
-    outputSize,
-  });
-
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
@@ -209,21 +172,14 @@ export async function renderAdaptiveThresholdAsync({
     checkGlError(gl, 'rendering the adaptive threshold');
 
     const snapshot = await GLView.takeSnapshotAsync(gl, {
+      ...SNAPSHOT_OPTIONS,
       framebuffer,
-      format: 'png',
-      flip: false,
     });
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
 
     if (!snapshotUri || typeof snapshotUri !== 'string') {
       throw new Error('Adaptive threshold completed without producing an image file.');
     }
-
-    console.log('[perspective-crop] Adaptive threshold snapshot created', {
-      uri: snapshotUri,
-      width: outputSize.width,
-      height: outputSize.height,
-    });
 
     return {
       uri: snapshotUri,
@@ -256,13 +212,6 @@ export async function renderMagicColorAsync({
   const width = sourceWidth || 1;
   const height = sourceHeight || 1;
   const outputSize = getScaledOutputSize(width, height);
-  console.log('[perspective-crop] Starting magic color enhancement', {
-    uri,
-    sourceWidth: width,
-    sourceHeight: height,
-    outputSize,
-  });
-
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
@@ -322,21 +271,14 @@ export async function renderMagicColorAsync({
     checkGlError(gl, 'rendering magic color');
 
     const snapshot = await GLView.takeSnapshotAsync(gl, {
+      ...SNAPSHOT_OPTIONS,
       framebuffer,
-      format: 'png',
-      flip: false,
     });
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
 
     if (!snapshotUri || typeof snapshotUri !== 'string') {
       throw new Error('Magic-color enhancement completed without producing an image file.');
     }
-
-    console.log('[perspective-crop] Magic color snapshot created', {
-      uri: snapshotUri,
-      width: outputSize.width,
-      height: outputSize.height,
-    });
 
     return {
       uri: snapshotUri,
@@ -545,15 +487,6 @@ function setHomographyUniforms(gl, program, matrix) {
   });
 
   checkGlError(gl, 'setting the perspective homography');
-  console.log('[perspective-crop] Homography uniforms applied', matrix);
-}
-
-function applyHomography(matrix, point) {
-  const denominator = matrix[2][0] * point.x + matrix[2][1] * point.y + matrix[2][2];
-  return {
-    x: (matrix[0][0] * point.x + matrix[0][1] * point.y + matrix[0][2]) / denominator,
-    y: (matrix[1][0] * point.x + matrix[1][1] * point.y + matrix[1][2]) / denominator,
-  };
 }
 
 function createSourceTexture(gl, uri) {

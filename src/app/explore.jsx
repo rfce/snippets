@@ -2,12 +2,13 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import * as Sharing from 'expo-sharing';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   BackHandler,
   FlatList,
+  Platform,
   Pressable,
   StyleSheet,
   View,
@@ -19,9 +20,13 @@ import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { SelectionContext } from '@/context/SelectionContext';
 import { useTheme } from '@/hooks/use-theme';
-import { getSnippetsAlbum } from '@/snippets-library';
+import {
+  appendUniqueMediaLibraryImages,
+  getSnippetsAlbum,
+  normalizeMediaLibraryImage,
+} from '@/snippets-library';
 
-const GALLERY_PAGE_SIZE = 60;
+const GALLERY_PAGE_SIZE = 36;
 const mediaLibraryModule = getMediaLibraryModule();
 const useMediaPermissions = mediaLibraryModule?.usePermissions ?? (() => [null, null]);
 
@@ -58,6 +63,8 @@ export default function ExploreScreen() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [openedImage, setOpenedImage] = useState(null);
   const isSelectionMode = selectedImageIds.size > 0;
+  const isSelectionModeRef = useRef(isSelectionMode);
+  isSelectionModeRef.current = isSelectionMode;
   const allImagesSelected =
     savedImages.length > 0 &&
     !hasMoreImages &&
@@ -115,13 +122,11 @@ export default function ExploreScreen() {
 
       const offset = reset ? 0 : assetsRef.current.length;
       const assets = await querySavedImagePage(snippetsAlbum, offset, GALLERY_PAGE_SIZE);
-      const normalizedAssets = await Promise.all(
-        assets.map((asset) => normalizeSavedImage(asset))
-      );
+      const normalizedAssets = await Promise.all(assets.map(normalizeMediaLibraryImage));
       const usableAssets = normalizedAssets.filter((asset) => asset?.uri);
-      const nextImages = dedupeAssets(
-        reset ? usableAssets : [...assetsRef.current, ...usableAssets]
-      );
+      const nextImages = reset
+        ? appendUniqueMediaLibraryImages([], usableAssets)
+        : appendUniqueMediaLibraryImages(assetsRef.current, usableAssets);
       const nextHasMore = usableAssets.length === GALLERY_PAGE_SIZE;
 
       assetsRef.current = nextImages;
@@ -168,11 +173,11 @@ export default function ExploreScreen() {
     }, [closeOpenedImage])
   );
 
-  const startSelection = (image) => {
+  const startSelection = useCallback((image) => {
     setSelectedImageIds(new Set([getAssetKey(image)]));
-  };
+  }, [setSelectedImageIds]);
 
-  const toggleSelection = (image) => {
+  const toggleSelection = useCallback((image) => {
     setSelectedImageIds((current) => {
       const next = new Set(current);
       const key = getAssetKey(image);
@@ -185,17 +190,48 @@ export default function ExploreScreen() {
 
       return next;
     });
-  };
+  }, [setSelectedImageIds]);
 
-  const clearSelection = () => {
+  const clearSelection = useCallback(() => {
     setSelectedImageIds(new Set());
-  };
+  }, [setSelectedImageIds]);
 
-  const openImage = (image) => {
+  const openImage = useCallback((image) => {
     openedImageRef.current = image;
     setActionError(null);
     setOpenedImage(image);
-  };
+  }, []);
+
+  const handleTilePress = useCallback((image) => {
+    if (ignoreNextPressRef.current) {
+      ignoreNextPressRef.current = false;
+      if (ignoreNextPressTimerRef.current) {
+        clearTimeout(ignoreNextPressTimerRef.current);
+        ignoreNextPressTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (isSelectionModeRef.current) {
+      toggleSelection(image);
+    } else {
+      openImage(image);
+    }
+  }, [openImage, toggleSelection]);
+
+  const handleTileLongPress = useCallback((image) => {
+    if (isSelectionModeRef.current) return;
+
+    ignoreNextPressRef.current = true;
+    if (ignoreNextPressTimerRef.current) {
+      clearTimeout(ignoreNextPressTimerRef.current);
+    }
+    ignoreNextPressTimerRef.current = setTimeout(() => {
+      ignoreNextPressRef.current = false;
+      ignoreNextPressTimerRef.current = null;
+    }, 750);
+    startSelection(image);
+  }, [startSelection]);
 
   const selectAllImages = async () => {
     if (isLoading || isDeleting) return;
@@ -337,6 +373,19 @@ export default function ExploreScreen() {
     }
   };
 
+  const renderSnippetItem = useCallback(
+    ({ item }) => (
+      <SnippetTile
+        item={item}
+        isSelected={selectedImageIds.has(getAssetKey(item))}
+        isSelectionMode={isSelectionMode}
+        onLongPress={handleTileLongPress}
+        onPress={handleTilePress}
+      />
+    ),
+    [handleTileLongPress, handleTilePress, isSelectionMode, selectedImageIds]
+  );
+
   if (openedImage) {
     return (
       <OpenedImageView
@@ -359,6 +408,12 @@ export default function ExploreScreen() {
           data={savedImages}
           keyExtractor={(item) => item.id || item.uri}
           numColumns={3}
+          extraData={selectedImageIds}
+          initialNumToRender={12}
+          maxToRenderPerBatch={9}
+          windowSize={5}
+          updateCellsBatchingPeriod={50}
+          removeClippedSubviews={Platform.OS === 'android'}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={[
             styles.listContent,
@@ -366,62 +421,7 @@ export default function ExploreScreen() {
             savedImages.length === 0 && styles.emptyListContent,
           ]}
           columnWrapperStyle={styles.galleryRow}
-          renderItem={({ item }) => (
-            <Pressable
-              accessibilityLabel={
-                isSelectionMode
-                   ? `${selectedImageIds.has(getAssetKey(item)) ? 'Unselect' : 'Select'} ${item.fileName || 'snippet'}`
-                : `Open ${item.fileName || 'snippet'}`
-              }
-              accessibilityRole="button"
-              delayLongPress={300}
-              onLongPress={() => {
-                if (!isSelectionMode) {
-                  ignoreNextPressRef.current = true;
-                  if (ignoreNextPressTimerRef.current) {
-                    clearTimeout(ignoreNextPressTimerRef.current);
-                  }
-                  ignoreNextPressTimerRef.current = setTimeout(() => {
-                    ignoreNextPressRef.current = false;
-                    ignoreNextPressTimerRef.current = null;
-                  }, 750);
-                  startSelection(item);
-                }
-              }}
-              onPress={() => {
-                if (ignoreNextPressRef.current) {
-                  ignoreNextPressRef.current = false;
-                  if (ignoreNextPressTimerRef.current) {
-                    clearTimeout(ignoreNextPressTimerRef.current);
-                    ignoreNextPressTimerRef.current = null;
-                  }
-                  return;
-                }
-
-                if (isSelectionMode) {
-                  toggleSelection(item);
-                } else {
-                  openImage(item);
-                }
-              }}
-              style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
-              <Image
-                accessibilityLabel={item.fileName || 'Snippet'}
-                contentFit="cover"
-                source={{ uri: item.uri }}
-                style={styles.galleryImage}
-              />
-              {selectedImageIds.has(getAssetKey(item)) && (
-                <View style={styles.selectionCheckmark}>
-                  <SymbolView
-                    name={{ ios: 'checkmark', android: 'check', web: 'check' }}
-                    size={16}
-                    tintColor={Colors.light.background}
-                  />
-                </View>
-              )}
-            </Pressable>
-          )}
+          renderItem={renderSnippetItem}
           ListHeaderComponent={
             isSelectionMode ? (
               <SelectionHeader
@@ -492,6 +492,47 @@ export default function ExploreScreen() {
   );
 }
 
+const SnippetTile = memo(function SnippetTile({
+  item,
+  isSelected,
+  isSelectionMode,
+  onLongPress,
+  onPress,
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={
+        isSelectionMode
+          ? `${isSelected ? 'Unselect' : 'Select'} ${item.fileName || 'snippet'}`
+          : `Open ${item.fileName || 'snippet'}`
+      }
+      accessibilityRole="button"
+      delayLongPress={300}
+      onLongPress={() => onLongPress(item)}
+      onPress={() => onPress(item)}
+      style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
+      <Image
+        accessibilityLabel={item.fileName || 'Snippet'}
+        contentFit="cover"
+        priority="low"
+        recyclingKey={item.id || item.uri}
+        source={item.uri}
+        style={styles.galleryImage}
+        transition={0}
+      />
+      {isSelected && (
+        <View style={styles.selectionCheckmark}>
+          <SymbolView
+            name={{ ios: 'checkmark', android: 'check', web: 'check' }}
+            size={16}
+            tintColor={Colors.light.background}
+          />
+        </View>
+      )}
+    </Pressable>
+  );
+});
+
 function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) {
   return (
     <ThemedView style={styles.openedImageContainer}>
@@ -514,8 +555,9 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
           <Image
             accessibilityLabel={image.fileName || 'Opened snippet'}
             contentFit="contain"
-            source={{ uri: image.uri }}
+            source={image.uri}
             style={styles.openedImage}
+            transition={0}
           />
         </View>
 
@@ -779,55 +821,6 @@ function getImageMimeType(fileNameOrUri) {
   if (extension === 'webp') return 'image/webp';
   if (extension === 'heic' || extension === 'heif') return 'image/heic';
   return 'image/jpeg';
-}
-
-async function normalizeSavedImage(asset) {
-  if (!asset) return null;
-
-  let info = asset;
-  let uri = null;
-
-  if (typeof asset.getUri === 'function') {
-    try {
-      uri = await asset.getUri();
-    } catch {
-      uri = null;
-    }
-  }
-
-  if (typeof asset.getInfo === 'function') {
-    try {
-      info = await asset.getInfo();
-    } catch {
-      info = asset;
-    }
-  }
-
-  uri = uri ?? info?.uri ?? asset.uri ?? asset.id;
-  if (!uri) return null;
-
-  return {
-    id: info?.id ?? asset.id ?? uri,
-    uri,
-    width: info?.width ?? asset.width ?? 1,
-    height: info?.height ?? asset.height ?? 1,
-    fileName: info?.filename ?? asset.filename ?? asset.fileName ?? null,
-  };
-}
-
-function dedupeAssets(assets) {
-  const uniqueAssets = [];
-  const seen = new Set();
-
-  assets.forEach((asset) => {
-    const key = asset.id || asset.uri;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueAssets.push(asset);
-    }
-  });
-
-  return uniqueAssets;
 }
 
 function getErrorMessage(error) {
