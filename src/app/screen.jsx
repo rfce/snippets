@@ -766,11 +766,11 @@ function CameraScreen() {
                  ]}>
                  {isSavingPreview ? (
                     <ActivityIndicator color={PREVIEW_SAVE_ACCENT} />
-                  ) : (
-                    <SymbolView
-                      name={{ ios: 'square.and.arrow.down', android: 'save', web: 'save' }}
-                      size={30}
-                      tintColor={PREVIEW_SAVE_ACCENT}
+                   ) : (
+                     <SymbolView
+                       name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
+                       size={30}
+                       tintColor={PREVIEW_SAVE_ACCENT}
                     />
                   )}
                   {!isSavingPreview && (
@@ -1668,12 +1668,13 @@ const styles = StyleSheet.create({
     marginHorizontal: -Spacing.four,
     marginBottom: -Spacing.three,
     paddingTop: Spacing.two,
+    paddingBottom: Spacing.two,
     paddingHorizontal: 0,
     backgroundColor: SILVER_ACCENT,
   },
   savedImageActionButton: {
     flex: 1,
-    minHeight: 66,
+    minHeight: 46,
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.one,
