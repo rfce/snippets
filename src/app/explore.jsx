@@ -1,4 +1,4 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
@@ -36,6 +36,7 @@ function getMediaLibraryModule() {
 export default function ExploreScreen() {
   const theme = useTheme();
   const safeAreaInsets = useSafeAreaInsets();
+  const router = useRouter();
   const { selectedImageIds, setSelectedImageIds } = useContext(SelectionContext);
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
@@ -69,6 +70,12 @@ export default function ExploreScreen() {
   useEffect(() => {
     openedImageRef.current = openedImage;
   }, [openedImage]);
+
+  const closeOpenedImage = useCallback(() => {
+    openedImageRef.current = null;
+    setActionError(null);
+    setOpenedImage(null);
+  }, []);
 
   const loadSavedImages = useCallback(async (reset = false) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return;
@@ -158,7 +165,7 @@ export default function ExploreScreen() {
       const subscription = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
 
       return () => subscription.remove();
-    }, [])
+    }, [closeOpenedImage])
   );
 
   const startSelection = (image) => {
@@ -188,12 +195,6 @@ export default function ExploreScreen() {
     openedImageRef.current = image;
     setActionError(null);
     setOpenedImage(image);
-  };
-
-  const closeOpenedImage = () => {
-    openedImageRef.current = null;
-    setActionError(null);
-    setOpenedImage(null);
   };
 
   const selectAllImages = async () => {
@@ -484,7 +485,7 @@ export default function ExploreScreen() {
         <Pressable
           accessibilityLabel="Open camera"
           accessibilityRole="button"
-          onPress={() => router.push('/screen')}
+          onPress={() => router.navigate('/screen')}
           style={({ pressed }) => [styles.cameraFab, pressed && styles.pressed]}>
           <SymbolView
             name={{ ios: 'camera.fill', android: 'photo_camera', web: 'photo_camera' }}

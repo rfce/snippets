@@ -1,4 +1,4 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -128,6 +128,7 @@ function CameraModuleUnavailable() {
 function CameraScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const cameraRef = useRef(null);
   const cameraRequestStarted = useRef(false);
   const galleryLoadingRef = useRef(false);
@@ -267,7 +268,7 @@ function CameraScreen() {
         router.replace('/explore');
       }
     }).catch(() => router.replace('/explore'));
-  }, [cameraPermission, requestCameraPermission]);
+  }, [cameraPermission, requestCameraPermission, router]);
 
   const capturePhoto = async () => {
     if (!cameraRef.current || !isCameraReady || isCapturing) return;
