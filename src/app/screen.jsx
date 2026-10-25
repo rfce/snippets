@@ -5,6 +5,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
   Platform,
   PanResponder,
@@ -69,6 +70,8 @@ const FLASH_MODES = [
 ];
 
 const GALLERY_PAGE_SIZE = 36;
+const TEAL_ACCENT = '#16C7B7';
+const SILVER_ACCENT = '#D6D9DE';
 
 const SAVED_IMAGE_OPTIONS = [
   { label: 'Original', value: 'original' },
@@ -167,6 +170,10 @@ function CameraScreen() {
   const [hasMoreGallery, setHasMoreGallery] = useState(true);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [recentGalleryImage, setRecentGalleryImage] = useState(null);
+  const savedImageModeAnimation = useRef(new Animated.Value(0)).current;
+  const savedImageLiquidScale = useRef(new Animated.Value(1)).current;
+  const savedImageModeAnimationStarted = useRef(false);
+  const [savedImageToggleRowWidth, setSavedImageToggleRowWidth] = useState(0);
 
   const reportDiagnostic = useCallback((operation, error, context = {}) => {
     const diagnostic = createDiagnosticDetails(operation, error, context);
@@ -314,7 +321,11 @@ function CameraScreen() {
     setIsCapturing(true);
 
     try {
-       const photo = await cameraRef.current.takePictureAsync({ format: 'jpg', quality: 0.92 });
+      const photo = await cameraRef.current.takePictureAsync({
+        format: 'jpg',
+        quality: 0.92,
+        shutterSound: false,
+      });
 
       if (!photo?.uri) {
         throw new Error('Camera capture completed without returning a photo URI.');
@@ -354,6 +365,56 @@ function CameraScreen() {
       : savedImageMode === 'magicColor' && magicColorPhoto
         ? magicColorPhoto
         : savedPhoto;
+
+  const savedImageModeIndex = Math.max(
+    0,
+    SAVED_IMAGE_OPTIONS.findIndex((option) => option.value === savedImageMode)
+  );
+  const savedImageToggleItemWidth =
+    savedImageToggleRowWidth > 0
+      ? (savedImageToggleRowWidth - Spacing.half * 2 - Spacing.two * 2) / 3
+      : 0;
+  const savedImageLiquidStep = savedImageToggleItemWidth + Spacing.two;
+  const savedImageLiquidTranslateX = savedImageModeAnimation.interpolate({
+    inputRange: [0, 1, 2],
+    outputRange: [0, savedImageLiquidStep, savedImageLiquidStep * 2],
+  });
+
+  useEffect(() => {
+    if (!savedImageModeAnimationStarted.current) {
+      savedImageModeAnimation.setValue(savedImageModeIndex);
+      savedImageModeAnimationStarted.current = true;
+      return undefined;
+    }
+
+    Animated.parallel([
+      Animated.spring(savedImageModeAnimation, {
+        toValue: savedImageModeIndex,
+        friction: 9,
+        tension: 120,
+        useNativeDriver: true,
+      }),
+      Animated.sequence([
+        Animated.timing(savedImageLiquidScale, {
+          toValue: 1.1,
+          duration: 120,
+          useNativeDriver: true,
+        }),
+        Animated.spring(savedImageLiquidScale, {
+          toValue: 1,
+          friction: 5,
+          tension: 90,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+
+    return undefined;
+  }, [
+    savedImageLiquidScale,
+    savedImageModeAnimation,
+    savedImageModeIndex,
+  ]);
 
   const selectSavedImageMode = async (mode) => {
     setSavedImageMode(mode);
@@ -599,8 +660,8 @@ function CameraScreen() {
               styles.savedImageSafeArea,
               { paddingBottom: Spacing.three },
             ]}>
-            <ThemedText type="subtitle" style={styles.savedImageTitle}>
-              Saved image
+             <ThemedText type="default" style={styles.savedImageTitle}>
+               Preview
             </ThemedText>
 
             <View style={styles.savedImageFrame}>
@@ -611,12 +672,29 @@ function CameraScreen() {
               />
               {isEnhancing && (
                 <View style={styles.savedImageLoadingOverlay}>
-                  <ActivityIndicator color={Colors.light.background} />
+                  <ActivityIndicator color={TEAL_ACCENT} />
                 </View>
               )}
             </View>
 
-            <View style={styles.savedImageToggleRow}>
+            <View
+              style={styles.savedImageToggleRow}
+              onLayout={({ nativeEvent }) => {
+                setSavedImageToggleRowWidth(nativeEvent.layout.width);
+              }}>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.savedImageLiquid,
+                  {
+                    width: savedImageToggleItemWidth,
+                    transform: [
+                      { translateX: savedImageLiquidTranslateX },
+                      { scaleX: savedImageLiquidScale },
+                    ],
+                  },
+                ]}
+              />
               {SAVED_IMAGE_OPTIONS.map((option) => {
                 const isActive = savedImageMode === option.value;
 
@@ -629,11 +707,12 @@ function CameraScreen() {
                     onPress={() => selectSavedImageMode(option.value)}
                     style={({ pressed }) => [
                       styles.savedImageToggleButton,
-                      isActive && styles.savedImageToggleButtonActive,
                       pressed && styles.pressed,
                     ]}>
                     <ThemedText
-                      type="smallBold"
+                      type="default"
+                      allowFontScaling={false}
+                      numberOfLines={1}
                       style={[
                         styles.savedImageToggleText,
                         isActive && styles.savedImageToggleTextActive,
@@ -645,19 +724,28 @@ function CameraScreen() {
               })}
             </View>
 
-            <View style={styles.savedImageActions}>
-              <Pressable
+             <View style={[styles.savedImageActions, { paddingBottom: insets.bottom + Spacing.two }]}>
+               <Pressable
                 accessibilityLabel="Retake photo"
                 accessibilityRole="button"
                 disabled={isEnhancing || isSavingPreview}
                 onPress={closeSavedPhoto}
-                style={({ pressed }) => [
-                  styles.savedImageActionButton,
-                  styles.retakeButton,
-                  pressed && styles.pressed,
-                  (isEnhancing || isSavingPreview) && styles.disabled,
-                ]}>
-                <ThemedText type="smallBold">Retake</ThemedText>
+                 style={({ pressed }) => [
+                   styles.savedImageActionButton,
+                   pressed && styles.pressed,
+                   (isEnhancing || isSavingPreview) && styles.disabled,
+                 ]}>
+                 <SymbolView
+                   name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }}
+                   size={30}
+                   tintColor="#111111"
+                 />
+                 <ThemedText
+                   type="smallBold"
+                   allowFontScaling={false}
+                   style={styles.savedImageActionText}>
+                   Retake
+                 </ThemedText>
               </Pressable>
 
               <Pressable
@@ -665,19 +753,28 @@ function CameraScreen() {
                 accessibilityRole="button"
                 disabled={isEnhancing || isSavingPreview}
                 onPress={saveSavedImage}
-                style={({ pressed }) => [
-                  styles.savedImageActionButton,
-                  styles.saveButton,
-                  pressed && styles.pressed,
-                  (isEnhancing || isSavingPreview) && styles.disabled,
-                ]}>
-                {isSavingPreview ? (
-                  <ActivityIndicator color={Colors.light.background} />
-                ) : (
-                  <ThemedText type="smallBold" style={styles.saveButtonText}>
-                    Save
-                  </ThemedText>
-                )}
+                 style={({ pressed }) => [
+                   styles.savedImageActionButton,
+                   pressed && styles.pressed,
+                   (isEnhancing || isSavingPreview) && styles.disabled,
+                 ]}>
+                 {isSavingPreview ? (
+                   <ActivityIndicator color="#111111" />
+                 ) : (
+                   <SymbolView
+                     name={{ ios: 'square.and.arrow.down', android: 'save', web: 'save' }}
+                     size={30}
+                     tintColor="#111111"
+                   />
+                 )}
+                 {!isSavingPreview && (
+                   <ThemedText
+                     type="smallBold"
+                     allowFontScaling={false}
+                     style={styles.savedImageActionText}>
+                     Save
+                   </ThemedText>
+                 )}
               </Pressable>
             </View>
           </SafeAreaView>
@@ -1403,7 +1500,7 @@ const styles = StyleSheet.create({
   },
   savedImageContainer: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: '#061312',
   },
   reviewSafeArea: {
     flex: 1,
@@ -1425,7 +1522,11 @@ const styles = StyleSheet.create({
   savedImageTitle: {
     color: Colors.light.background,
     textAlign: 'center',
-    marginBottom: Spacing.three,
+    marginBottom: Spacing.two,
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: '400',
+    letterSpacing: 0.2,
   },
   imageFrame: {
     width: '100%',
@@ -1446,7 +1547,7 @@ const styles = StyleSheet.create({
     minHeight: 1,
     position: 'relative',
     borderRadius: Spacing.two,
-    backgroundColor: '#111111',
+    backgroundColor: '#081A19',
     overflow: 'hidden',
   },
   savedImage: {
@@ -1457,33 +1558,53 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    backgroundColor: 'rgba(3, 19, 18, 0.58)',
   },
   savedImageToggleRow: {
     width: '100%',
     flexDirection: 'row',
     gap: Spacing.two,
     marginTop: Spacing.three,
+    padding: Spacing.half,
+    position: 'relative',
+    overflow: 'hidden',
+    borderRadius: 999,
+    backgroundColor: 'transparent',
+  },
+  savedImageLiquid: {
+    position: 'absolute',
+    top: Spacing.half,
+    bottom: Spacing.half,
+    left: Spacing.half,
+    borderRadius: 999,
+    backgroundColor: SILVER_ACCENT,
+    shadowColor: '#B8BDC5',
+    shadowOpacity: 0.34,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+    zIndex: 0,
   },
   savedImageToggleButton: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 40,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: Spacing.two,
-    borderWidth: 1,
-    borderColor: '#5c5c5c',
+    borderRadius: 999,
+    backgroundColor: 'transparent',
     paddingHorizontal: Spacing.two,
-  },
-  savedImageToggleButtonActive: {
-    borderWidth: 2,
-    borderColor: '#3c87f7',
+    zIndex: 1,
   },
   savedImageToggleText: {
-    color: '#b9b9b9',
+    color: '#D6D9DE',
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '400',
+    textAlign: 'center',
   },
   savedImageToggleTextActive: {
-    color: Colors.light.background,
+    color: '#061312',
+    fontWeight: '400',
   },
   cropOverlay: {
     position: 'absolute',
@@ -1532,21 +1653,26 @@ const styles = StyleSheet.create({
     color: Colors.light.background,
   },
   savedImageActions: {
-    width: '100%',
+    alignSelf: 'stretch',
     flexDirection: 'row',
-    gap: Spacing.two,
-    marginTop: Spacing.three,
+    gap: 0,
+    marginTop: Spacing.two,
+    marginHorizontal: -Spacing.four,
+    marginBottom: -Spacing.three,
+    paddingTop: Spacing.two,
+    paddingHorizontal: 0,
+    backgroundColor: SILVER_ACCENT,
   },
   savedImageActionButton: {
     flex: 1,
-    minHeight: 52,
+    minHeight: 66,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: Spacing.two,
+    gap: Spacing.one,
     paddingHorizontal: Spacing.three,
   },
-  retakeButton: {
-    backgroundColor: '#2b2b2b',
+  savedImageActionText: {
+    color: '#111111',
   },
   controls: {
     position: 'absolute',
