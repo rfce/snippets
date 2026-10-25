@@ -1,4 +1,4 @@
-import { useFocusEffect } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
@@ -15,9 +15,8 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { BottomTabInset, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { SelectionContext } from '@/context/SelectionContext';
-import { TabBarContext } from '@/context/TabBarContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSnippetsAlbum } from '@/snippets-library';
 
@@ -37,7 +36,6 @@ export default function ExploreScreen() {
   const theme = useTheme();
   const safeAreaInsets = useSafeAreaInsets();
   const { selectedImageIds, setSelectedImageIds } = useContext(SelectionContext);
-  const { setIsTabBarHidden } = useContext(TabBarContext);
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
   const hasMoreRef = useRef(true);
@@ -54,21 +52,12 @@ export default function ExploreScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [openedImage, setOpenedImage] = useState(null);
   const isSelectionMode = selectedImageIds.size > 0;
   const allImagesSelected =
     savedImages.length > 0 &&
     !hasMoreImages &&
     savedImages.every((image) => selectedImageIds.has(getAssetKey(image)));
-
-  useEffect(() => {
-    setIsTabBarHidden(isSelectionMode);
-  }, [isSelectionMode, setIsTabBarHidden]);
-
-  useEffect(() => {
-    return () => {
-      setIsTabBarHidden(false);
-    };
-  }, [setIsTabBarHidden]);
 
   useEffect(() => {
     mediaPermissionRef.current = mediaPermission;
@@ -196,9 +185,8 @@ export default function ExploreScreen() {
     return assetsRef.current.filter((image) => selectedImageIds.has(getAssetKey(image)));
   };
 
-  const deleteSelectedImages = async () => {
-    const selectedImages = getSelectedImages();
-    if (!selectedImages.length || isDeleting) return;
+  const deleteImages = async (images) => {
+    if (!images.length || isDeleting) return false;
 
     setIsDeleting(true);
 
@@ -227,11 +215,17 @@ export default function ExploreScreen() {
       setSavedImages(remainingImages);
       clearSelection();
       setLoadError(null);
+      return true;
     } catch (error) {
       setLoadError(getErrorMessage(error));
+      return false;
     } finally {
       setIsDeleting(false);
     }
+  };
+
+  const deleteSelectedImages = async () => {
+    await deleteImages(getSelectedImages());
   };
 
   const confirmDeleteSelectedImages = () => {
@@ -271,9 +265,52 @@ export default function ExploreScreen() {
     }
   };
 
-  const bottomInset = isSelectionMode
-    ? safeAreaInsets.bottom + 96
-    : safeAreaInsets.bottom + BottomTabInset + Spacing.three;
+  const confirmDeleteOpenedImage = () => {
+    if (!openedImage || isDeleting) return;
+
+    Alert.alert(
+      'Delete saved image?',
+      'This will permanently delete this image.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const deleted = await deleteImages([openedImage]);
+            if (deleted) setOpenedImage(null);
+          },
+        },
+      ]
+    );
+  };
+
+  const shareOpenedImage = async () => {
+    if (!openedImage || isDeleting) return;
+
+    try {
+      await Share.share({
+        title: 'Share Snippets image',
+        url: openedImage.uri,
+      });
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    }
+  };
+
+  if (openedImage) {
+    return (
+      <OpenedImageView
+        image={openedImage}
+        disabled={isDeleting}
+        onBack={() => setOpenedImage(null)}
+        onDelete={confirmDeleteOpenedImage}
+        onShare={shareOpenedImage}
+      />
+    );
+  }
+
+  const bottomInset = safeAreaInsets.bottom + (isSelectionMode ? 96 : 112);
 
   return (
     <ThemedView style={styles.container}>
@@ -294,7 +331,7 @@ export default function ExploreScreen() {
               accessibilityLabel={
                 isSelectionMode
                   ? `${selectedImageIds.has(getAssetKey(item)) ? 'Unselect' : 'Select'} ${item.fileName || 'saved image'}`
-                  : `Select ${item.fileName || 'saved image'}`
+                : `Open ${item.fileName || 'saved image'}`
               }
               accessibilityRole="button"
               delayLongPress={300}
@@ -321,7 +358,11 @@ export default function ExploreScreen() {
                   return;
                 }
 
-                if (isSelectionMode) toggleSelection(item);
+                if (isSelectionMode) {
+                  toggleSelection(item);
+                } else {
+                  setOpenedImage(item);
+                }
               }}
               style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
               <Image
@@ -394,6 +435,92 @@ export default function ExploreScreen() {
           textColor={theme.text}
         />
       )}
+      {!isSelectionMode && (
+        <Pressable
+          accessibilityLabel="Open camera"
+          accessibilityRole="button"
+          onPress={() => router.push('/screen')}
+          style={({ pressed }) => [styles.cameraFab, pressed && styles.pressed]}>
+          <SymbolView
+            name={{ ios: 'camera.fill', android: 'photo_camera', web: 'photo_camera' }}
+            size={28}
+            tintColor={theme.background}
+          />
+        </Pressable>
+      )}
+    </ThemedView>
+  );
+}
+
+function OpenedImageView({ image, disabled, onBack, onDelete, onShare }) {
+  return (
+    <ThemedView style={styles.openedImageContainer}>
+      <SafeAreaView style={styles.openedImageSafeArea}>
+        <View style={styles.openedImageHeader}>
+          <Pressable
+            accessibilityLabel="Back to Explore"
+            accessibilityRole="button"
+            onPress={onBack}
+            style={({ pressed }) => [styles.viewerBackButton, pressed && styles.pressed]}>
+            <SymbolView
+              name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+              size={24}
+              tintColor={Colors.light.background}
+            />
+          </Pressable>
+        </View>
+
+        <View style={styles.openedImageFrame}>
+          <Image
+            accessibilityLabel={image.fileName || 'Opened saved image'}
+            contentFit="contain"
+            source={{ uri: image.uri }}
+            style={styles.openedImage}
+          />
+        </View>
+
+        <View style={styles.openedImageActions}>
+          <Pressable
+            accessibilityLabel="Delete opened image"
+            accessibilityRole="button"
+            disabled={disabled}
+            onPress={onDelete}
+            style={({ pressed }) => [
+              styles.openedImageAction,
+              pressed && styles.pressed,
+              disabled && styles.disabled,
+            ]}>
+            <SymbolView
+              name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
+              size={27}
+              tintColor="#d92d20"
+            />
+            <ThemedText type="smallBold" style={styles.deleteActionText}>
+              Delete
+            </ThemedText>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Share opened image"
+            accessibilityRole="button"
+            disabled={disabled}
+            onPress={onShare}
+            style={({ pressed }) => [
+              styles.openedImageAction,
+              pressed && styles.pressed,
+              disabled && styles.disabled,
+            ]}>
+            <SymbolView
+              name={{ ios: 'square.and.arrow.up', android: 'share', web: 'share' }}
+              size={27}
+              tintColor={Colors.light.background}
+            />
+            <ThemedText type="smallBold" style={styles.openedImageActionText}>
+              Share
+            </ThemedText>
+          </Pressable>
+        </View>
+      </SafeAreaView>
     </ThemedView>
   );
 }
@@ -664,6 +791,57 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
   },
+  openedImageContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  openedImageSafeArea: {
+    flex: 1,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+  },
+  openedImageHeader: {
+    minHeight: 48,
+    justifyContent: 'center',
+  },
+  viewerBackButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  openedImageFrame: {
+    flex: 1,
+    minHeight: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: Spacing.two,
+    borderRadius: Spacing.two,
+    backgroundColor: '#111111',
+    overflow: 'hidden',
+  },
+  openedImage: {
+    width: '100%',
+    height: '100%',
+  },
+  openedImageActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+    paddingTop: Spacing.two,
+  },
+  openedImageAction: {
+    minWidth: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    paddingVertical: Spacing.one,
+  },
+  openedImageActionText: {
+    color: Colors.light.background,
+  },
   selectionHeader: {
     minHeight: 72,
     flexDirection: 'row',
@@ -697,6 +875,23 @@ const styles = StyleSheet.create({
   galleryRow: {
     justifyContent: 'flex-start',
     marginBottom: Spacing.one,
+  },
+  cameraFab: {
+    position: 'absolute',
+    right: Spacing.three,
+    bottom: Spacing.three,
+    width: 64,
+    height: 64,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 32,
+    backgroundColor: '#3c87f7',
+    zIndex: 30,
+    elevation: 8,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
   },
   galleryTile: {
     width: '32.4%',

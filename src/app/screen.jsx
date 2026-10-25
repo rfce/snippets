@@ -17,7 +17,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { BottomTabInset, Colors, Spacing } from '@/constants/theme';
+import { Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
   renderMagicColorAsync,
@@ -559,7 +559,7 @@ function CameraScreen() {
           <SafeAreaView
             style={[
               styles.savedImageSafeArea,
-              { paddingBottom: BottomTabInset + Spacing.three },
+              { paddingBottom: Spacing.three },
             ]}>
             <ThemedText type="subtitle" style={styles.savedImageTitle}>
               Saved image
@@ -660,7 +660,7 @@ function CameraScreen() {
           <SafeAreaView
             style={[
               styles.reviewSafeArea,
-              { paddingBottom: BottomTabInset + Spacing.three },
+              { paddingBottom: Spacing.three },
             ]}>
             <ThemedText type="subtitle" style={styles.reviewTitle}>
               Review capture
@@ -759,6 +759,24 @@ function CameraScreen() {
 
       {isFocused && (
         <Pressable
+          accessibilityLabel="Close camera"
+          accessibilityRole="button"
+          onPress={() => router.replace('/explore')}
+          style={({ pressed }) => [
+            styles.cameraCloseButton,
+            { top: insets.top + Spacing.three },
+            pressed && styles.pressed,
+          ]}>
+          <SymbolView
+            name={{ ios: 'xmark', android: 'close', web: 'close' }}
+            size={22}
+            tintColor="#dedede"
+          />
+        </Pressable>
+      )}
+
+      {isFocused && (
+        <Pressable
           accessibilityLabel={`Flash mode: ${getFlashModeLabel(flashMode)}. Tap to change.`}
           accessibilityRole="button"
           accessibilityState={{ selected: flashMode !== 'off' }}
@@ -779,7 +797,7 @@ function CameraScreen() {
 
       <View
         pointerEvents="box-none"
-        style={[styles.controls, { paddingBottom: insets.bottom + BottomTabInset + Spacing.three }]}> 
+        style={[styles.controls, { paddingBottom: insets.bottom + Spacing.three }]}> 
         <View style={styles.captureControlsRow}>
           <Pressable
             accessibilityLabel="Import Image"
@@ -1527,6 +1545,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.45)',
   },
+  cameraCloseButton: {
+    position: 'absolute',
+    left: Spacing.three,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.58)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.45)',
+    zIndex: 2,
+  },
   flashModeButtonActive: {
     backgroundColor: '#3c87f7',
     borderColor: Colors.light.background,
@@ -1584,7 +1615,7 @@ const styles = StyleSheet.create({
     width: 44,
   },
   galleryGrid: {
-    paddingBottom: BottomTabInset + Spacing.three,
+    paddingBottom: Spacing.three,
   },
   galleryRow: {
     gap: Spacing.one,
