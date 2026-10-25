@@ -142,6 +142,7 @@ function CameraScreen() {
   const cameraRef = useRef(null);
   const cameraRequestStarted = useRef(false);
   const galleryLoadingRef = useRef(false);
+  const recentImageLoadStartedRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = cameraModule.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = mediaLibraryModule.usePermissions({
     writeOnly: false,
@@ -165,6 +166,7 @@ function CameraScreen() {
   const [galleryAssets, setGalleryAssets] = useState([]);
   const [hasMoreGallery, setHasMoreGallery] = useState(true);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
+  const [recentGalleryImage, setRecentGalleryImage] = useState(null);
 
   const reportDiagnostic = useCallback((operation, error, context = {}) => {
     const diagnostic = createDiagnosticDetails(operation, error, context);
@@ -179,6 +181,33 @@ function CameraScreen() {
       onDismiss={() => setDiagnosticError(null)}
     />
   ) : null;
+
+  const loadRecentGalleryImage = useCallback(async () => {
+    if (recentImageLoadStartedRef.current) return;
+
+    recentImageLoadStartedRef.current = true;
+
+    try {
+      let permission = mediaPermission;
+      if (!permission?.granted) {
+        permission = await requestMediaPermission();
+      }
+
+      if (!permission?.granted) return;
+
+      const page = await queryGalleryPage(0, 1);
+      const [recentImage] = await Promise.all(
+        page.assets.slice(0, 1).map(normalizeMediaLibraryImage)
+      );
+
+      if (recentImage?.uri) {
+        setRecentGalleryImage(recentImage);
+      }
+    } catch {
+      // The preview is optional. Keep the camera usable when photo access is
+      // unavailable or the device has no recent image.
+    }
+  }, [mediaPermission, requestMediaPermission]);
 
   const loadGalleryPage = useCallback(async (reset = false) => {
     if (galleryLoadingRef.current || (!reset && !hasMoreGallery)) return;
@@ -272,6 +301,12 @@ function CameraScreen() {
       }
     }).catch(() => router.replace('/explore'));
   }, [cameraPermission, requestCameraPermission, router]);
+
+  useEffect(() => {
+    if (cameraPermission?.granted) {
+      loadRecentGalleryImage();
+    }
+  }, [cameraPermission?.granted, loadRecentGalleryImage]);
 
   const capturePhoto = async () => {
     if (!cameraRef.current || !isCameraReady || isCapturing) return;
@@ -388,6 +423,12 @@ function CameraScreen() {
       }
 
       await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
+      setRecentGalleryImage({
+        uri: displayedSavedPhoto.uri,
+        width: displayedSavedPhoto.width,
+        height: displayedSavedPhoto.height,
+        fileName: displayedSavedPhoto.fileName ?? null,
+      });
       console.log('[screen] Final image saved', {
         mode: savedImageMode,
         uri: displayedSavedPhoto.uri,
@@ -791,11 +832,27 @@ function CameraScreen() {
         pointerEvents="box-none"
         style={[styles.controls, { paddingBottom: insets.bottom + Spacing.three }]}> 
         <View style={styles.captureControlsRow}>
-          <View
-            accessible={false}
-            pointerEvents="none"
-            style={styles.importButtonSpacer}
-          />
+          <Pressable
+            accessibilityLabel="Import images. Shows the most recent image."
+            accessibilityRole="button"
+            disabled={isCapturing}
+            onPress={openImportImage}
+            style={({ pressed }) => [
+              styles.importButton,
+              pressed && styles.pressed,
+              isCapturing && styles.disabled,
+            ]}>
+            <View style={styles.importImageFrame}>
+              {recentGalleryImage?.uri ? (
+                <Image
+                  contentFit="cover"
+                  source={recentGalleryImage.uri}
+                  style={styles.importImagePreview}
+                  transition={180}
+                />
+              ) : null}
+            </View>
+          </Pressable>
 
           <Pressable
             accessibilityLabel="Capture photo"
@@ -815,29 +872,11 @@ function CameraScreen() {
             )}
           </Pressable>
 
-          <Pressable
-            accessibilityLabel="Import images"
-            accessibilityRole="button"
-            disabled={isCapturing}
-            onPress={openImportImage}
-            style={({ pressed }) => [
-              styles.importButton,
-              pressed && styles.pressed,
-              isCapturing && styles.disabled,
-            ]}>
-            <SymbolView
-              name={{ ios: 'photo.badge.arrow.down', android: 'photo_library', web: 'photo_library' }}
-              size={34}
-              tintColor={Colors.light.background}
-            />
-            <ThemedText
-              type="smallBold"
-              numberOfLines={2}
-              allowFontScaling={false}
-              style={styles.importButtonText}>
-              {'Import\nImages'}
-            </ThemedText>
-          </Pressable>
+          <View
+            accessible={false}
+            pointerEvents="none"
+            style={styles.importButtonSpacer}
+          />
         </View>
       </View>
 
@@ -1548,21 +1587,32 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
   },
   importButton: {
-    width: 116,
-    height: 96,
+    width: 112,
+    height: 93,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.one,
   },
-  importButtonText: {
-    color: Colors.light.background,
-    fontSize: 16,
-    lineHeight: 21,
-    textAlign: 'center',
+  importImageFrame: {
+    width: 72,
+    height: 72,
+    borderRadius: 18,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 2,
+    borderColor: '#16C7B7',
+    shadowColor: '#16C7B7',
+    shadowOpacity: 0.34,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 5,
+  },
+  importImagePreview: {
+    width: '100%',
+    height: '100%',
   },
   importButtonSpacer: {
-    width: 116,
-    height: 96,
+    width: 112,
+    height: 93,
   },
   importContainer: {
     flex: 1,
