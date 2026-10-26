@@ -81,6 +81,12 @@ const PREVIEW_IMAGE_SURFACE = '#E9EEF5';
 const PREVIEW_BORDER = '#DCE4ED';
 const PREVIEW_TEXT = '#122033';
 const PREVIEW_MUTED = '#667085';
+const REVIEW_BACKGROUND = '#FFFFFF';
+const REVIEW_SURFACE = '#F7F9FC';
+const REVIEW_BORDER = '#E4EAF2';
+const REVIEW_TEXT = '#0F172A';
+const REVIEW_MUTED = '#64748B';
+const REVIEW_SOFT_ACCENT = '#EEF4FF';
 
 const SAVED_IMAGE_OPTIONS = [
   { label: 'Original', value: 'original' },
@@ -843,9 +849,21 @@ function CameraScreen() {
               styles.reviewSafeArea,
               { paddingBottom: Spacing.three },
             ]}>
-            <ThemedText type="default" style={styles.reviewTitle}>
-              Review capture
-            </ThemedText>
+            <View style={styles.reviewHeader}>
+              <ThemedText type="default" style={styles.reviewTitle}>
+                Review capture
+              </ThemedText>
+              <View style={styles.reviewReadyBadge}>
+                <SymbolView
+                  name={{ ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }}
+                  size={17}
+                  tintColor={REVIEW_NEXT_ACCENT}
+                />
+                <ThemedText type="smallBold" style={styles.reviewReadyText}>
+                  Ready
+                </ThemedText>
+              </View>
+            </View>
 
             <View
               style={styles.imageFrame}
@@ -902,6 +920,17 @@ function CameraScreen() {
               />
             </View>
 
+            <View style={styles.reviewInstruction}>
+              <SymbolView
+                name={{ ios: 'hand.draw.fill', android: 'pan_tool', web: 'pan_tool' }}
+                size={17}
+                tintColor={REVIEW_NEXT_ACCENT}
+              />
+              <ThemedText style={styles.reviewInstructionText}>
+                Drag the handles to fine-tune your crop
+              </ThemedText>
+            </View>
+
             <Pressable
               accessibilityLabel="Rotate image 90 degrees clockwise"
               accessibilityRole="button"
@@ -922,7 +951,7 @@ function CameraScreen() {
               </ThemedText>
             </Pressable>
 
-            <View style={styles.savedImageActions}>
+            <View style={[styles.savedImageActions, styles.reviewActions]}>
               <Pressable
                 accessibilityLabel="Discard captured image"
                 accessibilityRole="button"
@@ -931,6 +960,7 @@ function CameraScreen() {
                 style={({ pressed }) => [
                   styles.savedImageActionButton,
                   styles.reviewActionButton,
+                  styles.reviewDiscardAction,
                   pressed && styles.pressed,
                   isCapturing && styles.disabled,
                 ]}>
@@ -955,22 +985,23 @@ function CameraScreen() {
                 style={({ pressed }) => [
                   styles.savedImageActionButton,
                   styles.reviewActionButton,
+                  styles.reviewNextAction,
                   pressed && styles.pressed,
                   isCapturing && styles.disabled,
                 ]}>
                 <ThemedText
                   type="smallBold"
                   allowFontScaling={false}
-                  style={styles.reviewNextText}>
+                  style={[styles.reviewNextText, styles.reviewNextTextOnAccent]}>
                   Next
                 </ThemedText>
                 {isCapturing ? (
-                  <ActivityIndicator color={REVIEW_NEXT_ACCENT} />
+                  <ActivityIndicator color={REVIEW_BACKGROUND} />
                 ) : (
                   <SymbolView
                     name={{ ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' }}
                     size={30}
-                    tintColor={REVIEW_NEXT_ACCENT}
+                    tintColor={REVIEW_BACKGROUND}
                   />
                 )}
               </Pressable>
@@ -1524,7 +1555,7 @@ function getLineStyle(start, end, size) {
     top: (startY + endY) / 2 - 1,
     width: length,
     height: 2,
-    backgroundColor: '#ffffff',
+    backgroundColor: REVIEW_NEXT_ACCENT,
     opacity: 0.9,
     transform: [{ rotate: `${angle}deg` }],
   };
@@ -1622,7 +1653,7 @@ const styles = StyleSheet.create({
   },
   reviewContainer: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: REVIEW_BACKGROUND,
   },
   savedImageContainer: {
     flex: 1,
@@ -1632,7 +1663,8 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.three,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.three,
   },
   savedImageSafeArea: {
     flex: 1,
@@ -1641,13 +1673,48 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.three,
   },
   reviewTitle: {
-    color: Colors.light.background,
-    textAlign: 'center',
+    color: REVIEW_TEXT,
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: '700',
+    letterSpacing: -0.6,
+  },
+  reviewHeader: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
     marginBottom: Spacing.three,
-    fontSize: 20,
-    lineHeight: 26,
-    fontWeight: '400',
-    letterSpacing: 0.2,
+  },
+  reviewReadyBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.half,
+    marginTop: Spacing.one,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+    borderRadius: 999,
+    backgroundColor: REVIEW_SOFT_ACCENT,
+    borderWidth: 1,
+    borderColor: '#D6E3FF',
+  },
+  reviewReadyText: {
+    color: REVIEW_NEXT_ACCENT,
+    fontSize: 12,
+  },
+  reviewInstruction: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    marginTop: Spacing.two,
+  },
+  reviewInstructionText: {
+    color: REVIEW_MUTED,
+    fontSize: 13,
+    lineHeight: 18,
   },
   reviewRotateButton: {
     alignSelf: 'center',
@@ -1655,14 +1722,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.one,
+    width: '100%',
+    minHeight: 46,
     marginTop: Spacing.two,
-    marginBottom: Spacing.one,
+    marginBottom: Spacing.two,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.one,
-    borderRadius: 999,
-    backgroundColor: '#EEF4FF',
+    paddingVertical: Spacing.two,
+    borderRadius: 16,
+    backgroundColor: REVIEW_SURFACE,
     borderWidth: 1,
-    borderColor: '#C8D8F5',
+    borderColor: REVIEW_BORDER,
   },
   reviewRotateText: {
     color: REVIEW_NEXT_ACCENT,
@@ -1684,22 +1753,27 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 1,
     position: 'relative',
-    borderRadius: Spacing.two,
-    backgroundColor: '#111111',
+    borderRadius: 0,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    borderColor: 'transparent',
     overflow: 'visible',
+    shadowOpacity: 0,
+    elevation: 0,
   },
   reviewImage: {
     position: 'absolute',
     width: '100%',
     height: '100%',
-    borderRadius: Spacing.two,
+    borderRadius: 0,
   },
   reviewImageViewport: {
     position: 'absolute',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-    borderRadius: Spacing.two,
+    borderRadius: 0,
+    backgroundColor: 'transparent',
   },
   savedImageFrame: {
     width: '100%',
@@ -1834,6 +1908,28 @@ const styles = StyleSheet.create({
   reviewActionButton: {
     flexDirection: 'row',
   },
+  reviewActions: {
+    backgroundColor: REVIEW_BACKGROUND,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: REVIEW_BORDER,
+  },
+  reviewDiscardAction: {
+    marginRight: Spacing.one,
+    borderRadius: 16,
+    backgroundColor: '#FFF5F6',
+    borderWidth: 1,
+    borderColor: '#F6D3D8',
+  },
+  reviewNextAction: {
+    marginLeft: Spacing.one,
+    borderRadius: 16,
+    backgroundColor: REVIEW_NEXT_ACCENT,
+    shadowColor: REVIEW_NEXT_ACCENT,
+    shadowOpacity: 0.24,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 4,
+  },
   previewActionButton: {
     flexDirection: 'row',
     minHeight: 46,
@@ -1859,6 +1955,9 @@ const styles = StyleSheet.create({
   },
   reviewNextText: {
     color: REVIEW_NEXT_ACCENT,
+  },
+  reviewNextTextOnAccent: {
+    color: REVIEW_BACKGROUND,
   },
   controls: {
     position: 'absolute',
