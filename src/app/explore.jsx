@@ -199,6 +199,14 @@ export default function ExploreScreen() {
     setOpenedImage(image);
   }, []);
 
+  const navigateOpenedImage = useCallback((image) => {
+    if (!image) return;
+
+    openedImageRef.current = image;
+    setActionError(null);
+    setOpenedImage(image);
+  }, []);
+
   const handleTilePress = useCallback((image) => {
     const imageKey = getAssetKey(image);
 
@@ -383,9 +391,11 @@ export default function ExploreScreen() {
     return (
       <OpenedImageView
         image={openedImage}
+        images={savedImages}
         disabled={isDeleting}
         onBack={closeOpenedImage}
         onDelete={confirmDeleteOpenedImage}
+        onNavigate={navigateOpenedImage}
         onShare={shareOpenedImage}
         error={actionError}
       />
@@ -526,10 +536,20 @@ const SnippetTile = memo(function SnippetTile({
   );
 });
 
-function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) {
+function OpenedImageView({
+  image,
+  images = [],
+  disabled,
+  onBack,
+  onDelete,
+  onNavigate,
+  onShare,
+  error,
+}) {
   const zoomScale = useRef(new Animated.Value(1)).current;
   const panTranslateX = useRef(new Animated.Value(0)).current;
   const panTranslateY = useRef(new Animated.Value(0)).current;
+  const swipeTranslateX = useRef(new Animated.Value(0)).current;
   const zoomScaleRef = useRef(1);
   const panTranslateRef = useRef({ x: 0, y: 0 });
   const panStartTranslateRef = useRef({ x: 0, y: 0 });
@@ -537,12 +557,27 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
   const pinchStartDistanceRef = useRef(null);
   const pinchStartScaleRef = useRef(1);
   const activeTouchCountRef = useRef(0);
+  const swipeCandidateRef = useRef(false);
+  const swipeAnimatingRef = useRef(false);
+  const swipePreviewImageRef = useRef(null);
+  const swipePreviewDirectionRef = useRef(0);
+  const pendingSwipeTargetRef = useRef(null);
+  const swipeResetCompleteRef = useRef(false);
+  const displayedImageLoadedRef = useRef(false);
   const disabledRef = useRef(disabled);
   const imageRef = useRef(image);
+  const imagesRef = useRef(images);
+  const onNavigateRef = useRef(onNavigate);
   const imageFrameSizeRef = useRef({ width: 0, height: 0 });
   const [imageFrameSize, setImageFrameSize] = useState({ width: 0, height: 0 });
+  const [displayedImage, setDisplayedImage] = useState(image);
+  const [swipePreviewImage, setSwipePreviewImage] = useState(null);
+  const [swipePreviewDirection, setSwipePreviewDirection] = useState(0);
+  const [swipePreviewCentered, setSwipePreviewCentered] = useState(false);
   disabledRef.current = disabled;
-  imageRef.current = image;
+  imageRef.current = displayedImage;
+  imagesRef.current = images;
+  onNavigateRef.current = onNavigate;
   imageFrameSizeRef.current = imageFrameSize;
 
   const resetZoom = useCallback(() => {
@@ -553,34 +588,75 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
     pinchStartDistanceRef.current = null;
     pinchStartScaleRef.current = 1;
     activeTouchCountRef.current = 0;
+    swipeCandidateRef.current = false;
+    swipePreviewImageRef.current = null;
+    swipePreviewDirectionRef.current = 0;
+    swipeResetCompleteRef.current = false;
+    swipeTranslateX.setValue(0);
     zoomScale.setValue(1);
     panTranslateX.setValue(0);
     panTranslateY.setValue(0);
-  }, [panTranslateX, panTranslateY, zoomScale]);
+  }, [panTranslateX, panTranslateY, swipeTranslateX, zoomScale]);
 
   useEffect(() => {
     resetZoom();
-  }, [image?.uri, resetZoom]);
+  }, [displayedImage?.uri, resetZoom]);
+
+  const completePendingSwipe = useCallback(() => {
+    if (!pendingSwipeTargetRef.current) return;
+
+    pendingSwipeTargetRef.current = null;
+    swipeResetCompleteRef.current = false;
+    swipePreviewImageRef.current = null;
+    swipePreviewDirectionRef.current = 0;
+    setSwipePreviewImage(null);
+    setSwipePreviewDirection(0);
+    setSwipePreviewCentered(false);
+    swipeAnimatingRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    if (!swipePreviewCentered) return;
+
+    swipeTranslateX.setValue(0);
+    swipeResetCompleteRef.current = true;
+
+    if (displayedImageLoadedRef.current) {
+      completePendingSwipe();
+    }
+  }, [completePendingSwipe, swipePreviewCentered, swipeTranslateX]);
 
   const pinchPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponderCapture: (event) =>
         !disabledRef.current &&
-        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
+        !swipeAnimatingRef.current &&
+        (getTouchCount(event) > 0 || zoomScaleRef.current > 1),
       onStartShouldSetPanResponder: (event) =>
         !disabledRef.current &&
-        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
+        !swipeAnimatingRef.current &&
+        (getTouchCount(event) > 0 || zoomScaleRef.current > 1),
       onMoveShouldSetPanResponderCapture: (event) =>
         !disabledRef.current &&
-        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
+        !swipeAnimatingRef.current &&
+        (getTouchCount(event) > 0 || zoomScaleRef.current > 1),
       onMoveShouldSetPanResponder: (event) =>
         !disabledRef.current &&
-        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
+        !swipeAnimatingRef.current &&
+        (getTouchCount(event) > 0 || zoomScaleRef.current > 1),
       onPanResponderGrant: (event) => {
         const touchCount = getTouchCount(event);
         panStartTranslateRef.current = { ...panTranslateRef.current };
         panStartCenterRef.current = getTouchCenter(event);
         activeTouchCountRef.current = touchCount;
+        swipeCandidateRef.current = touchCount === 1 && zoomScaleRef.current <= 1;
+        swipePreviewImageRef.current = null;
+        swipePreviewDirectionRef.current = 0;
+        setSwipePreviewImage(null);
+        setSwipePreviewDirection(0);
+        setSwipePreviewCentered(false);
+        swipeTranslateX.stopAnimation();
+        swipeTranslateX.setValue(0);
 
         const distance = touchCount >= 2 ? getTouchDistance(event) : 0;
         if (distance <= 0) return;
@@ -588,11 +664,44 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
         pinchStartDistanceRef.current = distance;
         pinchStartScaleRef.current = zoomScaleRef.current;
       },
-      onPanResponderMove: (event) => {
+      onPanResponderMove: (event, gestureState) => {
         const previousTouchCount = activeTouchCountRef.current;
         const touchCount = getTouchCount(event);
         const distance = getTouchDistance(event);
         const currentCenter = getTouchCenter(event);
+
+        if (touchCount >= 2) {
+          swipeCandidateRef.current = false;
+        }
+
+        if (swipeCandidateRef.current && touchCount === 1 && zoomScaleRef.current <= 1) {
+          const horizontalDistance = gestureState?.dx ?? 0;
+          const verticalDistance = gestureState?.dy ?? 0;
+          const isHorizontal = Math.abs(horizontalDistance) > Math.abs(verticalDistance) * 1.1;
+          const direction = horizontalDistance < 0 ? -1 : 1;
+          const targetImage = getAdjacentImage(imagesRef.current, imageRef.current, direction);
+          const resistance = targetImage ? 1 : 0.25;
+
+          if (isHorizontal && targetImage) {
+            if (swipePreviewImageRef.current !== targetImage) {
+              swipePreviewImageRef.current = targetImage;
+              setSwipePreviewImage(targetImage);
+            }
+            if (swipePreviewDirectionRef.current !== direction) {
+              swipePreviewDirectionRef.current = direction;
+              setSwipePreviewDirection(direction);
+            }
+          } else if (swipePreviewImageRef.current) {
+            swipePreviewImageRef.current = null;
+            swipePreviewDirectionRef.current = 0;
+            setSwipePreviewImage(null);
+            setSwipePreviewDirection(0);
+          }
+
+          swipeTranslateX.setValue(isHorizontal ? horizontalDistance * resistance : 0);
+          activeTouchCountRef.current = touchCount;
+          return;
+        }
 
         if (touchCount >= 2 && distance > 0 && previousTouchCount < 2) {
           pinchStartDistanceRef.current = distance;
@@ -648,17 +757,96 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
         panTranslateX.setValue(nextTranslation.x);
         panTranslateY.setValue(nextTranslation.y);
       },
-      onPanResponderRelease: () => {
+      onPanResponderRelease: (event, gestureState) => {
+        const horizontalDistance = gestureState?.dx ?? 0;
+        const verticalDistance = gestureState?.dy ?? 0;
+        const isHorizontal = Math.abs(horizontalDistance) > Math.abs(verticalDistance) * 1.1;
+        const swipeWidth = Math.max(imageFrameSizeRef.current.width, 1);
+        const direction = horizontalDistance < 0 ? -1 : 1;
+        const targetImage = swipeCandidateRef.current && isHorizontal
+          ? swipePreviewImageRef.current ?? getAdjacentImage(imagesRef.current, imageRef.current, direction)
+          : null;
+        const triggerDistance = Math.min(96, swipeWidth * 0.24);
+        const shouldNavigate =
+          targetImage &&
+          Math.abs(horizontalDistance) >= triggerDistance &&
+          zoomScaleRef.current <= 1;
+
+        if (shouldNavigate && !swipeAnimatingRef.current) {
+          swipeAnimatingRef.current = true;
+          Animated.timing(swipeTranslateX, {
+            toValue: swipeWidth * direction,
+            duration: 125,
+            useNativeDriver: true,
+          }).start(({ finished }) => {
+            if (!finished) {
+              swipeAnimatingRef.current = false;
+              swipeTranslateX.setValue(0);
+              swipePreviewImageRef.current = null;
+              swipePreviewDirectionRef.current = 0;
+              setSwipePreviewImage(null);
+              setSwipePreviewDirection(0);
+              setSwipePreviewCentered(false);
+              return;
+            }
+
+            pendingSwipeTargetRef.current = targetImage;
+            displayedImageLoadedRef.current = false;
+            swipeResetCompleteRef.current = false;
+            swipePreviewImageRef.current = targetImage;
+            swipePreviewDirectionRef.current = direction;
+            setDisplayedImage(targetImage);
+            setSwipePreviewImage(targetImage);
+            setSwipePreviewDirection(direction);
+            setSwipePreviewCentered(true);
+            onNavigateRef.current?.(targetImage);
+          });
+        } else {
+          Animated.spring(swipeTranslateX, {
+            toValue: 0,
+            speed: 20,
+            bounciness: 6,
+            useNativeDriver: true,
+          }).start(() => {
+            swipePreviewImageRef.current = null;
+            swipePreviewDirectionRef.current = 0;
+            setSwipePreviewImage(null);
+            setSwipePreviewDirection(0);
+            setSwipePreviewCentered(false);
+          });
+        }
+
         pinchStartDistanceRef.current = null;
         activeTouchCountRef.current = 0;
+        swipeCandidateRef.current = false;
       },
       onPanResponderTerminate: () => {
         pinchStartDistanceRef.current = null;
         activeTouchCountRef.current = 0;
+        swipeCandidateRef.current = false;
+        Animated.spring(swipeTranslateX, {
+          toValue: 0,
+          speed: 20,
+          bounciness: 6,
+          useNativeDriver: true,
+        }).start(() => {
+          swipePreviewImageRef.current = null;
+          swipePreviewDirectionRef.current = 0;
+          setSwipePreviewImage(null);
+          setSwipePreviewDirection(0);
+          setSwipePreviewCentered(false);
+        });
       },
       onPanResponderTerminationRequest: () => false,
     })
   ).current;
+
+  const swipeWidth = Math.max(imageFrameSize.width, 1);
+  const swipePreviewOffset = swipePreviewCentered
+    ? 0
+    : swipePreviewDirection < 0
+      ? Animated.add(swipeTranslateX, swipeWidth)
+      : Animated.add(swipeTranslateX, -swipeWidth);
 
   return (
     <ThemedView style={styles.openedImageContainer}>
@@ -684,23 +872,52 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
             setImageFrameSize({ width, height });
           }}
           {...pinchPanResponder.panHandlers}>
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.openedImagePanLayer,
-              { transform: [{ translateX: panTranslateX }, { translateY: panTranslateY }] },
-            ]}>
+          <View style={styles.openedImageSwipeViewport}>
+            {swipePreviewImage ? (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.openedImageSlide,
+                  styles.openedImageSwipePreview,
+                  { transform: [{ translateX: swipePreviewOffset }] },
+                ]}>
+                <Image
+                  accessibilityLabel={swipePreviewImage.fileName || 'Adjacent opened snippet'}
+                  contentFit="contain"
+                  source={swipePreviewImage.uri}
+                  style={styles.openedImage}
+                  transition={0}
+                />
+              </Animated.View>
+            ) : null}
+
             <Animated.View
-              style={[styles.openedImageZoomLayer, { transform: [{ scale: zoomScale }] }]}> 
-              <Image
-                accessibilityLabel={image.fileName || 'Opened snippet'}
-                contentFit="contain"
-                source={image.uri}
-                style={styles.openedImage}
-                transition={0}
-              />
+              pointerEvents="none"
+              style={[styles.openedImageSlide, { transform: [{ translateX: swipeTranslateX }] }]}> 
+              <Animated.View
+                style={[
+                  styles.openedImagePanLayer,
+                  { transform: [{ translateX: panTranslateX }, { translateY: panTranslateY }] },
+                ]}>
+                <Animated.View
+                  style={[styles.openedImageZoomLayer, { transform: [{ scale: zoomScale }] }]}> 
+                  <Image
+                    accessibilityLabel={displayedImage.fileName || 'Opened snippet'}
+                    contentFit="contain"
+                    onLoad={() => {
+                      displayedImageLoadedRef.current = true;
+                      if (swipeResetCompleteRef.current) {
+                        completePendingSwipe();
+                      }
+                    }}
+                    source={displayedImage.uri}
+                    style={styles.openedImage}
+                    transition={0}
+                  />
+                </Animated.View>
+              </Animated.View>
             </Animated.View>
-          </Animated.View>
+          </View>
         </View>
 
         <View style={styles.openedImageActions}>
@@ -1059,6 +1276,14 @@ function getAssetKey(asset) {
   return asset.id || asset.uri;
 }
 
+function getAdjacentImage(images, image, direction) {
+  const imageIndex = images.findIndex((candidate) => getAssetKey(candidate) === getAssetKey(image));
+  if (imageIndex < 0) return null;
+
+  const adjacentIndex = imageIndex + (direction < 0 ? 1 : -1);
+  return images[adjacentIndex] ?? null;
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1111,6 +1336,24 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.two,
     backgroundColor: '#111111',
     overflow: 'hidden',
+  },
+  openedImageSwipeViewport: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    overflow: 'hidden',
+  },
+  openedImageSlide: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  openedImageSwipePreview: {
+    zIndex: 2,
   },
   openedImage: {
     width: '100%',
