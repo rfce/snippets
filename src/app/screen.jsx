@@ -1910,6 +1910,10 @@ const styles = StyleSheet.create({
     minHeight: 60,
   },
   reviewActions: {
+    marginTop: 0,
+    marginBottom: -Spacing.three,
+    paddingTop: 0,
+    paddingBottom: 0,
     backgroundColor: REVIEW_BACKGROUND,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: REVIEW_BORDER,
