@@ -755,23 +755,46 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return paperBrightness(texture2D(uTexture, clampedUv).rgb);
   }
 
-  float estimateLocalIllumination(vec2 centerUv) {
-    // Sample a broad neighborhood. Taking the brightest sample makes dark
-    // text contribute very little to the illumination estimate while still
-    // tracking slow page-wide shadows.
-    vec2 illuminationStep = uTexelSize * 48.0;
-    float illumination = 0.0;
+  float estimateIlluminationAtScale(vec2 centerUv, float pixelStep) {
+    // Use the brightest point in a small cross. Dark text and narrow shadows
+    // should not lower the paper estimate, while the cross keeps the sample
+    // count lower than a full neighborhood kernel.
+    vec2 illuminationStep = uTexelSize * pixelStep;
+    float illumination = samplePaperBrightness(centerUv);
 
-    for (int x = -1; x <= 1; x += 1) {
-      for (int y = -1; y <= 1; y += 1) {
-        illumination = max(
-          illumination,
-          samplePaperBrightness(
-            centerUv + vec2(float(x), float(y)) * illuminationStep
-          )
-        );
-      }
-    }
+    illumination = max(
+      illumination,
+      samplePaperBrightness(centerUv + vec2(-illuminationStep.x, 0.0))
+    );
+    illumination = max(
+      illumination,
+      samplePaperBrightness(centerUv + vec2(illuminationStep.x, 0.0))
+    );
+    illumination = max(
+      illumination,
+      samplePaperBrightness(centerUv + vec2(0.0, -illuminationStep.y))
+    );
+    illumination = max(
+      illumination,
+      samplePaperBrightness(centerUv + vec2(0.0, illuminationStep.y))
+    );
+
+    return illumination;
+  }
+
+  float estimateLocalIllumination(vec2 centerUv) {
+    // Combine local, page-region, and broad estimates. The fine scale reacts
+    // to nearby shadow edges, the medium scale handles ordinary uneven light,
+    // and the broad scale recovers the paper level when an entire local area
+    // is covered by a shadow. Blending avoids the discontinuities caused by a
+    // single fixed-size background window.
+    float fineIllumination = estimateIlluminationAtScale(centerUv, 12.0);
+    float mediumIllumination = estimateIlluminationAtScale(centerUv, 48.0);
+    float broadIllumination = estimateIlluminationAtScale(centerUv, 144.0);
+    float illumination =
+      fineIllumination * 0.25 +
+      mediumIllumination * 0.35 +
+      broadIllumination * 0.40;
 
     return max(illumination, 0.5);
   }
