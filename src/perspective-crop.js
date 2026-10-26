@@ -717,7 +717,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     // A single white pixel beside a colorful object must not enable the color
     // rescue for the whole neighborhood. Require broad local evidence of
     // paper before chroma can influence the document mask.
-    return smoothstep(0.45, 0.82, confidenceSum / 9.0);
+    return smoothstep(0.36, 0.78, confidenceSum / 9.0);
   }
 
   float chromaticInkStrength(vec3 color, float localPaperConfidence) {
@@ -861,7 +861,9 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
   }
 
   float estimateGlobalBackgroundBrightness() {
-    float sum = 0.0;
+    float brightnessSum = 0.0;
+    float confidenceSum = 0.0;
+    float fallbackSum = 0.0;
 
     for (int x = 0; x < 3; x += 1) {
       for (int y = 0; y < 3; y += 1) {
@@ -869,11 +871,22 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           (float(x) + 0.5) / 3.0,
           (float(y) + 0.5) / 3.0
         );
-        sum += paperBrightness(texture2D(uTexture, sampleUv).rgb);
+        vec3 sampleColor = texture2D(uTexture, sampleUv).rgb;
+        float brightness = paperBrightness(sampleColor);
+        float confidence = paperConfidence(sampleColor);
+        brightnessSum += brightness * confidence;
+        confidenceSum += confidence;
+        fallbackSum += brightness;
       }
     }
 
-    return sum / 9.0;
+    // Surrounding wood, fabric, and dark objects must not make a mostly white
+    // page look like a dark-background document. Use only samples that look
+    // like paper for polarity; retain the unweighted average as a fallback
+    // when no paper evidence is available.
+    return confidenceSum > 0.35
+      ? brightnessSum / confidenceSum
+      : fallbackSum / 9.0;
   }
 
   float estimateDarkBackgroundConfidence(float backgroundBrightness) {
@@ -996,7 +1009,8 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           float neighbor = inkIntensity(correctedNeighborColor, localPaperConfidence);
           float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
           float lightNeighborIsInk = step(lightInkThreshold, neighbor);
-          float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
+          float neighborIsInk =
+            mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
 
           if (x == 0 || y == 0) {
             axialInkSupport += neighborIsInk;
@@ -1009,7 +1023,8 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
             darkInkThreshold,
             lightInkThreshold,
             backgroundIsDark
-          ) * ((x == 0 || y == 0) ? 1.0 : 0.55);
+          ) *
+          ((x == 0 || y == 0) ? 1.0 : 0.55);
         }
       }
     }
@@ -1034,7 +1049,8 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     // very small handwritten details.
     float weakIsolatedInk = centerIsInk * (1.0 - strongInk) * connectedStroke;
     float regularGapFill =
-      (1.0 - centerIsInk) * step(1.5, weightedHardSupport);
+      (1.0 - centerIsInk) *
+      step(2.25, weightedHardSupport);
     float structuralInkMask = max(
       strongInk,
       max(weakIsolatedInk, regularGapFill)
