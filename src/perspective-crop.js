@@ -675,20 +675,51 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
   uniform float uThresholdBias;
   varying vec2 vOutputUv;
 
-  float redInkDominance(vec3 color) {
-    return max(0.0, color.r - max(color.g, color.b));
+  float channelMaximum(vec3 color) {
+    return max(color.r, max(color.g, color.b));
+  }
+
+  float channelMinimum(vec3 color) {
+    return min(color.r, min(color.g, color.b));
+  }
+
+  float luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+  }
+
+  float hsvSaturation(vec3 color) {
+    float value = channelMaximum(color);
+    return (value <= 0.001) ? 0.0 : (value - channelMinimum(color)) / value;
+  }
+
+  float chromaticInkStrength(vec3 color) {
+    // Saturated colored ink can be bright in luminance space. Use HSV-style
+    // chroma and saturation as a secondary ink signal so red, blue, green,
+    // yellow, and other colored strokes are not judged by their darkest RGB
+    // channel alone.
+    float value = channelMaximum(color);
+    float chroma = value - channelMinimum(color);
+    float saturation = hsvSaturation(color);
+    float chromaSignal = smoothstep(0.06, 0.32, chroma);
+    float saturationSignal = smoothstep(0.12, 0.55, saturation);
+    float visibleColorSignal = smoothstep(0.18, 0.92, value);
+
+    return chromaSignal * saturationSignal * visibleColorSignal;
   }
 
   float inkIntensity(vec3 color) {
-    // Luminance makes saturated red ink look much lighter than navy ink.
-    // Start with the darkest channel, then give red-dominant pixels a small
-    // extra boost so anti-aliased red stroke edges are not lost.
-    float darkestChannel = min(color.r, min(color.g, color.b));
-    return max(0.0, darkestChannel - redInkDominance(color) * 0.75);
+    // Luminance handles black, gray, and naturally dark ink. The chroma
+    // signal lowers the effective intensity of bright colored ink without
+    // treating lightly tinted paper as strongly as a raw min(R, G, B) test.
+    float luminanceIntensity = luminance(color);
+    float chromaticStrength = chromaticInkStrength(color);
+    float chromaticIntensity = 1.0 - chromaticStrength * 0.86;
+
+    return min(luminanceIntensity, chromaticIntensity);
   }
 
   float paperBrightness(vec3 color) {
-    return min(color.r, min(color.g, color.b));
+    return luminance(color);
   }
 
   float samplePaperBrightness(vec2 uv) {
@@ -756,12 +787,23 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return sum / 9.0;
   }
 
+  float estimateDarkBackgroundConfidence(float backgroundBrightness) {
+    // Treat polarity as a probability instead of making the page switch
+    // abruptly at one brightness value. The midpoint remains 0.45, while the
+    // transition band gives gray or unevenly lit pages a lower-confidence
+    // result rather than forcing the wrong polarity.
+    return 1.0 - smoothstep(0.28, 0.62, backgroundBrightness);
+  }
+
   void main() {
     vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
-    // Determine polarity from the paper/background brightness, not ink
-    // intensity. Saturated red ink can look very dark to the ink detector and
-    // must not make a mostly white page switch into inverted mode.
-    float backgroundIsDark = 1.0 - step(0.45, estimateGlobalBackgroundBrightness());
+    // Determine polarity from the paper/background brightness, not the
+    // color-sensitive ink intensity. A saturated colored stroke must not make
+    // a mostly white page switch into inverted mode. Keep the result
+    // continuous so ambiguous backgrounds do not hard-switch polarity.
+    float backgroundIsDark = estimateDarkBackgroundConfidence(
+      estimateGlobalBackgroundBrightness()
+    );
     float illuminationCorrectionEnabled = 1.0 - backgroundIsDark;
     float localIllumination = estimateLocalIllumination(vOutputUv);
     vec3 correctedCenterColor = correctForIllumination(
@@ -810,7 +852,6 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     // Remove isolated ink pixels while keeping connected strokes. Use a closer
     // support sample so thin text strokes are not accidentally discarded.
     float inkNeighborCount = 0.0;
-    float redInkNeighborCount = 0.0;
     vec2 supportStep = uTexelSize;
 
     for (int x = -1; x <= 1; x += 1) {
@@ -831,7 +872,6 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
         float lightNeighborIsInk = step(lightInkThreshold, neighbor);
         float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
         inkNeighborCount += neighborIsInk;
-        redInkNeighborCount += neighborIsInk * step(0.08, redInkDominance(neighborColor));
       }
     }
 
@@ -842,14 +882,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     float strongInk = mix(strongDarkInk, strongLightInk, backgroundIsDark);
     float supportedInk = centerIsInk * step(2.0, inkNeighborCount);
     float regularGapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
-    // Only fill red-ink gaps when the center pixel itself still carries a
-    // little red signal. This repairs anti-aliased holes without expanding
-    // the red stroke into a dark halo on neutral paper pixels.
-    float centerHasRedSignal = step(0.02, redInkDominance(centerColor));
-    float redGapFill =
-      (1.0 - centerIsInk) * centerHasRedSignal * step(2.0, redInkNeighborCount);
-    float gapFill = max(regularGapFill, redGapFill);
-    float inkMask = max(strongInk, max(supportedInk, gapFill));
+    float inkMask = max(strongInk, max(supportedInk, regularGapFill));
     float inkColor = 0.3019608; // #4d4d4d
     gl_FragColor = vec4(mix(vec3(1.0), vec3(inkColor), inkMask), 1.0);
   }
