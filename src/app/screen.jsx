@@ -1804,6 +1804,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: Spacing.two,
     marginTop: Spacing.three,
+    marginBottom: Spacing.two,
     padding: Spacing.half,
     position: 'relative',
     overflow: 'hidden',
