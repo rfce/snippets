@@ -6,8 +6,10 @@ import { memo, useCallback, useContext, useEffect, useRef, useState } from 'reac
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   BackHandler,
   FlatList,
+  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
@@ -525,6 +527,64 @@ const SnippetTile = memo(function SnippetTile({
 });
 
 function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) {
+  const zoomScale = useRef(new Animated.Value(1)).current;
+  const zoomScaleRef = useRef(1);
+  const pinchStartDistanceRef = useRef(null);
+  const pinchStartScaleRef = useRef(1);
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+
+  const resetZoom = useCallback(() => {
+    zoomScaleRef.current = 1;
+    pinchStartDistanceRef.current = null;
+    pinchStartScaleRef.current = 1;
+    zoomScale.setValue(1);
+  }, [zoomScale]);
+
+  useEffect(() => {
+    resetZoom();
+  }, [image?.uri, resetZoom]);
+
+  const pinchPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponderCapture: (event) =>
+        !disabledRef.current && getTouchCount(event) >= 2,
+      onStartShouldSetPanResponder: (event) =>
+        !disabledRef.current && getTouchCount(event) >= 2,
+      onMoveShouldSetPanResponderCapture: (event) =>
+        !disabledRef.current && getTouchCount(event) >= 2,
+      onMoveShouldSetPanResponder: (event) =>
+        !disabledRef.current && getTouchCount(event) >= 2,
+      onPanResponderGrant: (event) => {
+        const distance = getTouchDistance(event);
+        if (distance <= 0) return;
+
+        pinchStartDistanceRef.current = distance;
+        pinchStartScaleRef.current = zoomScaleRef.current;
+      },
+      onPanResponderMove: (event) => {
+        const startDistance = pinchStartDistanceRef.current;
+        const distance = getTouchDistance(event);
+        if (!startDistance || distance <= 0) return;
+
+        const nextScale = clamp(
+          pinchStartScaleRef.current * (distance / startDistance),
+          1,
+          4
+        );
+        zoomScaleRef.current = nextScale;
+        zoomScale.setValue(nextScale);
+      },
+      onPanResponderRelease: () => {
+        pinchStartDistanceRef.current = null;
+      },
+      onPanResponderTerminate: () => {
+        pinchStartDistanceRef.current = null;
+      },
+      onPanResponderTerminationRequest: () => false,
+    })
+  ).current;
+
   return (
     <ThemedView style={styles.openedImageContainer}>
       <SafeAreaView style={styles.openedImageSafeArea}>
@@ -542,14 +602,18 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
           </Pressable>
         </View>
 
-        <View style={styles.openedImageFrame}>
-          <Image
-            accessibilityLabel={image.fileName || 'Opened snippet'}
-            contentFit="contain"
-            source={image.uri}
-            style={styles.openedImage}
-            transition={0}
-          />
+        <View style={styles.openedImageFrame} {...pinchPanResponder.panHandlers}>
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.openedImageZoomLayer, { transform: [{ scale: zoomScale }] }]}>
+            <Image
+              accessibilityLabel={image.fileName || 'Opened snippet'}
+              contentFit="contain"
+              source={image.uri}
+              style={styles.openedImage}
+              transition={0}
+            />
+          </Animated.View>
         </View>
 
         <View style={styles.openedImageActions}>
@@ -603,6 +667,28 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
       </SafeAreaView>
     </ThemedView>
   );
+}
+
+function getTouchCount(event) {
+  return event?.nativeEvent?.touches?.length ?? 0;
+}
+
+function getTouchDistance(event) {
+  const touches = event?.nativeEvent?.touches ?? [];
+  if (touches.length < 2) return 0;
+
+  const [first, second] = touches;
+  const firstX = first.pageX ?? first.locationX ?? 0;
+  const firstY = first.pageY ?? first.locationY ?? 0;
+  const secondX = second.pageX ?? second.locationX ?? 0;
+  const secondY = second.pageY ?? second.locationY ?? 0;
+  const deltaX = secondX - firstX;
+  const deltaY = secondY - firstY;
+  return Math.sqrt(deltaX ** 2 + deltaY ** 2);
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 function SelectionHeader({
@@ -889,6 +975,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   openedImage: {
+    width: '100%',
+    height: '100%',
+  },
+  openedImageZoomLayer: {
     width: '100%',
     height: '100%',
   },
