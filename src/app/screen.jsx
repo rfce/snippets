@@ -774,7 +774,7 @@ function CameraScreen() {
                 style={[
                   styles.savedImageActions,
                   styles.previewActions,
-                  { paddingBottom: insets.bottom + Spacing.two },
+                  { paddingBottom: insets.bottom },
                 ]}>
                 <Pressable
                  accessibilityLabel="Retake photo"
@@ -813,23 +813,23 @@ function CameraScreen() {
                      pressed && styles.pressed,
                      (isEnhancing || isSavingPreview) && styles.disabled,
                  ]}>
-                 {isSavingPreview ? (
-                    <ActivityIndicator color={PREVIEW_SAVE_ACCENT} />
+                  {isSavingPreview ? (
+                     <ActivityIndicator color={PREVIEW_BACKGROUND} />
                    ) : (
-                     <SymbolView
-                       name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
-                       size={30}
-                       tintColor={PREVIEW_SAVE_ACCENT}
-                    />
-                  )}
-                  {!isSavingPreview && (
-                    <ThemedText
-                      type="smallBold"
-                      allowFontScaling={false}
-                      style={styles.previewSaveText}>
-                      Save
-                    </ThemedText>
-                 )}
+                   <SymbolView
+                     name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
+                     size={30}
+                     tintColor={PREVIEW_BACKGROUND}
+                   />
+                   )}
+                   {!isSavingPreview && (
+                     <ThemedText
+                       type="smallBold"
+                       allowFontScaling={false}
+                       style={[styles.previewSaveText, styles.previewSaveTextOnAccent]}>
+                       Save
+                     </ThemedText>
+                   )}
               </Pressable>
             </View>
           </SafeAreaView>
@@ -1888,7 +1888,10 @@ const styles = StyleSheet.create({
     backgroundColor: PREVIEW_BACKGROUND,
   },
   previewActions: {
-    marginTop: Spacing.three,
+    marginTop: 0,
+    marginBottom: -Spacing.three,
+    paddingTop: 0,
+    paddingBottom: 0,
     backgroundColor: PREVIEW_BACKGROUND,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: PREVIEW_BORDER,
@@ -1931,23 +1934,32 @@ const styles = StyleSheet.create({
   },
   previewActionButton: {
     flexDirection: 'row',
-    minHeight: 46,
+    minHeight: 60,
     gap: Spacing.two,
     paddingHorizontal: Spacing.four,
   },
   previewRetakeButton: {
+    borderRadius: 0,
+    backgroundColor: '#FFF5F6',
+    borderWidth: 0,
     borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: PREVIEW_BORDER,
+    borderRightColor: '#F0C9CF',
   },
   previewSaveButton: {
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderLeftColor: PREVIEW_BORDER,
+    borderRadius: 0,
+    backgroundColor: PREVIEW_SAVE_ACCENT,
+    borderWidth: 0,
+    shadowOpacity: 0,
+    elevation: 0,
   },
   previewRetakeText: {
     color: PREVIEW_RETAKE_ACCENT,
   },
   previewSaveText: {
     color: PREVIEW_SAVE_ACCENT,
+  },
+  previewSaveTextOnAccent: {
+    color: PREVIEW_BACKGROUND,
   },
   reviewDiscardText: {
     color: REVIEW_DISCARD_ACCENT,
