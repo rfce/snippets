@@ -692,7 +692,35 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return (value <= 0.001) ? 0.0 : (value - channelMinimum(color)) / value;
   }
 
-  float chromaticInkStrength(vec3 color) {
+  float paperConfidence(vec3 color) {
+    // Colored surroundings should not be promoted to document ink merely
+    // because they have saturation. Bright, neutral pixels are more likely to
+    // be the paper surrounding a colored pen stroke.
+    float brightPaper = smoothstep(0.48, 0.86, luminance(color));
+    float neutralPaper = 1.0 - smoothstep(0.06, 0.24, hsvSaturation(color));
+    return brightPaper * neutralPaper;
+  }
+
+  float estimateLocalPaperConfidence(vec2 centerUv) {
+    vec2 sampleStep = uTexelSize * 48.0;
+    float confidenceSum = 0.0;
+
+    for (int x = -1; x <= 1; x += 1) {
+      for (int y = -1; y <= 1; y += 1) {
+        confidenceSum += paperConfidence(texture2D(
+            uTexture,
+            clamp(centerUv + vec2(float(x), float(y)) * sampleStep, vec2(0.0), vec2(1.0))
+          ).rgb);
+      }
+    }
+
+    // A single white pixel beside a colorful object must not enable the color
+    // rescue for the whole neighborhood. Require broad local evidence of
+    // paper before chroma can influence the document mask.
+    return smoothstep(0.45, 0.82, confidenceSum / 9.0);
+  }
+
+  float chromaticInkStrength(vec3 color, float localPaperConfidence) {
     // Saturated colored ink can be bright in luminance space. Use HSV-style
     // chroma and saturation as a secondary ink signal so red, blue, green,
     // yellow, and other colored strokes are not judged by their darkest RGB
@@ -704,15 +732,15 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     float saturationSignal = smoothstep(0.12, 0.55, saturation);
     float visibleColorSignal = smoothstep(0.18, 0.92, value);
 
-    return chromaSignal * saturationSignal * visibleColorSignal;
+    return chromaSignal * saturationSignal * visibleColorSignal * localPaperConfidence;
   }
 
-  float inkIntensity(vec3 color) {
+  float inkIntensity(vec3 color, float localPaperConfidence) {
     // Luminance handles black, gray, and naturally dark ink. The chroma
     // signal lowers the effective intensity of bright colored ink without
     // treating lightly tinted paper as strongly as a raw min(R, G, B) test.
     float luminanceIntensity = luminance(color);
-    float chromaticStrength = chromaticInkStrength(color);
+    float chromaticStrength = chromaticInkStrength(color, localPaperConfidence);
     float chromaticIntensity = 1.0 - chromaticStrength * 0.86;
 
     return min(luminanceIntensity, chromaticIntensity);
@@ -754,20 +782,58 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return min(color * scale, vec3(1.0));
   }
 
-  float sampleInkIntensity(vec2 uv, float illumination, float enabled) {
+  float sampleInkIntensity(
+    vec2 uv,
+    float illumination,
+    float enabled,
+    float localPaperConfidence
+  ) {
     vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
     vec3 color = texture2D(uTexture, clampedUv).rgb;
-    return inkIntensity(correctForIllumination(color, illumination, enabled));
+    return inkIntensity(
+      correctForIllumination(color, illumination, enabled),
+      localPaperConfidence
+    );
   }
 
-  float blurredIntensity(vec2 centerUv, float illumination, float enabled) {
+  float blurredIntensity(
+    vec2 centerUv,
+    float illumination,
+    float enabled,
+    float localPaperConfidence
+  ) {
     vec2 blurStep = uTexelSize;
-    float center = sampleInkIntensity(centerUv, illumination, enabled);
+    float center = sampleInkIntensity(
+      centerUv,
+      illumination,
+      enabled,
+      localPaperConfidence
+    );
     float sum = center * 4.0;
-    sum += sampleInkIntensity(centerUv + vec2(-blurStep.x, 0.0), illumination, enabled);
-    sum += sampleInkIntensity(centerUv + vec2(blurStep.x, 0.0), illumination, enabled);
-    sum += sampleInkIntensity(centerUv + vec2(0.0, -blurStep.y), illumination, enabled);
-    sum += sampleInkIntensity(centerUv + vec2(0.0, blurStep.y), illumination, enabled);
+    sum += sampleInkIntensity(
+      centerUv + vec2(-blurStep.x, 0.0),
+      illumination,
+      enabled,
+      localPaperConfidence
+    );
+    sum += sampleInkIntensity(
+      centerUv + vec2(blurStep.x, 0.0),
+      illumination,
+      enabled,
+      localPaperConfidence
+    );
+    sum += sampleInkIntensity(
+      centerUv + vec2(0.0, -blurStep.y),
+      illumination,
+      enabled,
+      localPaperConfidence
+    );
+    sum += sampleInkIntensity(
+      centerUv + vec2(0.0, blurStep.y),
+      illumination,
+      enabled,
+      localPaperConfidence
+    );
     return sum / 8.0;
   }
 
@@ -806,16 +872,18 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     );
     float illuminationCorrectionEnabled = 1.0 - backgroundIsDark;
     float localIllumination = estimateLocalIllumination(vOutputUv);
+    float localPaperConfidence = estimateLocalPaperConfidence(vOutputUv);
     vec3 correctedCenterColor = correctForIllumination(
       centerColor,
       localIllumination,
       illuminationCorrectionEnabled
     );
-    float originalCenter = inkIntensity(correctedCenterColor);
+    float originalCenter = inkIntensity(correctedCenterColor, localPaperConfidence);
     float blurredCenter = blurredIntensity(
       vOutputUv,
       localIllumination,
-      illuminationCorrectionEnabled
+      illuminationCorrectionEnabled,
+      localPaperConfidence
     );
     // Very conservative unsharp masking: restore only a small amount of local
     // contrast so text edges stay clear without creating dark halos.
@@ -837,7 +905,8 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
         localSum += sampleInkIntensity(
           sampleUv,
           localIllumination,
-          illuminationCorrectionEnabled
+          illuminationCorrectionEnabled,
+          localPaperConfidence
         );
       }
     }
@@ -867,7 +936,7 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
           localIllumination,
           illuminationCorrectionEnabled
         );
-        float neighbor = inkIntensity(correctedNeighborColor);
+        float neighbor = inkIntensity(correctedNeighborColor, localPaperConfidence);
         float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
         float lightNeighborIsInk = step(lightInkThreshold, neighbor);
         float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
