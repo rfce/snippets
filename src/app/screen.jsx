@@ -77,7 +77,6 @@ const PREVIEW_RETAKE_ACCENT = '#C2415A';
 const PREVIEW_SAVE_ACCENT = '#2F9E72';
 const PREVIEW_BACKGROUND = '#F5F7FA';
 const PREVIEW_SURFACE = '#FFFFFF';
-const PREVIEW_IMAGE_SURFACE = '#E9EEF5';
 const PREVIEW_BORDER = '#DCE4ED';
 const PREVIEW_TEXT = '#122033';
 const PREVIEW_MUTED = '#667085';
@@ -1782,15 +1781,12 @@ const styles = StyleSheet.create({
     position: 'relative',
     borderRadius: 28,
     padding: Spacing.one,
-    backgroundColor: PREVIEW_IMAGE_SURFACE,
-    borderWidth: 1,
-    borderColor: PREVIEW_BORDER,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    borderColor: 'transparent',
     overflow: 'hidden',
-    shadowColor: '#8C9AAF',
-    shadowOpacity: 0.18,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 5,
+    shadowOpacity: 0,
+    elevation: 0,
   },
   savedImage: {
     flex: 1,
