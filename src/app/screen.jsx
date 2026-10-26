@@ -870,20 +870,27 @@ function CameraScreen() {
                     source={{ uri: capturedPhoto.uri }}
                     style={[
                       styles.reviewImage,
-                      capturedRotation % 180 !== 0
-                        ? {
-                            width: reviewImageSize.height,
-                            height: reviewImageSize.width,
-                            left: (reviewImageSize.width - reviewImageSize.height) / 2,
-                            top: (reviewImageSize.height - reviewImageSize.width) / 2,
-                            transform: [{ rotate: `${capturedRotation}deg` }],
-                          }
-                        : {
-                            width: reviewImageSize.width,
-                            height: reviewImageSize.height,
-                            left: 0,
-                            top: 0,
-                          },
+                      {
+                        width:
+                          capturedRotation % 180 !== 0
+                            ? reviewImageSize.height
+                            : reviewImageSize.width,
+                        height:
+                          capturedRotation % 180 !== 0
+                            ? reviewImageSize.width
+                            : reviewImageSize.height,
+                        left:
+                          capturedRotation % 180 !== 0
+                            ? (reviewImageSize.width - reviewImageSize.height) / 2
+                            : 0,
+                        top:
+                          capturedRotation % 180 !== 0
+                            ? (reviewImageSize.height - reviewImageSize.width) / 2
+                            : 0,
+                        ...(capturedRotation !== 0 && {
+                          transform: [{ rotate: `${capturedRotation}deg` }],
+                        }),
+                      },
                     ]}
                   />
                 </View>
