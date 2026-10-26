@@ -1424,6 +1424,7 @@ const styles = StyleSheet.create({
   },
   galleryRow: {
     justifyContent: 'flex-start',
+    gap: Spacing.one,
     marginBottom: Spacing.one,
   },
   cameraFab: {

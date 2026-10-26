@@ -1907,6 +1907,7 @@ const styles = StyleSheet.create({
   },
   reviewActionButton: {
     flexDirection: 'row',
+    minHeight: 60,
   },
   reviewActions: {
     backgroundColor: REVIEW_BACKGROUND,
@@ -1914,21 +1915,19 @@ const styles = StyleSheet.create({
     borderTopColor: REVIEW_BORDER,
   },
   reviewDiscardAction: {
-    marginRight: Spacing.one,
-    borderRadius: 16,
+    marginRight: 0,
+    borderRadius: 0,
     backgroundColor: '#FFF5F6',
-    borderWidth: 1,
-    borderColor: '#F6D3D8',
+    borderWidth: 0,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: '#F0C9CF',
   },
   reviewNextAction: {
-    marginLeft: Spacing.one,
-    borderRadius: 16,
+    marginLeft: 0,
+    borderRadius: 0,
     backgroundColor: REVIEW_NEXT_ACCENT,
-    shadowColor: REVIEW_NEXT_ACCENT,
-    shadowOpacity: 0.24,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 5 },
-    elevation: 4,
+    shadowOpacity: 0,
+    elevation: 0,
   },
   previewActionButton: {
     flexDirection: 'row',
