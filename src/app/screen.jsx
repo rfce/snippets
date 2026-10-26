@@ -173,6 +173,7 @@ function CameraScreen() {
   const [isSavingPreview, setIsSavingPreview] = useState(false);
   const [capturedRotation, setCapturedRotation] = useState(0);
   const [cropCorners, setCropCorners] = useState(null);
+  const [reviewFrameSize, setReviewFrameSize] = useState({ width: 0, height: 0 });
   const [cameraError, setCameraError] = useState(null);
   const [diagnosticError, setDiagnosticError] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -406,6 +407,14 @@ function CameraScreen() {
     inputRange: [0, 1, 2],
     outputRange: [0, savedImageLiquidStep, savedImageLiquidStep * 2],
   });
+
+  const reviewImageAspectRatio =
+    capturedPhoto?.width && capturedPhoto?.height
+      ? capturedRotation % 180 === 0
+        ? capturedPhoto.width / capturedPhoto.height
+        : capturedPhoto.height / capturedPhoto.width
+      : 4 / 3;
+  const reviewImageSize = getImageViewport(reviewFrameSize, reviewImageAspectRatio);
 
   useEffect(() => {
     if (!savedImageModeAnimationStarted.current) {
@@ -838,27 +847,49 @@ function CameraScreen() {
               Review capture
             </ThemedText>
 
-            <View style={styles.imageFrame}>
-              <Image
-                contentFit="contain"
-        source={{ uri: capturedPhoto.uri }}
-        style={[
-          styles.reviewImage,
-          capturedRotation !== 0 && {
-            transform: [{ rotate: `${capturedRotation}deg` }],
-          },
-        ]}
-              />
+            <View
+              style={styles.imageFrame}
+              onLayout={({ nativeEvent }) => {
+                const { width, height } = nativeEvent.layout;
+                setReviewFrameSize({ width, height });
+              }}>
+              {reviewImageSize.width > 0 && reviewImageSize.height > 0 && (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.reviewImageViewport,
+                    {
+                      width: reviewImageSize.width,
+                      height: reviewImageSize.height,
+                      left: reviewImageSize.left,
+                      top: reviewImageSize.top,
+                    },
+                  ]}>
+                  <Image
+                    contentFit="contain"
+                    source={{ uri: capturedPhoto.uri }}
+                    style={[
+                      styles.reviewImage,
+                      capturedRotation % 180 !== 0
+                        ? {
+                            width: reviewImageSize.height,
+                            height: reviewImageSize.width,
+                            left: (reviewImageSize.width - reviewImageSize.height) / 2,
+                            top: (reviewImageSize.height - reviewImageSize.width) / 2,
+                            transform: [{ rotate: `${capturedRotation}deg` }],
+                          }
+                        : {
+                            width: reviewImageSize.width,
+                            height: reviewImageSize.height,
+                            left: 0,
+                            top: 0,
+                          },
+                    ]}
+                  />
+                </View>
+              )}
               <CropOverlay
-                aspectRatio={
-                  capturedPhoto.width && capturedPhoto.height
-                    ? capturedRotation % 180 === 0
-                      ? capturedPhoto.width / capturedPhoto.height
-                      : capturedPhoto.height / capturedPhoto.width
-                    : capturedRotation % 180 === 0
-                      ? 4 / 3
-                      : 3 / 4
-                }
+                aspectRatio={reviewImageAspectRatio}
                 corners={cropCorners}
                 onCornersChange={setCropCorners}
               />
@@ -1651,8 +1682,16 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
   reviewImage: {
-    flex: 1,
+    position: 'absolute',
     width: '100%',
+    height: '100%',
+    borderRadius: Spacing.two,
+  },
+  reviewImageViewport: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
     borderRadius: Spacing.two,
   },
   savedImageFrame: {
