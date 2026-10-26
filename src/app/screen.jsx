@@ -633,7 +633,7 @@ function CameraScreen() {
                   tintColor={Colors.light.background}
                 />
               </Pressable>
-              <ThemedText type="subtitle" style={styles.importTitle}>
+              <ThemedText type="default" style={styles.importTitle}>
                 Import Image
               </ThemedText>
               <View style={styles.importHeaderSpacer} />
