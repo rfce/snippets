@@ -10,6 +10,71 @@ const EXPO_GL_RULES = `
 -keep class expo.modules.gl.** { *; }
 `;
 
+const DEFAULT_PREVIEW_ANDROID_ABI = 'arm64-v8a';
+const ALL_PREVIEW_ANDROID_ABIS = [
+  'arm64-v8a',
+  'armeabi-v7a',
+  'x86',
+  'x86_64',
+];
+const PREVIEW_ANDROID_ABIS = new Set([...ALL_PREVIEW_ANDROID_ABIS, 'universe']);
+
+function readEnvFileValue(filePath, key) {
+  if (!fs.existsSync(filePath)) return null;
+
+  const contents = fs.readFileSync(filePath, 'utf8');
+  const line = contents.split(/\r?\n/).find((entry) => {
+    return new RegExp(`^\\s*${key}\\s*=`).test(entry);
+  });
+
+  if (!line) return null;
+
+  return line
+    .slice(line.indexOf('=') + 1)
+    .trim()
+    .replace(/^['"]|['"]$/g, '');
+}
+
+function getPreviewAndroidAbi(projectRoot) {
+  const envValue =
+    process.env.SNIPPETS_PREVIEW_ANDROID_ABI ??
+    readEnvFileValue(path.join(projectRoot, '.env'), 'SNIPPETS_PREVIEW_ANDROID_ABI');
+
+  return PREVIEW_ANDROID_ABIS.has(envValue) ? envValue : DEFAULT_PREVIEW_ANDROID_ABI;
+}
+
+function withPreviewAndroidArchitecture(config) {
+  if (process.env.EAS_BUILD_PROFILE !== 'preview') return config;
+
+  return withDangerousMod(config, [
+    'android',
+    async (config) => {
+      const gradlePropertiesPath = path.join(
+        config.modRequest.platformProjectRoot,
+        'gradle.properties'
+      );
+      const previewAndroidAbi = getPreviewAndroidAbi(config.modRequest.projectRoot);
+      const previewAndroidArchitectures = previewAndroidAbi === 'universe'
+        ? ALL_PREVIEW_ANDROID_ABIS.join(',')
+        : previewAndroidAbi;
+      const existingProperties = fs.existsSync(gradlePropertiesPath)
+        ? fs.readFileSync(gradlePropertiesPath, 'utf8')
+        : '';
+      const architectureLine = `reactNativeArchitectures=${previewAndroidArchitectures}`;
+      const architecturePattern = /^reactNativeArchitectures=.*$/m;
+      const nextProperties = architecturePattern.test(existingProperties)
+        ? existingProperties.replace(architecturePattern, architectureLine)
+        : `${existingProperties.trimEnd()}\n${architectureLine}\n`;
+
+      if (nextProperties !== existingProperties) {
+        fs.writeFileSync(gradlePropertiesPath, nextProperties);
+      }
+
+      return config;
+    },
+  ]);
+}
+
 function withSingleTaskMainActivity(config) {
   return withAndroidManifest(config, (config) => {
     const application = config.modResults.manifest.application?.[0];
@@ -42,6 +107,7 @@ function withSingleTaskMainActivity(config) {
 
 module.exports = function withExpoGlReleaseRules(config) {
   config = withSingleTaskMainActivity(config);
+  config = withPreviewAndroidArchitecture(config);
 
   return withDangerousMod(config, [
     'android',
