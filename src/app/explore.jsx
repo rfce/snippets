@@ -528,18 +528,35 @@ const SnippetTile = memo(function SnippetTile({
 
 function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) {
   const zoomScale = useRef(new Animated.Value(1)).current;
+  const panTranslateX = useRef(new Animated.Value(0)).current;
+  const panTranslateY = useRef(new Animated.Value(0)).current;
   const zoomScaleRef = useRef(1);
+  const panTranslateRef = useRef({ x: 0, y: 0 });
+  const panStartTranslateRef = useRef({ x: 0, y: 0 });
+  const panStartCenterRef = useRef({ x: 0, y: 0 });
   const pinchStartDistanceRef = useRef(null);
   const pinchStartScaleRef = useRef(1);
+  const activeTouchCountRef = useRef(0);
   const disabledRef = useRef(disabled);
+  const imageRef = useRef(image);
+  const imageFrameSizeRef = useRef({ width: 0, height: 0 });
+  const [imageFrameSize, setImageFrameSize] = useState({ width: 0, height: 0 });
   disabledRef.current = disabled;
+  imageRef.current = image;
+  imageFrameSizeRef.current = imageFrameSize;
 
   const resetZoom = useCallback(() => {
     zoomScaleRef.current = 1;
+    panTranslateRef.current = { x: 0, y: 0 };
+    panStartTranslateRef.current = { x: 0, y: 0 };
+    panStartCenterRef.current = { x: 0, y: 0 };
     pinchStartDistanceRef.current = null;
     pinchStartScaleRef.current = 1;
+    activeTouchCountRef.current = 0;
     zoomScale.setValue(1);
-  }, [zoomScale]);
+    panTranslateX.setValue(0);
+    panTranslateY.setValue(0);
+  }, [panTranslateX, panTranslateY, zoomScale]);
 
   useEffect(() => {
     resetZoom();
@@ -548,38 +565,96 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
   const pinchPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponderCapture: (event) =>
-        !disabledRef.current && getTouchCount(event) >= 2,
+        !disabledRef.current &&
+        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
       onStartShouldSetPanResponder: (event) =>
-        !disabledRef.current && getTouchCount(event) >= 2,
+        !disabledRef.current &&
+        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
       onMoveShouldSetPanResponderCapture: (event) =>
-        !disabledRef.current && getTouchCount(event) >= 2,
+        !disabledRef.current &&
+        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
       onMoveShouldSetPanResponder: (event) =>
-        !disabledRef.current && getTouchCount(event) >= 2,
+        !disabledRef.current &&
+        (getTouchCount(event) >= 2 || zoomScaleRef.current > 1),
       onPanResponderGrant: (event) => {
-        const distance = getTouchDistance(event);
+        const touchCount = getTouchCount(event);
+        panStartTranslateRef.current = { ...panTranslateRef.current };
+        panStartCenterRef.current = getTouchCenter(event);
+        activeTouchCountRef.current = touchCount;
+
+        const distance = touchCount >= 2 ? getTouchDistance(event) : 0;
         if (distance <= 0) return;
 
         pinchStartDistanceRef.current = distance;
         pinchStartScaleRef.current = zoomScaleRef.current;
       },
       onPanResponderMove: (event) => {
-        const startDistance = pinchStartDistanceRef.current;
+        const previousTouchCount = activeTouchCountRef.current;
+        const touchCount = getTouchCount(event);
         const distance = getTouchDistance(event);
-        if (!startDistance || distance <= 0) return;
+        const currentCenter = getTouchCenter(event);
 
-        const nextScale = clamp(
-          pinchStartScaleRef.current * (distance / startDistance),
-          1,
-          4
+        if (touchCount >= 2 && distance > 0 && previousTouchCount < 2) {
+          pinchStartDistanceRef.current = distance;
+          pinchStartScaleRef.current = zoomScaleRef.current;
+          panStartTranslateRef.current = { ...panTranslateRef.current };
+          panStartCenterRef.current = currentCenter;
+        } else if (previousTouchCount >= 2 && touchCount === 1) {
+          pinchStartDistanceRef.current = null;
+          panStartTranslateRef.current = { ...panTranslateRef.current };
+          panStartCenterRef.current = currentCenter;
+        }
+
+        activeTouchCountRef.current = touchCount;
+
+        const startDistance = pinchStartDistanceRef.current;
+        const nextScale = startDistance && distance > 0
+          ? clamp(pinchStartScaleRef.current * (distance / startDistance), 1, 4)
+          : zoomScaleRef.current;
+
+        if (startDistance && distance > 0) {
+          zoomScaleRef.current = nextScale;
+          zoomScale.setValue(nextScale);
+        }
+
+        if (nextScale <= 1 || touchCount < 1) {
+          if (nextScale <= 1) {
+            panTranslateRef.current = { x: 0, y: 0 };
+            panTranslateX.setValue(0);
+            panTranslateY.setValue(0);
+          }
+          return;
+        }
+
+        // Keep the first zoom centered. Once the image is already zoomed,
+        // subsequent pinch-center movement can pan it naturally.
+        if (startDistance && pinchStartScaleRef.current <= 1) {
+          panTranslateRef.current = { x: 0, y: 0 };
+          panTranslateX.setValue(0);
+          panTranslateY.setValue(0);
+          return;
+        }
+
+        const deltaX = currentCenter.x - panStartCenterRef.current.x;
+        const deltaY = currentCenter.y - panStartCenterRef.current.y;
+        const nextTranslation = clampPanTranslation(
+          panStartTranslateRef.current.x + deltaX,
+          panStartTranslateRef.current.y + deltaY,
+          nextScale,
+          imageFrameSizeRef.current,
+          imageRef.current
         );
-        zoomScaleRef.current = nextScale;
-        zoomScale.setValue(nextScale);
+        panTranslateRef.current = nextTranslation;
+        panTranslateX.setValue(nextTranslation.x);
+        panTranslateY.setValue(nextTranslation.y);
       },
       onPanResponderRelease: () => {
         pinchStartDistanceRef.current = null;
+        activeTouchCountRef.current = 0;
       },
       onPanResponderTerminate: () => {
         pinchStartDistanceRef.current = null;
+        activeTouchCountRef.current = 0;
       },
       onPanResponderTerminationRequest: () => false,
     })
@@ -602,17 +677,29 @@ function OpenedImageView({ image, disabled, onBack, onDelete, onShare, error }) 
           </Pressable>
         </View>
 
-        <View style={styles.openedImageFrame} {...pinchPanResponder.panHandlers}>
+        <View
+          style={styles.openedImageFrame}
+          onLayout={({ nativeEvent }) => {
+            const { width, height } = nativeEvent.layout;
+            setImageFrameSize({ width, height });
+          }}
+          {...pinchPanResponder.panHandlers}>
           <Animated.View
             pointerEvents="none"
-            style={[styles.openedImageZoomLayer, { transform: [{ scale: zoomScale }] }]}>
-            <Image
-              accessibilityLabel={image.fileName || 'Opened snippet'}
-              contentFit="contain"
-              source={image.uri}
-              style={styles.openedImage}
-              transition={0}
-            />
+            style={[
+              styles.openedImagePanLayer,
+              { transform: [{ translateX: panTranslateX }, { translateY: panTranslateY }] },
+            ]}>
+            <Animated.View
+              style={[styles.openedImageZoomLayer, { transform: [{ scale: zoomScale }] }]}> 
+              <Image
+                accessibilityLabel={image.fileName || 'Opened snippet'}
+                contentFit="contain"
+                source={image.uri}
+                style={styles.openedImage}
+                transition={0}
+              />
+            </Animated.View>
           </Animated.View>
         </View>
 
@@ -673,6 +760,25 @@ function getTouchCount(event) {
   return event?.nativeEvent?.touches?.length ?? 0;
 }
 
+function getTouchCenter(event) {
+  const touches = event?.nativeEvent?.touches ?? [];
+  if (!touches.length) return { x: 0, y: 0 };
+
+  const points = touches.slice(0, 2).map((touch) => ({
+    x: touch.pageX ?? touch.locationX ?? 0,
+    y: touch.pageY ?? touch.locationY ?? 0,
+  }));
+  const total = points.reduce(
+    (center, point) => ({ x: center.x + point.x, y: center.y + point.y }),
+    { x: 0, y: 0 }
+  );
+
+  return {
+    x: total.x / points.length,
+    y: total.y / points.length,
+  };
+}
+
 function getTouchDistance(event) {
   const touches = event?.nativeEvent?.touches ?? [];
   if (touches.length < 2) return 0;
@@ -689,6 +795,38 @@ function getTouchDistance(event) {
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function clampPanTranslation(x, y, scale, frameSize, image) {
+  if (!frameSize.width || !frameSize.height) return { x, y };
+
+  const imageSize = getContainedImageSize(frameSize, image);
+  const maxX = Math.max(0, (imageSize.width * scale - frameSize.width) / 2);
+  const maxY = Math.max(0, (imageSize.height * scale - frameSize.height) / 2);
+
+  return {
+    x: clamp(x, -maxX, maxX),
+    y: clamp(y, -maxY, maxY),
+  };
+}
+
+function getContainedImageSize(frameSize, image) {
+  const imageRatio = image?.width && image?.height
+    ? image.width / image.height
+    : frameSize.width / frameSize.height;
+  const frameRatio = frameSize.width / frameSize.height;
+
+  if (frameRatio > imageRatio) {
+    return {
+      width: frameSize.height * imageRatio,
+      height: frameSize.height,
+    };
+  }
+
+  return {
+    width: frameSize.width,
+    height: frameSize.width / imageRatio,
+  };
 }
 
 function SelectionHeader({
@@ -975,6 +1113,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   openedImage: {
+    width: '100%',
+    height: '100%',
+  },
+  openedImagePanLayer: {
     width: '100%',
     height: '100%',
   },
