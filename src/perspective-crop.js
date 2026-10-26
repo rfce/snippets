@@ -884,6 +884,29 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return 1.0 - smoothstep(0.28, 0.62, backgroundBrightness);
   }
 
+  float softInkConfidence(
+    float value,
+    float darkThreshold,
+    float lightThreshold,
+    float backgroundIsDark
+  ) {
+    // Keep the transition narrow. This preserves the crisp binary body of a
+    // stroke while giving anti-aliased edge pixels proportional coverage.
+    float softness = max(0.018, uThresholdBias * 0.28);
+    float darkConfidence = 1.0 - smoothstep(
+      darkThreshold - softness,
+      darkThreshold + softness,
+      value
+    );
+    float lightConfidence = smoothstep(
+      lightThreshold - softness,
+      lightThreshold + softness,
+      value
+    );
+
+    return mix(darkConfidence, lightConfidence, backgroundIsDark);
+  }
+
   void main() {
     vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
     // Determine polarity from the paper/background brightness, not the
@@ -937,44 +960,91 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     float localMean = localSum / 9.0;
     float darkInkThreshold = localMean - uThresholdBias;
     float lightInkThreshold = localMean + uThresholdBias;
+    float softCenterInk = softInkConfidence(
+      center,
+      darkInkThreshold,
+      lightInkThreshold,
+      backgroundIsDark
+    );
     float darkCenterIsInk = 1.0 - step(darkInkThreshold, center);
     float lightCenterIsInk = step(lightInkThreshold, center);
     float centerIsInk = mix(darkCenterIsInk, lightCenterIsInk, backgroundIsDark);
 
-    // Remove isolated ink pixels while keeping connected strokes. Use a closer
-    // support sample so thin text strokes are not accidentally discarded.
-    float inkNeighborCount = 0.0;
+    // Build a small, weighted morphology neighborhood. Axial neighbors carry
+    // full weight, while diagonal neighbors carry less weight so a single
+    // diagonal contact can preserve a thin stroke without making diagonal
+    // scene noise look like connected text.
+    float axialInkSupport = 0.0;
+    float diagonalInkSupport = 0.0;
+    float softInkSupport = 0.0;
     vec2 supportStep = uTexelSize;
 
     for (int x = -1; x <= 1; x += 1) {
       for (int y = -1; y <= 1; y += 1) {
-        vec2 sampleUv = clamp(
-          vOutputUv + vec2(float(x), float(y)) * supportStep,
-          vec2(0.0),
-          vec2(1.0)
-        );
-        vec3 neighborColor = texture2D(uTexture, sampleUv).rgb;
-        vec3 correctedNeighborColor = correctForIllumination(
-          neighborColor,
-          localIllumination,
-          illuminationCorrectionEnabled
-        );
-        float neighbor = inkIntensity(correctedNeighborColor, localPaperConfidence);
-        float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
-        float lightNeighborIsInk = step(lightInkThreshold, neighbor);
-        float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
-        inkNeighborCount += neighborIsInk;
+        if (x != 0 || y != 0) {
+          vec2 sampleUv = clamp(
+            vOutputUv + vec2(float(x), float(y)) * supportStep,
+            vec2(0.0),
+            vec2(1.0)
+          );
+          vec3 neighborColor = texture2D(uTexture, sampleUv).rgb;
+          vec3 correctedNeighborColor = correctForIllumination(
+            neighborColor,
+            localIllumination,
+            illuminationCorrectionEnabled
+          );
+          float neighbor = inkIntensity(correctedNeighborColor, localPaperConfidence);
+          float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
+          float lightNeighborIsInk = step(lightInkThreshold, neighbor);
+          float neighborIsInk = mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
+
+          if (x == 0 || y == 0) {
+            axialInkSupport += neighborIsInk;
+          } else {
+            diagonalInkSupport += neighborIsInk;
+          }
+
+          softInkSupport += softInkConfidence(
+            neighbor,
+            darkInkThreshold,
+            lightInkThreshold,
+            backgroundIsDark
+          ) * ((x == 0 || y == 0) ? 1.0 : 0.55);
+        }
       }
     }
 
     // Preserve strongly contrasted text pixels even when anti-aliasing makes
-    // their immediate neighbors light, and fill small gaps inside a stroke.
+    // their immediate neighbors light. The soft support path keeps a thin
+    // anti-aliased stroke alive when its neighbors are close to, but not yet
+    // across, the hard threshold.
     float strongDarkInk = 1.0 - step(darkInkThreshold - 0.04, center);
     float strongLightInk = step(lightInkThreshold + 0.04, center);
     float strongInk = mix(strongDarkInk, strongLightInk, backgroundIsDark);
-    float supportedInk = centerIsInk * step(2.0, inkNeighborCount);
-    float regularGapFill = (1.0 - centerIsInk) * step(3.0, inkNeighborCount);
-    float inkMask = max(strongInk, max(supportedInk, regularGapFill));
+
+    float weightedHardSupport = axialInkSupport + diagonalInkSupport * 0.55;
+    float connectedStroke = max(
+      step(0.75, weightedHardSupport),
+      step(0.95, softInkSupport)
+    );
+
+    // A two-sided opening/closing rule: remove weak isolated specks, while
+    // filling small holes that sit between two or more real stroke pixels.
+    // Strong isolated marks are intentionally retained for punctuation and
+    // very small handwritten details.
+    float weakIsolatedInk = centerIsInk * (1.0 - strongInk) * connectedStroke;
+    float regularGapFill =
+      (1.0 - centerIsInk) * step(1.5, weightedHardSupport);
+    float structuralInkMask = max(
+      strongInk,
+      max(weakIsolatedInk, regularGapFill)
+    );
+    // Keep morphology responsible for rejecting isolated scene noise, then
+    // use the soft confidence only where at least one neighboring pixel is
+    // already recognized as ink. This restores connected anti-aliased pen
+    // edges without turning nearby colorful objects into broad gray strokes.
+    float supportedSoftInk = softCenterInk * connectedStroke;
+    float inkMask = max(structuralInkMask, supportedSoftInk);
     float inkColor = 0.3019608; // #4d4d4d
     gl_FragColor = vec4(mix(vec3(1.0), vec3(inkColor), inkMask), 1.0);
   }
