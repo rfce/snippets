@@ -278,7 +278,7 @@ export async function renderMagicColorAsync({
 
     gl.uniform2f(texelSizeLocation, 1 / width, 1 / height);
     gl.uniform1f(sampleStepLocation, 12);
-    gl.uniform1f(thresholdBiasLocation, 0.12);
+    gl.uniform1f(thresholdBiasLocation, 0.09);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.finish?.();
@@ -1203,129 +1203,219 @@ const MAGIC_COLOR_FRAGMENT_SHADER = `
     );
   }
 
+  float srgbToLinear(float value) {
+    return value <= 0.04045
+      ? value / 12.92
+      : pow((value + 0.055) / 1.055, 2.4);
+  }
+
+  float linearToSrgb(float value) {
+    return value <= 0.0031308
+      ? value * 12.92
+      : 1.055 * pow(max(value, 0.0), 1.0 / 2.4) - 0.055;
+  }
+
+  float labPivot(float value) {
+    return value > 0.008856
+      ? pow(value, 1.0 / 3.0)
+      : 7.787 * value + 16.0 / 116.0;
+  }
+
+  float labInversePivot(float value) {
+    float cube = value * value * value;
+    return cube > 0.008856
+      ? cube
+      : (value - 16.0 / 116.0) / 7.787;
+  }
+
+  // Lab is kept in a shader-friendly range: L is 0..1 and a/b are roughly
+  // -1..1. This lets lightness and colour be adjusted independently.
+  vec3 rgbToLab(vec3 color) {
+    vec3 linear = vec3(
+      srgbToLinear(color.r),
+      srgbToLinear(color.g),
+      srgbToLinear(color.b)
+    );
+    float x = labPivot(dot(linear, vec3(0.4124564, 0.3575761, 0.1804375)) / 0.95047);
+    float y = labPivot(dot(linear, vec3(0.2126729, 0.7151522, 0.0721750)));
+    float z = labPivot(dot(linear, vec3(0.0193339, 0.1191920, 0.9503041)) / 1.08883);
+    return vec3(
+      clamp((116.0 * y - 16.0) / 100.0, 0.0, 1.0),
+      (500.0 * (x - y)) / 128.0,
+      (200.0 * (y - z)) / 128.0
+    );
+  }
+
+  vec3 labToRgb(vec3 lab) {
+    float lightness = lab.x * 100.0;
+    float fy = (lightness + 16.0) / 116.0;
+    float fx = fy + (lab.y * 128.0) / 500.0;
+    float fz = fy - (lab.z * 128.0) / 200.0;
+    vec3 xyz = vec3(
+      0.95047 * labInversePivot(fx),
+      labInversePivot(fy),
+      1.08883 * labInversePivot(fz)
+    );
+    vec3 linear = vec3(
+      dot(xyz, vec3( 3.2404542, -1.5371385, -0.4985314)),
+      dot(xyz, vec3(-0.9692660,  1.8760108,  0.0415560)),
+      dot(xyz, vec3( 0.0556434, -0.2040259,  1.0572252))
+    );
+    return clamp(vec3(
+      linearToSrgb(linear.r),
+      linearToSrgb(linear.g),
+      linearToSrgb(linear.b)
+    ), vec3(0.0), vec3(1.0));
+  }
+
+  float labChroma(vec3 lab) {
+    return length(lab.yz);
+  }
+
+  float paperCandidateScore(vec3 lab) {
+    // Paper is generally the brightest, least chromatic member of a local
+    // neighborhood. Penalising chroma prevents coloured handwriting from
+    // becoming the local illumination reference.
+    return lab.x - labChroma(lab) * 0.42;
+  }
+
+  vec3 sampleLab(vec2 uv) {
+    return rgbToLab(texture2D(uTexture, clamp(uv, vec2(0.0), vec2(1.0))).rgb);
+  }
+
+  vec3 estimatePaperLabAtScale(vec2 centerUv, float pixelStep) {
+    vec2 stepSize = uTexelSize * pixelStep;
+    vec3 best = sampleLab(centerUv);
+    float bestScore = paperCandidateScore(best);
+
+    for (int i = 0; i < 4; i += 1) {
+      vec2 direction = i == 0
+        ? vec2(-stepSize.x, 0.0)
+        : i == 1
+          ? vec2(stepSize.x, 0.0)
+          : i == 2
+            ? vec2(0.0, -stepSize.y)
+            : vec2(0.0, stepSize.y);
+      vec3 candidate = sampleLab(centerUv + direction);
+      float candidateScore = paperCandidateScore(candidate);
+      if (candidateScore > bestScore) {
+        best = candidate;
+        bestScore = candidateScore;
+      }
+    }
+
+    return best;
+  }
+
+  vec3 estimatePaperLab(vec2 centerUv) {
+    vec3 fine = estimatePaperLabAtScale(centerUv, 16.0);
+    vec3 medium = estimatePaperLabAtScale(centerUv, 64.0);
+    vec3 broad = estimatePaperLabAtScale(centerUv, 192.0);
+    return fine * 0.25 + medium * 0.35 + broad * 0.40;
+  }
+
+  vec3 estimateLocalPaperLab(vec2 centerUv) {
+    // Keep the local reference close enough to follow a handwriting stroke;
+    // the broad estimate above is used only for exposure and paper whitening.
+    vec3 fine = estimatePaperLabAtScale(centerUv, 8.0);
+    vec3 medium = estimatePaperLabAtScale(centerUv, 24.0);
+    return fine * 0.55 + medium * 0.45;
+  }
+
+  float lightnessInkSignal(vec3 lab, vec3 paperLab) {
+    float drop = paperLab.x - lab.x;
+    float lowerBound = max(0.018, uThresholdBias * 0.20);
+    return smoothstep(lowerBound, lowerBound + 0.16, drop);
+  }
+
+  float colourInkSignal(vec3 lab, vec3 paperLab) {
+    float chromaDifference = length(lab.yz - paperLab.yz);
+    return smoothstep(0.035, 0.18, chromaDifference);
+  }
+
+  // Retain a distinct red/warm-ink path. It catches red annotations even
+  // when their lightness is close to the paper and gives that colour enough
+  // weight to survive the whitening pass.
+  float particularInkColourSignal(vec3 lab, vec3 paperLab) {
+    vec2 delta = lab.yz - paperLab.yz;
+    float redAxis = delta.x - abs(delta.y) * 0.25;
+    return smoothstep(0.055, 0.20, redAxis);
+  }
+
+  float inkEvidence(vec3 lab, vec3 paperLab) {
+    float darkInk = lightnessInkSignal(lab, paperLab);
+    float colourInk = colourInkSignal(lab, paperLab);
+    float particularColour = particularInkColourSignal(lab, paperLab);
+    return max(darkInk, max(colourInk * 0.92, particularColour));
+  }
+
   void main() {
-    vec3 originalCenterColor = texture2D(uTexture, vOutputUv).rgb;
-    float backgroundIsDark = 1.0 - step(
-      0.45,
-      estimateGlobalBackgroundBrightness()
-    );
-    float illuminationCorrectionEnabled = 1.0 - backgroundIsDark;
-    float localIllumination = estimateLocalIllumination(vOutputUv);
-    vec3 correctedCenterColor = sampleCorrectedColor(
-      vOutputUv,
-      localIllumination,
-      illuminationCorrectionEnabled
-    );
-    float center = inkIntensity(correctedCenterColor);
-    float localSum = 0.0;
-    vec2 sampleOffset = uTexelSize * uSampleStep;
+    vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
+    vec3 centerLab = rgbToLab(centerColor);
+    vec3 exposurePaperLab = estimatePaperLab(vOutputUv);
+    vec3 paperLab = estimateLocalPaperLab(vOutputUv);
+    float centerEvidence = inkEvidence(centerLab, paperLab);
 
+    // Use the estimated paper L value as the local exposure reference. A
+    // shadowed sheet therefore maps to the same near-white paper level as a
+    // well-lit sheet, while ink keeps its distance from that local reference.
+    float paperLightness = max(exposurePaperLab.x, 0.45);
+    float relativeLightness = centerLab.x / paperLightness;
+    float correctedLightness = clamp(
+      pow(max(relativeLightness, 0.0), 1.08) * 0.975,
+      0.025,
+      0.985
+    );
+
+    // Estimate connected support from actual Lab evidence. Strong colour
+    // signals are allowed to survive with less support so small coloured
+    // handwriting and punctuation are not mistaken for paper texture.
+    float support = 0.0;
+    vec2 supportOffset = uTexelSize * max(1.0, uSampleStep / 12.0);
     for (int x = -1; x <= 1; x += 1) {
       for (int y = -1; y <= 1; y += 1) {
-        vec2 sampleUv = clamp(
-          vOutputUv + vec2(float(x), float(y)) * sampleOffset,
-          vec2(0.0),
-          vec2(1.0)
-        );
-        localSum += sampleInkIntensity(
-          sampleUv,
-          localIllumination,
-          illuminationCorrectionEnabled
-        );
+        if (x != 0 || y != 0) {
+          vec3 neighborLab = sampleLab(
+            vOutputUv + vec2(float(x), float(y)) * supportOffset
+          );
+          support += inkEvidence(neighborLab, paperLab);
+        }
       }
     }
 
-    float localMean = localSum / 9.0;
-    float centerInk = inkStrength(center, localMean, backgroundIsDark);
-    float strongInk = smoothstep(0.04, 0.14, mix(
-      (localMean - uThresholdBias) - center,
-      center - (localMean + uThresholdBias),
-      backgroundIsDark
-    ));
-
-    // Build a connected-stroke support mask exactly like the black-and-white
-    // path, but keep the original color for pixels that survive the mask.
-    float inkNeighborCount = 0.0;
-    float redInkNeighborCount = 0.0;
-    vec3 neighborInkColor = vec3(0.0);
-    float neighborInkWeight = 0.0;
-    vec2 supportStep = uTexelSize;
-
-    for (int x = -1; x <= 1; x += 1) {
-      for (int y = -1; y <= 1; y += 1) {
-        vec2 sampleUv = clamp(
-          vOutputUv + vec2(float(x), float(y)) * supportStep,
-          vec2(0.0),
-          vec2(1.0)
-        );
-        vec3 neighborColor = sampleCorrectedColor(
-          sampleUv,
-          localIllumination,
-          illuminationCorrectionEnabled
-        );
-        float neighborIntensity = inkIntensity(neighborColor);
-        float neighborStrength = inkStrength(
-          neighborIntensity,
-          localMean,
-          backgroundIsDark
-        );
-        inkNeighborCount += neighborStrength;
-        redInkNeighborCount += neighborStrength * smoothstep(
-          0.025,
-          0.14,
-          redInkDominance(neighborColor)
-        );
-        neighborInkColor += neighborColor * neighborStrength;
-        neighborInkWeight += neighborStrength;
-      }
-    }
-
-    float supportedInk = centerInk * smoothstep(1.5, 2.8, inkNeighborCount);
-    float regularGapFill = (1.0 - centerInk) *
-      smoothstep(2.5, 4.5, inkNeighborCount);
-    float redCenterSignal = smoothstep(
-      0.025,
-      0.14,
-      redInkDominance(originalCenterColor)
+    float connected = smoothstep(0.45, 1.55, support);
+    float colourSignal = colourInkSignal(centerLab, paperLab);
+    float particularColour = particularInkColourSignal(centerLab, paperLab);
+    float strongMark = max(
+      smoothstep(0.12, 0.28, paperLab.x - centerLab.x),
+      max(smoothstep(0.10, 0.27, colourSignal), particularColour)
     );
-    float redGapFill = (1.0 - centerInk) *
-      smoothstep(2.0, 4.0, redInkNeighborCount) *
-      (1.0 - redCenterSignal);
-    float inkMask = max(
-      strongInk,
-      max(supportedInk, max(regularGapFill, redGapFill))
+    float inkMask = max(strongMark, centerEvidence * connected);
+
+    // Remove paper tint while retaining the Lab direction of handwriting.
+    // Chroma is boosted only for detected ink; paper itself is brought close
+    // to neutral white without a harsh RGB channel clamp.
+    vec2 inkChroma = centerLab.yz - paperLab.yz;
+    float chromaGain = 1.08 + 0.22 * particularColour;
+    vec3 inkLab = vec3(
+      correctedLightness,
+      inkChroma.x * chromaGain,
+      inkChroma.y * chromaGain
+    );
+    vec3 paperWhiteLab = vec3(
+      0.975,
+      0.0,
+      0.0
+    );
+    vec3 outputColor = mix(
+      labToRgb(paperWhiteLab),
+      labToRgb(inkLab),
+      clamp(inkMask, 0.0, 1.0)
     );
 
-    vec3 estimatedInkColor = neighborInkColor / max(neighborInkWeight, 0.001);
-    vec3 inkColor = mix(
-      correctedCenterColor,
-      estimatedInkColor,
-      max(regularGapFill, redGapFill)
-    );
-    inkColor = increaseSaturation(inkColor, 1.10);
-
-    float redInkSignal = smoothstep(
-      0.025,
-      0.14,
-      redInkDominance(inkColor)
-    );
-    vec3 brighterRed = clamp(
-      vec3(
-        inkColor.r * 1.14 + 0.02,
-        inkColor.g * 0.84,
-        inkColor.b * 0.84
-      ),
-      vec3(0.0),
-      vec3(0.995)
-    );
-    inkColor = mix(inkColor, brighterRed, 0.75 * redInkSignal);
-
-    // The matte is intentionally white everywhere outside connected ink.
-    // This is the key difference from a color filter: paper, shadows, wood,
-    // and other background pixels never pass through to the output image.
-    gl_FragColor = vec4(
-      mix(vec3(1.0), clamp(inkColor, vec3(0.0), vec3(0.995)), inkMask),
-      1.0
-    );
+    // Preserve a little natural paper warmth and avoid over-saturating weak
+    // coloured strokes, while still improving text contrast in Lab lightness.
+    outputColor = mix(outputColor, increaseSaturation(outputColor, 1.04), colourSignal * 0.20);
+    gl_FragColor = vec4(clamp(outputColor, vec3(0.0), vec3(0.995)), 1.0);
   }
 `;
