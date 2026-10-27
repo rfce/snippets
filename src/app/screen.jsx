@@ -21,6 +21,7 @@ import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
+  cleanupProcessedImagesAsync,
   renderMagicColorAsync,
   renderAdaptiveThresholdAsync,
   renderPerspectiveCropAsync,
@@ -189,6 +190,7 @@ function CameraScreen() {
   const savedImageModeAnimation = useRef(new Animated.Value(0)).current;
   const savedImageLiquidScale = useRef(new Animated.Value(1)).current;
   const savedImageModeAnimationStarted = useRef(false);
+  const temporaryPreviewPhotosRef = useRef(new Map());
   const [savedImageToggleRowWidth, setSavedImageToggleRowWidth] = useState(0);
 
   const reportDiagnostic = useCallback((operation, error, context = {}) => {
@@ -204,6 +206,20 @@ function CameraScreen() {
       onDismiss={() => setDiagnosticError(null)}
     />
   ) : null;
+
+  const cleanupTemporaryPreviewPhotos = useCallback(() => {
+    const photos = [...temporaryPreviewPhotosRef.current.values()];
+    temporaryPreviewPhotosRef.current.clear();
+    void cleanupProcessedImagesAsync(photos);
+  }, []);
+
+  const trackTemporaryPreviewPhoto = useCallback((photo) => {
+    if (photo?.temporary && photo.uri) {
+      temporaryPreviewPhotosRef.current.set(photo.uri, photo);
+    }
+  }, []);
+
+  useEffect(() => cleanupTemporaryPreviewPhotos, [cleanupTemporaryPreviewPhotos]);
 
   const loadRecentGalleryImage = useCallback(async () => {
     if (recentImageLoadStartedRef.current) return;
@@ -384,6 +400,11 @@ function CameraScreen() {
   };
 
   const closeSavedPhoto = () => {
+    cleanupTemporaryPreviewPhotos();
+    savedImageModeAnimation.stopAnimation();
+    savedImageModeAnimation.setValue(0);
+    savedImageLiquidScale.stopAnimation();
+    savedImageLiquidScale.setValue(1);
     setSavedPhoto(null);
     setSavedImageMode('original');
     setBlackAndWhitePhoto(null);
@@ -493,6 +514,7 @@ function CameraScreen() {
       } else {
         setMagicColorPhoto(enhancedPhoto);
       }
+      trackTemporaryPreviewPhoto(enhancedPhoto);
     } catch (error) {
       const details = getErrorDetails(error);
       console.error(`[screen] ${mode} enhancement failed`, details);
@@ -524,13 +546,19 @@ function CameraScreen() {
         return;
       }
 
-      await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
-      setRecentGalleryImage({
-        uri: displayedSavedPhoto.uri,
-        width: displayedSavedPhoto.width,
-        height: displayedSavedPhoto.height,
-        fileName: displayedSavedPhoto.fileName ?? null,
-      });
+      const savedAsset = await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
+      const savedImage = await normalizeMediaLibraryImage(savedAsset);
+
+      if (savedImage?.uri) {
+        setRecentGalleryImage(savedImage);
+      } else if (!displayedSavedPhoto.temporary) {
+        setRecentGalleryImage({
+          uri: displayedSavedPhoto.uri,
+          width: displayedSavedPhoto.width,
+          height: displayedSavedPhoto.height,
+          fileName: displayedSavedPhoto.fileName ?? null,
+        });
+      }
       console.log('[screen] Final image saved', {
         mode: savedImageMode,
         uri: displayedSavedPhoto.uri,
@@ -580,6 +608,8 @@ function CameraScreen() {
             rotation: capturedRotation,
           })
         : capturedPhoto;
+
+      trackTemporaryPreviewPhoto(selectedPhoto);
 
       console.log('[screen] Image ready for enhancement', {
         uriAvailable: Boolean(selectedPhoto?.uri),

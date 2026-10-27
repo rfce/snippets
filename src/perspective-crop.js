@@ -1,3 +1,5 @@
+import * as FileSystem from 'expo-file-system/legacy';
+
 // Keep the processed document close to the camera's native resolution while
 // using JPEG snapshots to avoid the large files and decode cost of PNG.
 const MAX_OUTPUT_EDGE = 4096;
@@ -99,6 +101,7 @@ export async function renderPerspectiveCropAsync({
       uri: snapshotUri,
       width: outputSize.width,
       height: outputSize.height,
+      temporary: true,
     };
   } finally {
     try {
@@ -197,6 +200,7 @@ export async function renderAdaptiveThresholdAsync({
       uri: snapshotUri,
       width: outputSize.width,
       height: outputSize.height,
+      temporary: true,
     };
   } finally {
     try {
@@ -296,6 +300,7 @@ export async function renderMagicColorAsync({
       uri: snapshotUri,
       width: outputSize.width,
       height: outputSize.height,
+      temporary: true,
     };
   } finally {
     try {
@@ -322,6 +327,20 @@ function getGLView() {
       'Image processing requires expo-gl in the native build. Rebuild the preview or development client with expo-gl included.'
     );
   }
+}
+
+export async function cleanupProcessedImagesAsync(images) {
+  const cleanupTasks = (Array.isArray(images) ? images : [images]).map(async (image) => {
+    if (!image?.temporary || !image.uri) return;
+
+    try {
+      await FileSystem.deleteAsync(image.uri, { idempotent: true });
+    } catch (error) {
+      console.warn('[perspective-crop] Temporary image cleanup failed', error);
+    }
+  });
+
+  await Promise.all(cleanupTasks);
 }
 
 function validateCorners(corners) {
