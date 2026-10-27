@@ -293,9 +293,9 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
           </Pressable>
           <View style={styles.batchReviewHeading}>
             <ThemedText type="title" style={styles.batchReviewTitle}>
-              Batch review
+              Review
             </ThemedText>
-            <ThemedText themeColor="textSecondary">
+            <ThemedText style={styles.batchReviewSubtitle}>
               {photos.length} {photos.length === 1 ? 'image' : 'images'} captured
             </ThemedText>
           </View>
@@ -2154,18 +2154,25 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 22,
-    backgroundColor: REVIEW_SURFACE,
-    borderWidth: 1,
-    borderColor: REVIEW_BORDER,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
   },
   batchReviewHeading: {
     flex: 1,
   },
   batchReviewTitle: {
-    color: REVIEW_TEXT,
+    color: PREVIEW_TEXT,
     fontSize: 24,
     lineHeight: 30,
-    fontWeight: '700',
+    fontWeight: '600',
+    letterSpacing: 0.35,
+    textAlign: 'center',
+  },
+  batchReviewSubtitle: {
+    color: PREVIEW_MUTED,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
   },
   batchReviewHeaderSpacer: {
     width: 44,
@@ -2179,7 +2186,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     overflow: 'hidden',
     borderRadius: 20,
-    backgroundColor: '#111111',
+    backgroundColor: PREVIEW_SURFACE,
   },
   batchReviewArrow: {
     position: 'absolute',
