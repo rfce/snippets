@@ -882,8 +882,10 @@ function OpenedImageView({
                   { transform: [{ translateX: swipePreviewOffset }] },
                 ]}>
                 <Image
+                  key={getAssetKey(swipePreviewImage)}
                   accessibilityLabel={swipePreviewImage.fileName || 'Adjacent opened snippet'}
                   contentFit="contain"
+                  recyclingKey={getAssetKey(swipePreviewImage)}
                   source={swipePreviewImage.uri}
                   style={styles.openedImage}
                   transition={0}
@@ -902,6 +904,7 @@ function OpenedImageView({
                 <Animated.View
                   style={[styles.openedImageZoomLayer, { transform: [{ scale: zoomScale }] }]}> 
                   <Image
+                    key={getAssetKey(displayedImage)}
                     accessibilityLabel={displayedImage.fileName || 'Opened snippet'}
                     contentFit="contain"
                     onLoad={() => {
@@ -910,6 +913,7 @@ function OpenedImageView({
                         completePendingSwipe();
                       }
                     }}
+                    recyclingKey={getAssetKey(displayedImage)}
                     source={displayedImage.uri}
                     style={styles.openedImage}
                     transition={0}
