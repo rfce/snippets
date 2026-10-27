@@ -70,6 +70,11 @@ const FLASH_MODES = [
   },
 ];
 
+const CAPTURE_MODES = [
+  { value: 'single', label: 'Single' },
+  { value: 'batch', label: 'Batch' },
+];
+
 const GALLERY_PAGE_SIZE = 36;
 const TEAL_ACCENT = '#16C7B7';
 const REVIEW_DISCARD_ACCENT = '#C2415A';
@@ -153,6 +158,300 @@ function CameraModuleUnavailable() {
   );
 }
 
+function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [selectedMode, setSelectedMode] = useState('original');
+  const [processedPhotosByMode, setProcessedPhotosByMode] = useState({});
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState(0);
+  const temporaryPhotosRef = useRef(new Map());
+  const batchImageOptions = [
+    { label: 'Original', value: 'original' },
+    { label: 'Black & White', value: 'blackAndWhite' },
+    { label: 'Magic Color', value: 'magicColor' },
+  ];
+  const activePhotos = selectedMode === 'original'
+    ? photos
+    : processedPhotosByMode[selectedMode] ?? photos;
+  const currentPhoto = activePhotos[currentIndex] ?? activePhotos[0];
+  const selectedPhotos = selectedMode === 'original'
+    ? photos
+    : processedPhotosByMode[selectedMode] ?? null;
+
+  const trackTemporaryPhoto = useCallback((photo) => {
+    if (photo?.temporary && photo.uri) {
+      temporaryPhotosRef.current.set(photo.uri, photo);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const temporaryPhotos = [...temporaryPhotosRef.current.values()];
+      temporaryPhotosRef.current.clear();
+      void cleanupProcessedImagesAsync(temporaryPhotos);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (selectedMode === 'original') {
+      setIsProcessing(false);
+      setProcessingProgress(0);
+      return undefined;
+    }
+
+    if (processedPhotosByMode[selectedMode]) {
+      setIsProcessing(false);
+      setProcessingProgress(photos.length);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const renderPhoto = selectedMode === 'blackAndWhite'
+      ? renderAdaptiveThresholdAsync
+      : renderMagicColorAsync;
+
+    setIsProcessing(true);
+    setProcessingProgress(0);
+
+    const processBatch = async () => {
+      const processedPhotos = [];
+
+      try {
+        for (let index = 0; index < photos.length; index += 1) {
+          if (cancelled) return;
+
+          const photo = photos[index];
+          const enhancedPhoto = await renderPhoto({
+            uri: photo.uri,
+            sourceWidth: photo.width,
+            sourceHeight: photo.height,
+          });
+          trackTemporaryPhoto(enhancedPhoto);
+          processedPhotos.push({ ...photo, ...enhancedPhoto });
+
+          if (!cancelled) {
+            setProcessingProgress(index + 1);
+          }
+        }
+
+        if (!cancelled) {
+          setProcessedPhotosByMode((current) => ({
+            ...current,
+            [selectedMode]: processedPhotos,
+          }));
+          setIsProcessing(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setIsProcessing(false);
+          Alert.alert(
+            `${selectedMode === 'blackAndWhite' ? 'Black & white' : 'Magic Color'} failed`,
+            getErrorDetails(error).message
+          );
+        }
+      }
+    };
+
+    processBatch();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [photos, processedPhotosByMode, selectedMode, trackTemporaryPhoto]);
+
+  const moveToAdjacentPhoto = (direction) => {
+    setCurrentIndex((index) => Math.max(0, Math.min(photos.length - 1, index + direction)));
+  };
+
+  const swipeResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gestureState) =>
+        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.15 && Math.abs(gestureState.dx) > 12,
+      onPanResponderRelease: (_, gestureState) => {
+        if (Math.abs(gestureState.dx) >= 48) {
+          moveToAdjacentPhoto(gestureState.dx < 0 ? 1 : -1);
+        }
+      },
+    })
+  ).current;
+
+  return (
+    <View style={styles.batchReviewContainer}>
+      <SafeAreaView style={styles.batchReviewSafeArea}>
+        <View style={styles.batchReviewHeader}>
+          <Pressable
+            accessibilityLabel="Return to batch camera"
+            accessibilityRole="button"
+            onPress={onBack}
+            style={({ pressed }) => [styles.batchReviewBackButton, pressed && styles.pressed]}>
+            <SymbolView
+              name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+              size={22}
+              tintColor={REVIEW_TEXT}
+            />
+          </Pressable>
+          <View style={styles.batchReviewHeading}>
+            <ThemedText type="title" style={styles.batchReviewTitle}>
+              Batch review
+            </ThemedText>
+            <ThemedText themeColor="textSecondary">
+              {photos.length} {photos.length === 1 ? 'image' : 'images'} captured
+            </ThemedText>
+          </View>
+          <View style={styles.batchReviewHeaderSpacer} />
+        </View>
+
+        <View style={styles.batchReviewImageFrame} {...swipeResponder.panHandlers}>
+          <Pressable
+            accessibilityLabel="Previous batch image"
+            accessibilityRole="button"
+            disabled={currentIndex === 0}
+            onPress={() => moveToAdjacentPhoto(-1)}
+            style={({ pressed }) => [
+              styles.batchReviewArrow,
+              styles.batchReviewPreviousArrow,
+              pressed && styles.pressed,
+              currentIndex === 0 && styles.disabled,
+            ]}>
+            <SymbolView
+              name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+              size={24}
+              tintColor={REVIEW_BACKGROUND}
+            />
+          </Pressable>
+
+          {currentPhoto ? (
+            <Image
+              key={currentPhoto.uri}
+              contentFit="contain"
+              recyclingKey={currentPhoto.uri}
+              source={currentPhoto.uri}
+              style={styles.batchReviewImage}
+              transition={0}
+            />
+          ) : null}
+          {isProcessing ? (
+            <View style={styles.batchReviewProcessingOverlay} pointerEvents="none">
+              <ActivityIndicator color={REVIEW_BACKGROUND} />
+              <ThemedText style={styles.batchReviewProcessingText}>
+                {processingProgress} / {photos.length}
+              </ThemedText>
+            </View>
+          ) : null}
+
+          <Pressable
+            accessibilityLabel="Next batch image"
+            accessibilityRole="button"
+            disabled={currentIndex >= photos.length - 1}
+            onPress={() => moveToAdjacentPhoto(1)}
+            style={({ pressed }) => [
+              styles.batchReviewArrow,
+              styles.batchReviewNextArrow,
+              pressed && styles.pressed,
+              currentIndex >= photos.length - 1 && styles.disabled,
+            ]}>
+            <SymbolView
+              name={{ ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' }}
+              size={24}
+              tintColor={REVIEW_BACKGROUND}
+            />
+          </Pressable>
+        </View>
+
+        <View accessibilityRole="none" style={styles.batchReviewPagination}>
+          {photos.map((photo, index) => (
+            <View
+              key={photo.uri || String(index)}
+              style={[
+                styles.batchReviewDot,
+                index === currentIndex && styles.batchReviewDotActive,
+              ]}
+            />
+          ))}
+        </View>
+
+        <View style={styles.batchReviewToggleRow}>
+          {batchImageOptions.map((option) => {
+            const isActive = selectedMode === option.value;
+
+            return (
+              <Pressable
+                key={option.value}
+                accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
+                accessibilityRole="button"
+                onPress={() => setSelectedMode(option.value)}
+                style={({ pressed }) => [
+                  styles.batchReviewToggle,
+                  isActive && styles.batchReviewToggleActive,
+                  pressed && styles.pressed,
+                ]}>
+                <ThemedText
+                  type="smallBold"
+                  allowFontScaling={false}
+                  style={[
+                    styles.batchReviewToggleText,
+                    isActive && styles.batchReviewToggleTextActive,
+                  ]}>
+                  {option.label}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <View style={styles.batchReviewActions}>
+          <Pressable
+            accessibilityLabel="Discard batch"
+            accessibilityRole="button"
+            disabled={isSaving}
+            onPress={onDiscard}
+            style={({ pressed }) => [
+              styles.batchReviewAction,
+              styles.batchReviewDiscardAction,
+              pressed && styles.pressed,
+              isSaving && styles.disabled,
+            ]}>
+            <SymbolView
+              name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
+              size={25}
+              tintColor={REVIEW_DISCARD_ACCENT}
+            />
+            <ThemedText type="smallBold" style={styles.batchReviewDiscardText}>
+              Discard
+            </ThemedText>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Save batch"
+            accessibilityRole="button"
+            disabled={isSaving || isProcessing || !selectedPhotos}
+            onPress={() => onSave(selectedPhotos)}
+            style={({ pressed }) => [
+              styles.batchReviewAction,
+              styles.batchReviewSaveAction,
+              pressed && styles.pressed,
+              (isSaving || isProcessing || !selectedPhotos) && styles.disabled,
+            ]}>
+            {isSaving ? (
+              <ActivityIndicator color={REVIEW_BACKGROUND} />
+            ) : (
+              <SymbolView
+                name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
+                size={25}
+                tintColor={REVIEW_BACKGROUND}
+              />
+            )}
+            <ThemedText type="smallBold" style={styles.batchReviewSaveText}>
+              Save
+            </ThemedText>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    </View>
+  );
+}
+
 function CameraScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -169,6 +468,9 @@ function CameraScreen() {
   const [isFocused, setIsFocused] = useState(true);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [captureMode, setCaptureMode] = useState('single');
+  const [batchPhotos, setBatchPhotos] = useState([]);
+  const [batchReviewPhotos, setBatchReviewPhotos] = useState(null);
   const [flashMode, setFlashMode] = useState('off');
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [savedPhoto, setSavedPhoto] = useState(null);
@@ -177,6 +479,7 @@ function CameraScreen() {
   const [magicColorPhoto, setMagicColorPhoto] = useState(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isSavingPreview, setIsSavingPreview] = useState(false);
+  const [isSavingBatch, setIsSavingBatch] = useState(false);
   const [capturedRotation, setCapturedRotation] = useState(0);
   const [cropCorners, setCropCorners] = useState(null);
   const [reviewFrameSize, setReviewFrameSize] = useState({ width: 0, height: 0 });
@@ -318,6 +621,13 @@ function CameraScreen() {
     setIsCameraReady(false);
   }, []);
 
+  const selectCaptureMode = useCallback((mode) => {
+    if (mode === captureMode) return;
+
+    setCaptureMode(mode);
+    setBatchPhotos([]);
+  }, [captureMode]);
+
   const renderGalleryItem = useCallback(
     ({ item }) => <GalleryImportTile item={item} onSelect={selectGalleryImage} />,
     [selectGalleryImage]
@@ -364,16 +674,73 @@ function CameraScreen() {
         throw new Error('Camera capture completed without returning a photo URI.');
       }
 
-      setCapturedPhoto(photo);
-      setCropCorners(null);
-      setCapturedRotation(0);
+      if (captureMode === 'batch') {
+        setBatchPhotos((current) => [...current, photo]);
+      } else {
+        setCapturedPhoto(photo);
+        setCropCorners(null);
+        setCapturedRotation(0);
+      }
     } catch (error) {
       reportDiagnostic('Capture photo', error, {
+        captureMode,
         flashMode,
         cameraReady: isCameraReady,
       });
     } finally {
       setIsCapturing(false);
+    }
+  };
+
+  const finishBatchCapture = () => {
+    if (captureMode !== 'batch' || !batchPhotos.length || isCapturing) return;
+
+    setBatchReviewPhotos(batchPhotos);
+    setIsCameraReady(false);
+  };
+
+  const returnToBatchCamera = () => {
+    setBatchReviewPhotos(null);
+    setIsCameraReady(false);
+  };
+
+  const discardBatch = () => {
+    setBatchPhotos([]);
+    setBatchReviewPhotos(null);
+    setCaptureMode('single');
+    setIsCameraReady(false);
+  };
+
+  const saveBatch = async (photosToSave = batchPhotos) => {
+    if (!photosToSave.length || isSavingBatch) return;
+
+    setIsSavingBatch(true);
+
+    try {
+      let permission = mediaPermission;
+      if (!permission?.granted) {
+        permission = await requestMediaPermission();
+      }
+
+      if (!permission?.granted) {
+        Alert.alert('Permission needed', 'Allow photo access to save this batch.');
+        return;
+      }
+
+      for (const photo of photosToSave) {
+        await saveToSnippetsAlbum(mediaLibraryModule, photo.uri);
+      }
+
+      setBatchPhotos([]);
+      setBatchReviewPhotos(null);
+      setCaptureMode('single');
+      setIsCameraReady(false);
+    } catch (error) {
+      const details = getErrorDetails(error);
+      console.error('[screen] Batch save failed', details);
+      Alert.alert('Could not save batch', details.message);
+    } finally {
+      setIsSavingBatch(false);
     }
   };
 
@@ -724,6 +1091,18 @@ function CameraScreen() {
         </View>
         {diagnosticOverlay}
       </>
+    );
+  }
+
+  if (batchReviewPhotos) {
+    return (
+      <BatchReviewScreen
+        photos={batchReviewPhotos}
+        isSaving={isSavingBatch}
+        onBack={returnToBatchCamera}
+        onDiscard={discardBatch}
+        onSave={saveBatch}
+      />
     );
   }
 
@@ -1115,51 +1494,119 @@ function CameraScreen() {
         pointerEvents="box-none"
         style={[styles.controls, { paddingBottom: insets.bottom + Spacing.three }]}> 
         <View style={styles.captureControlsRow}>
-          <Pressable
-            accessibilityLabel="Import images. Shows the most recent image."
-            accessibilityRole="button"
-            disabled={isCapturing}
-            onPress={openImportImage}
-            style={({ pressed }) => [
-              styles.importButton,
-              pressed && styles.pressed,
-              isCapturing && styles.disabled,
-            ]}>
-            <View style={styles.importImageFrame}>
-              {recentGalleryImage?.uri ? (
-                <Image
-                  contentFit="cover"
-                  source={recentGalleryImage.uri}
-                  style={styles.importImagePreview}
-                  transition={180}
-                />
+          {captureMode === 'batch' ? (
+            <View
+              accessible={false}
+              pointerEvents="none"
+              style={styles.importButtonSpacer}
+            >
+              {batchPhotos.length > 0 ? (
+                <ThemedText type="title" style={styles.batchCaptureCountText}>
+                  {batchPhotos.length}
+                </ThemedText>
               ) : null}
             </View>
-          </Pressable>
+          ) : (
+            <Pressable
+              accessibilityLabel="Import images. Shows the most recent image."
+              accessibilityRole="button"
+              disabled={isCapturing}
+              onPress={openImportImage}
+              style={({ pressed }) => [
+                styles.importButton,
+                pressed && styles.pressed,
+                isCapturing && styles.disabled,
+              ]}>
+              <View style={styles.importImageFrame}>
+                {recentGalleryImage?.uri ? (
+                  <Image
+                    contentFit="cover"
+                    source={recentGalleryImage.uri}
+                    style={styles.importImagePreview}
+                    transition={180}
+                  />
+                ) : null}
+              </View>
+            </Pressable>
+          )}
 
-          <Pressable
-            accessibilityLabel="Capture photo"
-            accessibilityRole="button"
-            disabled={!isCameraReady || isCapturing}
-            onPress={capturePhoto}
-            style={({ pressed }) => [
-              styles.captureButton,
-              { borderColor: '#16C7B7' },
-              pressed && styles.pressed,
-              (!isCameraReady || isCapturing) && styles.disabled,
-            ]}>
-            {isCapturing ? (
-              <ActivityIndicator color={Colors.light.text} />
-            ) : (
-              <View style={[styles.captureButtonInner, { backgroundColor: Colors.light.background }]} />
-            )}
-          </Pressable>
+          <View style={styles.captureControlCenter}>
+            <View
+              accessibilityRole="tablist"
+              style={styles.captureModeSwitch}>
+              {CAPTURE_MODES.map((mode) => {
+                const isActive = captureMode === mode.value;
 
-          <View
-            accessible={false}
-            pointerEvents="none"
-            style={styles.importButtonSpacer}
-          />
+                return (
+                  <Pressable
+                    key={mode.value}
+                    accessibilityLabel={`Select ${mode.label.toLowerCase()} capture mode`}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: isActive }}
+                    disabled={isCapturing}
+                    onPress={() => selectCaptureMode(mode.value)}
+                    style={({ pressed }) => [
+                      styles.captureModeOption,
+                      isActive && styles.captureModeOptionActive,
+                      pressed && styles.pressed,
+                    ]}>
+                    <ThemedText
+                      type="smallBold"
+                      allowFontScaling={false}
+                      style={[
+                        styles.captureModeOptionText,
+                        isActive && styles.captureModeOptionTextActive,
+                      ]}>
+                      {mode.label}
+                    </ThemedText>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Pressable
+              accessibilityLabel="Capture photo"
+              accessibilityRole="button"
+              disabled={!isCameraReady || isCapturing}
+              onPress={capturePhoto}
+              style={({ pressed }) => [
+                styles.captureButton,
+                { borderColor: '#16C7B7' },
+                pressed && styles.pressed,
+                (!isCameraReady || isCapturing) && styles.disabled,
+              ]}>
+              {isCapturing ? (
+                <ActivityIndicator color={Colors.light.text} />
+              ) : (
+                <View style={[styles.captureButtonInner, { backgroundColor: Colors.light.background }]} />
+              )}
+            </Pressable>
+          </View>
+
+          {captureMode === 'batch' ? (
+            <Pressable
+              accessibilityLabel="Finish batch capture"
+              accessibilityRole="button"
+              disabled={!batchPhotos.length || isCapturing}
+              onPress={finishBatchCapture}
+              style={({ pressed }) => [
+                styles.batchDoneButton,
+                pressed && styles.pressed,
+                (!batchPhotos.length || isCapturing) && styles.disabled,
+              ]}>
+              <SymbolView
+                name={{ ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' }}
+                size={32}
+                tintColor={Colors.light.background}
+              />
+            </Pressable>
+          ) : (
+            <View
+              accessible={false}
+              pointerEvents="none"
+              style={styles.importButtonSpacer}
+            />
+          )}
         </View>
       </View>
 
@@ -1684,6 +2131,189 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: REVIEW_BACKGROUND,
   },
+  batchReviewContainer: {
+    flex: 1,
+    backgroundColor: REVIEW_BACKGROUND,
+  },
+  batchReviewSafeArea: {
+    flex: 1,
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.three,
+  },
+  batchReviewHeader: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginBottom: Spacing.three,
+  },
+  batchReviewBackButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    backgroundColor: REVIEW_SURFACE,
+    borderWidth: 1,
+    borderColor: REVIEW_BORDER,
+  },
+  batchReviewHeading: {
+    flex: 1,
+  },
+  batchReviewTitle: {
+    color: REVIEW_TEXT,
+    fontSize: 24,
+    lineHeight: 30,
+    fontWeight: '700',
+  },
+  batchReviewHeaderSpacer: {
+    width: 44,
+  },
+  batchReviewImageFrame: {
+    width: '100%',
+    flex: 1,
+    minHeight: 1,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderRadius: 20,
+    backgroundColor: '#111111',
+  },
+  batchReviewArrow: {
+    position: 'absolute',
+    top: '50%',
+    zIndex: 2,
+    width: 44,
+    height: 64,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.48)',
+  },
+  batchReviewPreviousArrow: {
+    left: Spacing.two,
+  },
+  batchReviewNextArrow: {
+    right: Spacing.two,
+  },
+  batchReviewProcessingOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    backgroundColor: 'rgba(0, 0, 0, 0.38)',
+  },
+  batchReviewProcessingText: {
+    color: REVIEW_BACKGROUND,
+  },
+  batchReviewPagination: {
+    minHeight: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    marginTop: Spacing.two,
+  },
+  batchReviewDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#B9C2CF',
+  },
+  batchReviewDotActive: {
+    width: 14,
+    height: 14,
+    borderRadius: 4,
+    backgroundColor: REVIEW_NEXT_ACCENT,
+  },
+  batchReviewToggleRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    marginTop: Spacing.two,
+  },
+  batchReviewToggle: {
+    flex: 1,
+    minHeight: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.one,
+    borderRadius: 14,
+    backgroundColor: REVIEW_SURFACE,
+    borderWidth: 1,
+    borderColor: REVIEW_BORDER,
+  },
+  batchReviewToggleActive: {
+    backgroundColor: REVIEW_NEXT_ACCENT,
+    borderColor: REVIEW_NEXT_ACCENT,
+  },
+  batchReviewToggleText: {
+    color: REVIEW_TEXT,
+    fontSize: 11,
+  },
+  batchReviewToggleTextActive: {
+    color: REVIEW_BACKGROUND,
+  },
+  batchReviewActions: {
+    width: '100%',
+    flexDirection: 'row',
+    marginTop: Spacing.two,
+    marginBottom: Spacing.three,
+  },
+  batchReviewAction: {
+    flex: 1,
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+  },
+  batchReviewDiscardAction: {
+    backgroundColor: '#FFF5F6',
+    borderTopLeftRadius: 16,
+    borderBottomLeftRadius: 16,
+    borderWidth: 1,
+    borderColor: '#F0C9CF',
+  },
+  batchReviewSaveAction: {
+    backgroundColor: PREVIEW_SAVE_ACCENT,
+    borderTopRightRadius: 16,
+    borderBottomRightRadius: 16,
+  },
+  batchReviewDiscardText: {
+    color: REVIEW_DISCARD_ACCENT,
+  },
+  batchReviewSaveText: {
+    color: REVIEW_BACKGROUND,
+  },
+  batchReviewGrid: {
+    paddingBottom: Spacing.four,
+  },
+  batchReviewRow: {
+    gap: Spacing.two,
+    marginBottom: Spacing.two,
+  },
+  batchReviewTile: {
+    flex: 1,
+    aspectRatio: 1,
+    overflow: 'hidden',
+    borderRadius: Spacing.two,
+    backgroundColor: REVIEW_SURFACE,
+    borderWidth: 1,
+    borderColor: REVIEW_BORDER,
+  },
+  batchReviewImage: {
+    width: '100%',
+    height: '100%',
+  },
   savedImageContainer: {
     flex: 1,
     backgroundColor: PREVIEW_BACKGROUND,
@@ -2039,6 +2669,48 @@ const styles = StyleSheet.create({
     width: '100%',
     paddingHorizontal: Spacing.three,
   },
+  captureControlCenter: {
+    position: 'relative',
+    width: 112,
+    height: 93,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  batchDoneButton: {
+    width: 112,
+    height: 93,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  captureModeSwitch: {
+    position: 'absolute',
+    top: -36,
+    zIndex: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 2,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.58)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.24)',
+  },
+  captureModeOption: {
+    minWidth: 58,
+    minHeight: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.two,
+    borderRadius: 14,
+  },
+  captureModeOptionActive: {
+    backgroundColor: TEAL_ACCENT,
+  },
+  captureModeOptionText: {
+    color: '#dedede',
+  },
+  captureModeOptionTextActive: {
+    color: '#062b29',
+  },
   importButton: {
     width: 112,
     height: 93,
@@ -2050,7 +2722,7 @@ const styles = StyleSheet.create({
     height: 72,
     borderRadius: 18,
     overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: 'transparent',
     borderWidth: 2,
     borderColor: '#16C7B7',
     shadowColor: '#16C7B7',
@@ -2066,6 +2738,13 @@ const styles = StyleSheet.create({
   importButtonSpacer: {
     width: 112,
     height: 93,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  batchCaptureCountText: {
+    color: '#dedede',
+    fontSize: 28,
+    lineHeight: 34,
   },
   importContainer: {
     flex: 1,
