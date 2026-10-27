@@ -315,7 +315,7 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
               currentIndex === 0 && styles.disabled,
             ]}>
             <SymbolView
-              name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+              name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
               size={24}
               tintColor={REVIEW_BACKGROUND}
             />
@@ -352,7 +352,7 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
               currentIndex >= photos.length - 1 && styles.disabled,
             ]}>
             <SymbolView
-              name={{ ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' }}
+              name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
               size={24}
               tintColor={REVIEW_BACKGROUND}
             />
@@ -2186,11 +2186,11 @@ const styles = StyleSheet.create({
     top: '50%',
     zIndex: 2,
     width: 44,
-    height: 64,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: -32,
-    borderRadius: 16,
+    marginTop: -22,
+    borderRadius: 22,
     backgroundColor: 'rgba(0, 0, 0, 0.48)',
   },
   batchReviewPreviousArrow: {
