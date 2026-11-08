@@ -3,6 +3,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 // Keep the processed document close to the camera's native resolution while
 // using JPEG snapshots to avoid the large files and decode cost of PNG.
 const MAX_OUTPUT_EDGE = 4096;
+const BLACK_AND_WHITE_ANALYSIS_EDGE = 256;
+const BLACK_AND_WHITE_PAPER_GRID = 32;
 const SNAPSHOT_OPTIONS = {
   format: 'jpeg',
   compress: 0.92,
@@ -126,29 +128,34 @@ export async function renderAdaptiveThresholdAsync({
     throw new Error('A source image is required for black-and-white enhancement.');
   }
 
-  const width = sourceWidth || 1;
-  const height = sourceHeight || 1;
+  const width = sourceWidth;
+  const height = sourceHeight;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error('Valid image dimensions are required for black-and-white enhancement.');
+  }
   const outputSize = getScaledOutputSize(width, height);
+  const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
+  const analysisWidth = Math.max(1, Math.round(width * analysisScale));
+  const analysisHeight = Math.max(1, Math.round(height * analysisScale));
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
+  let paperTexture;
   let outputTexture;
   let framebuffer;
+  let analysisProgram;
   let program;
   let positionBuffer;
 
   try {
-    program = createProgram(gl, VERTEX_SHADER, ADAPTIVE_THRESHOLD_FRAGMENT_SHADER);
     sourceTexture = createSourceTexture(gl, uri);
-    outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
+    outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
     framebuffer = createFramebuffer(gl, outputTexture);
+    analysisProgram = createProgram(gl, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.viewport(0, 0, outputSize.width, outputSize.height);
-    gl.useProgram(program);
-    gl.clearColor(1, 1, 1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
+    gl.viewport(0, 0, analysisWidth, analysisHeight);
+    gl.useProgram(analysisProgram);
     positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
     gl.bufferData(
@@ -157,28 +164,56 @@ export async function renderAdaptiveThresholdAsync({
       gl.STATIC_DRAW
     );
 
-    const positionLocation = gl.getAttribLocation(program, 'aPosition');
+    const positionLocation = gl.getAttribLocation(analysisProgram, 'aPosition');
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.uniform1i(gl.getUniformLocation(analysisProgram, 'uTexture'), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Read only a small analysis image. Paper estimation and interpolation
+    // happen once per image, rather than independently inside every ink pixel.
+    const analysisPixels = new Uint8Array(analysisWidth * analysisHeight * 4);
+    gl.readPixels(0, 0, analysisWidth, analysisHeight, gl.RGBA, gl.UNSIGNED_BYTE, analysisPixels);
+    checkGlError(gl, 'analysing the document background');
+    const paper = estimateBlackAndWhitePaper(analysisPixels, analysisWidth, analysisHeight);
+
+    paperTexture = createOutputTexture(gl, paper.width, paper.height);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, paper.width, paper.height, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, paper.pixels
+    );
+    gl.bindTexture(gl.TEXTURE_2D, outputTexture);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, outputSize.width, outputSize.height, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, null
+    );
+    checkGlError(gl, 'preparing the document paper map');
+
+    program = createProgram(gl, VERTEX_SHADER, ADAPTIVE_THRESHOLD_FRAGMENT_SHADER);
+    gl.useProgram(program);
+    gl.viewport(0, 0, outputSize.width, outputSize.height);
+    const inkPositionLocation = gl.getAttribLocation(program, 'aPosition');
+    gl.enableVertexAttribArray(inkPositionLocation);
+    gl.vertexAttribPointer(inkPositionLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
     gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
-
-    const texelSizeLocation = gl.getUniformLocation(program, 'uTexelSize');
-    const sampleStepLocation = gl.getUniformLocation(program, 'uSampleStep');
-    const biasLocation = gl.getUniformLocation(program, 'uThresholdBias');
-
-    if (texelSizeLocation === null || sampleStepLocation === null || biasLocation === null) {
-      throw new Error('The adaptive-threshold shader uniforms are unavailable.');
-    }
-
-    gl.uniform2f(texelSizeLocation, 1 / width, 1 / height);
-    // Use a wider local background estimate and require a clearer contrast
-    // before classifying a pixel as ink. This suppresses tiny paper speckles
-    // without changing the adaptive-threshold flow.
-    gl.uniform1f(sampleStepLocation, 12);
-    gl.uniform1f(biasLocation, 0.12);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, paperTexture);
+    gl.uniform1i(gl.getUniformLocation(program, 'uPaperTexture'), 1);
+    gl.uniform2f(gl.getUniformLocation(program, 'uPaperTexelSize'), 1 / paper.width, 1 / paper.height);
+    gl.uniform2f(
+      gl.getUniformLocation(program, 'uTexelSize'),
+      1 / outputSize.width,
+      1 / outputSize.height
+    );
+    gl.uniform1f(
+      gl.getUniformLocation(program, 'uBackgroundIsDark'),
+      paper.backgroundIsDark ? 1 : 0
+    );
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.finish?.();
@@ -207,13 +242,402 @@ export async function renderAdaptiveThresholdAsync({
       if (positionBuffer) gl.deleteBuffer(positionBuffer);
       if (framebuffer) gl.deleteFramebuffer(framebuffer);
       if (outputTexture) gl.deleteTexture(outputTexture);
+      if (paperTexture) gl.deleteTexture(paperTexture);
       if (sourceTexture) gl.deleteTexture(sourceTexture);
       if (program) gl.deleteProgram(program);
+      if (analysisProgram) gl.deleteProgram(analysisProgram);
       await GLView.destroyContextAsync(gl);
     } catch (cleanupError) {
       console.warn('[perspective-crop] Adaptive threshold cleanup failed', cleanupError);
     }
   }
+}
+
+function estimateBlackAndWhitePaper(pixels, width, height) {
+  const luminances = new Float32Array(width * height);
+  const neutralities = new Float32Array(width * height);
+  const allValues = [];
+  const borderValues = [];
+  const border = Math.max(1, Math.round(Math.min(width, height) * 0.04));
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      // readPixels is bottom-up; localUri textures and the paper map use
+      // top-to-bottom image coordinates throughout the crop/enhancement flow.
+      const offset = ((height - 1 - y) * width + x) * 4;
+      const red = pixels[offset] / 255;
+      const green = pixels[offset + 1] / 255;
+      const blue = pixels[offset + 2] / 255;
+      const value = red * 0.299 + green * 0.587 + blue * 0.114;
+      const maximum = Math.max(red, green, blue);
+      const saturation = (maximum - Math.min(red, green, blue)) / Math.max(maximum, 0.001);
+      luminances[y * width + x] = value;
+      neutralities[y * width + x] = Math.max(0, 1 - saturation / 0.30);
+      allValues.push(value);
+      if (x < border || y < border || x >= width - border || y >= height - border) {
+        borderValues.push(value);
+      }
+    }
+  }
+
+  allValues.sort((a, b) => a - b);
+  borderValues.sort((a, b) => a - b);
+  // Use both the page border and its bulk. A large black foreground shape on
+  // light paper must not flip polarity merely because it occupies most pixels.
+  const backgroundIsDark = paperQuantile(borderValues, 0.60) < 0.35 &&
+    paperQuantile(allValues, 0.60) < 0.40;
+  if (backgroundIsDark) {
+    for (let index = 0; index < luminances.length; index += 1) {
+      luminances[index] = 1 - luminances[index];
+    }
+    for (const values of [allValues, borderValues]) {
+      for (let index = 0; index < values.length; index += 1) values[index] = 1 - values[index];
+      values.reverse();
+    }
+  }
+  const globalPaper = Math.max(0.08, paperQuantile(allValues, 0.85), paperQuantile(borderValues, 0.60));
+  // Every cell needs a neighborhood, even for very wide/tall gallery images.
+  // A one-analysis-pixel cell could otherwise mistake a sampled faint stroke
+  // for an entire strip of paper.
+  const gridWidth = Math.min(BLACK_AND_WHITE_PAPER_GRID, Math.ceil(width / 8));
+  const gridHeight = Math.min(BLACK_AND_WHITE_PAPER_GRID, Math.ceil(height / 8));
+  const count = gridWidth * gridHeight;
+  const paper = new Float32Array(count);
+  const noise = new Float32Array(count);
+  const neutrality = new Float32Array(count);
+  const known = new Uint8Array(count);
+  const shadowPaper = new Uint8Array(count);
+  const paperCoverage = new Float32Array(count);
+
+  for (let gy = 0; gy < gridHeight; gy += 1) {
+    for (let gx = 0; gx < gridWidth; gx += 1) {
+      let samples = [];
+      const startX = Math.floor(gx * width / gridWidth);
+      const endX = Math.floor((gx + 1) * width / gridWidth);
+      const startY = Math.floor(gy * height / gridHeight);
+      const endY = Math.floor((gy + 1) * height / gridHeight);
+      for (let y = startY; y < endY; y += 1) {
+        for (let x = startX; x < endX; x += 1) samples.push(luminances[y * width + x]);
+      }
+      samples.sort((a, b) => a - b);
+      const plane = fitBlackAndWhitePaperPlane(luminances, width, startX, endX, startY, endY);
+      if (plane) samples = plane.values;
+      // An upper quantile rejects strokes without letting one specular pixel
+      // set the background. The median of the paper cluster removes the
+      // quantile's upward bias on textured paper and smooth lighting gradients.
+      const upper = paperQuantile(samples, 0.80);
+      const paperSamples = samples.filter((value) => Math.abs(value - upper) <= 0.04);
+      const level = paperQuantile(paperSamples, 0.50);
+      const index = gy * gridWidth + gx;
+      const deviations = paperSamples.map((value) => Math.abs(value - level)).sort((a, b) => a - b);
+      paper[index] = Math.max(0, Math.min(1, level));
+      noise[index] = Math.min(0.08, Math.max(0.002, paperQuantile(deviations, 0.50) * 1.4826));
+      let neutralSum = 0;
+      let paperCount = 0;
+      for (let y = startY; y < endY; y += 1) {
+        for (let x = startX; x < endX; x += 1) {
+          const sampleIndex = y * width + x;
+          const corrected = luminances[sampleIndex] -
+            (plane?.slopeX ?? 0) * (x - (startX + endX - 1) * 0.5) -
+            (plane?.slopeY ?? 0) * (y - (startY + endY - 1) * 0.5);
+          if (Math.abs(corrected - level) <= 0.04) {
+            neutralSum += neutralities[sampleIndex];
+            paperCount += 1;
+          }
+        }
+      }
+      neutrality[index] = paperCount ? neutralSum / paperCount : 0;
+      paperCoverage[index] = paperCount / samples.length;
+      known[index] = plane || level >= Math.max(0.08, globalPaper * 0.88) ? 1 : 0;
+      // A stable midtone with a minority of darker strokes is paper carrying
+      // text, even when a cast shadow separates it from the lit page. A uniform
+      // filled mark has no darker-stroke evidence and cannot seed this path.
+      const inkGap = Math.max(0.006, noise[index] * 3.5, level * 0.02);
+      const inkCount = samples.filter((value) => value < level - inkGap).length;
+      shadowPaper[index] = level >= Math.max(0.12, globalPaper * 0.18) &&
+        neutrality[index] >= 0.60 && paperCoverage[index] >= 0.55 &&
+        inkCount >= 1 && inkCount / samples.length <= 0.30 ? 1 : 0;
+    }
+  }
+
+  // Confirm that shadow candidates belong to a broad, consistent surface.
+  // Neutral plateaus continuing to the page edge also provide a reference for
+  // blank shadowed margins. Near-black fills remain excluded from both paths.
+  const shadowSeeds = [];
+  for (let y = 0; y < gridHeight; y += 1) {
+    for (let x = 0; x < gridWidth; x += 1) {
+      const index = y * gridWidth + x;
+      if (known[index]) continue;
+      const atEdge = x === 0 || y === 0 || x === gridWidth - 1 || y === gridHeight - 1;
+      const edgePaper = atEdge && paperCoverage[index] >= 0.80 &&
+        neutrality[index] >= 0.65 && paper[index] >= Math.max(0.18, globalPaper * 0.25);
+      if (!shadowPaper[index] && !edgePaper) continue;
+      let surfaceSupport = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if ((dx === 0 && dy === 0) || nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
+          const neighbor = ny * gridWidth + nx;
+          const tolerance = 0.04 + Math.min(0.025, noise[index] + noise[neighbor]);
+          if (neutrality[neighbor] >= 0.60 && Math.abs(paper[index] - paper[neighbor]) <= tolerance) {
+            surfaceSupport += 1;
+          }
+        }
+      }
+      if (surfaceSupport >= 3) shadowSeeds.push(index);
+    }
+  }
+  for (const index of shadowSeeds) known[index] = 1;
+
+  // Admit darker paper only along a gradual lighting transition from trusted
+  // paper. A dark/gray solid separated by an ink edge cannot seed its own
+  // background, while a smooth shadow can extend well below the global level.
+  for (let pass = 0; pass < Math.max(gridWidth, gridHeight); pass += 1) {
+    const admitted = [];
+    for (let y = 0; y < gridHeight; y += 1) {
+      for (let x = 0; x < gridWidth; x += 1) {
+        const index = y * gridWidth + x;
+        if (known[index] || paper[index] < 0.08) continue;
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
+          const neighbor = ny * gridWidth + nx;
+          const tolerance = 0.035 + Math.min(0.025, noise[index] + noise[neighbor]);
+          if (known[neighbor] && Math.abs(paper[index] - paper[neighbor]) <= tolerance) {
+            admitted.push(index);
+            break;
+          }
+        }
+      }
+    }
+    if (!admitted.length) break;
+    for (const index of admitted) known[index] = 1;
+  }
+
+  // Inpaint only cells without plausible paper. Filled ink regions inherit
+  // their surrounding paper instead of treating their own black interior as
+  // the background. Seed cells retain local shadow/illumination information.
+  for (let pass = 0; pass < Math.max(gridWidth, gridHeight); pass += 1) {
+    const filled = [];
+    for (let y = 0; y < gridHeight; y += 1) {
+      for (let x = 0; x < gridWidth; x += 1) {
+        const index = y * gridWidth + x;
+        if (known[index]) continue;
+        let weightSum = 0;
+        let paperSum = 0;
+        let noiseSum = 0;
+        let neutralSum = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if ((dx === 0 && dy === 0) || nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
+            const neighbor = ny * gridWidth + nx;
+            if (!known[neighbor]) continue;
+            const weight = dx === 0 || dy === 0 ? 1 : 0.7071;
+            paperSum += paper[neighbor] * weight;
+            noiseSum += noise[neighbor] * weight;
+            neutralSum += neutrality[neighbor] * weight;
+            weightSum += weight;
+          }
+        }
+        if (weightSum) filled.push([index, paperSum / weightSum, noiseSum / weightSum, neutralSum / weightSum]);
+      }
+    }
+    if (!filled.length) break;
+    for (const [index, level, deviation, neutral] of filled) {
+      paper[index] = level;
+      noise[index] = deviation;
+      neutrality[index] = neutral;
+      known[index] = 1;
+    }
+  }
+
+  // Resolve fallbacks before expanding the map so an unknown region cannot
+  // bleed a zero paper/noise reference into its neighbors.
+  for (let index = 0; index < count; index += 1) {
+    if (!known[index]) {
+      paper[index] = globalPaper;
+      noise[index] = 0.002;
+      neutrality[index] = 0;
+    }
+  }
+  const mapPixels = expandBlackAndWhitePaper(
+    paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height
+  );
+  return { width, height, pixels: mapPixels, backgroundIsDark };
+}
+
+function fitBlackAndWhitePaperPlane(luminances, width, startX, endX, startY, endY) {
+  const rows = Array.from({ length: endY - startY }, () => []);
+  const columns = Array.from({ length: endX - startX }, () => []);
+  for (let y = startY; y < endY; y += 1) {
+    for (let x = startX; x < endX; x += 1) {
+      const value = luminances[y * width + x];
+      rows[y - startY].push(value);
+      columns[x - startX].push(value);
+    }
+  }
+  const paperLevels = (groups) => groups.map((values) =>
+    paperQuantile(values.sort((a, b) => a - b), 0.80)
+  );
+  const robustSlope = (levels) => {
+    const slopes = [];
+    for (let first = 0; first < levels.length; first += 1) {
+      for (let second = first + 1; second < levels.length; second += 1) {
+        slopes.push((levels[second] - levels[first]) / (second - first));
+      }
+    }
+    return paperQuantile(slopes.sort((a, b) => a - b), 0.50);
+  };
+  const slopeX = robustSlope(paperLevels(columns));
+  const slopeY = robustSlope(paperLevels(rows));
+  const range = Math.abs(slopeX) * (endX - startX - 1) + Math.abs(slopeY) * (endY - startY - 1);
+  if (range < 0.025 || range > 0.60) return null;
+
+  // Estimate noise after removing the lighting slope. A steep penumbra must
+  // not look like noisy paper or lose its darker half during quantile sampling.
+  // Median pairwise slopes tolerate rows/columns containing text.
+  const values = [];
+  const centerX = (startX + endX - 1) * 0.5;
+  const centerY = (startY + endY - 1) * 0.5;
+  for (let y = startY; y < endY; y += 1) {
+    for (let x = startX; x < endX; x += 1) {
+      values.push(luminances[y * width + x] - slopeX * (x - centerX) - slopeY * (y - centerY));
+    }
+  }
+  values.sort((a, b) => a - b);
+  const upper = paperQuantile(values, 0.80);
+  const paperValues = values.filter((value) => Math.abs(value - upper) <= 0.025);
+  const level = paperQuantile(paperValues, 0.50);
+  if (paperValues.length / values.length < 0.65 || level < 0.12 || level > 1.02) return null;
+  return { values, slopeX, slopeY };
+}
+
+function expandBlackAndWhitePaper(paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height) {
+  const pixels = new Uint8Array(width * height * 4);
+  const clampX = (x) => Math.max(0, Math.min(gridWidth - 1, x));
+  const clampY = (y) => Math.max(0, Math.min(gridHeight - 1, y));
+  const sourceAt = (x, y) => luminances[
+    Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))
+  ];
+  const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
+  for (let y = 0; y < height; y += 1) {
+    const gy = (y + 0.5) * gridHeight / height - 0.5;
+    const iy = Math.floor(gy);
+    const fy = gy - iy;
+    for (let x = 0; x < width; x += 1) {
+      const gx = (x + 0.5) * gridWidth / width - 0.5;
+      const ix = Math.floor(gx);
+      const fx = gx - ix;
+      let level = 0;
+      let deviation = 0;
+      let neutral = 0;
+      for (let dy = 0; dy <= 1; dy += 1) {
+        for (let dx = 0; dx <= 1; dx += 1) {
+          const index = clampY(iy + dy) * gridWidth + clampX(ix + dx);
+          const weight = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
+          level += paper[index] * weight;
+          deviation += noise[index] * weight;
+          neutral += neutrality[index] * weight;
+        }
+      }
+      const centerX = Math.round(gx);
+      const centerY = Math.round(gy);
+      let lowest = 1;
+      let highest = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const index = clampY(centerY + dy) * gridWidth + clampX(centerX + dx);
+          lowest = Math.min(lowest, paper[index]);
+          highest = Math.max(highest, paper[index]);
+        }
+      }
+      if (highest - lowest > 0.025) {
+        // At a cast-shadow edge, ordinary interpolation mixes lit paper into
+        // dark paper, creating a false gray band. Guide the interpolation by
+        // the observed brightness; keep ordinary interpolation for gradients.
+        let weightSum = 0;
+        let paperSum = 0;
+        let noiseSum = 0;
+        let neutralSum = 0;
+        const intensity = luminances[y * width + x];
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const nx = centerX + dx;
+            const ny = centerY + dy;
+            if (nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
+            const index = ny * gridWidth + nx;
+            const distance = (nx - gx) ** 2 + (ny - gy) ** 2;
+            const difference = Math.abs(paper[index] - intensity) / Math.max(0.018, noise[index] * 4);
+            const weight = 1 / ((1 + distance * 4) * (1 + difference ** 4));
+            paperSum += paper[index] * weight;
+            noiseSum += noise[index] * weight;
+            neutralSum += neutrality[index] * weight;
+            weightSum += weight;
+          }
+        }
+        if (weightSum) {
+          level = paperSum / weightSum;
+          deviation = noiseSum / weightSum;
+          neutral = neutralSum / weightSum;
+        }
+        // A penumbra can change faster than the coarse grid. Opposite paper
+        // samples recover that local lighting slope while cancelling its
+        // gradient. Reject one-sided bright jumps at a hard shadow boundary;
+        // allow two bright sides to recover the paper across a narrow stroke.
+        if (intensity > lowest * 0.80 && intensity <= highest + 0.02) {
+          let localPaper = level;
+          // Keep a model that already matches the local paper. At a shadow
+          // boundary, prefer the darker valid paper pair over one mixing in
+          // the lit side; an inflated reference would promote show-through.
+          let lightingError = Math.abs(level - intensity);
+          let strokePaper = Infinity;
+          let hasLocalPaper = false;
+          let hasStrokePaper = false;
+          // This tests for paper on both sides of a stroke, not final ink.
+          // Analysis downsampling can halve a thin pencil stroke's contrast;
+          // the final shader still applies the stricter paper-noise threshold.
+          const contrastGap = Math.max(0.003, deviation * 1.5, intensity * 0.008);
+          for (const [dx, dy] of directions) {
+            const first = sourceAt(x - dx, y - dy);
+            const second = sourceAt(x + dx, y + dy);
+            const mean = (first + second) * 0.5;
+            const difference = mean - intensity;
+            const followsLighting = difference >= -0.01 &&
+              difference <= Math.max(0.04, intensity * 0.12);
+            const spansStroke = Math.min(first, second) > intensity + contrastGap;
+            const spansSlopedStroke = Math.min(first, second) < intensity - contrastGap &&
+              difference > contrastGap && difference <= Math.max(0.06, intensity * 0.12);
+            if (spansStroke || spansSlopedStroke) {
+              strokePaper = Math.min(strokePaper, mean);
+              hasStrokePaper = true;
+            }
+            if (followsLighting && Math.abs(difference) < lightingError) {
+              localPaper = mean;
+              lightingError = Math.abs(difference);
+              hasLocalPaper = true;
+            }
+          }
+          if (hasStrokePaper) level = Math.max(lowest, Math.min(highest, strokePaper));
+          else if (hasLocalPaper) level = Math.max(lowest, Math.min(highest, localPaper));
+        }
+      }
+      const offset = (y * width + x) * 4;
+      pixels[offset] = Math.round(level * 255);
+      // Encode small paper-noise values with enough precision in RGBA8.
+      pixels[offset + 1] = Math.round(Math.min(1, deviation * 8) * 255);
+      pixels[offset + 2] = Math.round(neutral * 255);
+      pixels[offset + 3] = 255;
+    }
+  }
+  return pixels;
+}
+
+function paperQuantile(sortedValues, fraction) {
+  return sortedValues[Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * fraction))] ?? 0;
 }
 
 export async function renderMagicColorAsync({
@@ -685,403 +1109,136 @@ const FRAGMENT_SHADER = `
   }
 `;
 
-const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
-  precision mediump float;
-
+const BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER = `
+  precision highp float;
   uniform sampler2D uTexture;
-  uniform vec2 uTexelSize;
-  uniform float uSampleStep;
-  uniform float uThresholdBias;
   varying vec2 vOutputUv;
 
-  float channelMaximum(vec3 color) {
-    return max(color.r, max(color.g, color.b));
+  void main() {
+    gl_FragColor = texture2D(uTexture, vOutputUv);
   }
+`;
 
-  float channelMinimum(vec3 color) {
-    return min(color.r, min(color.g, color.b));
-  }
+const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
+  precision highp float;
+
+  uniform sampler2D uTexture;
+  uniform sampler2D uPaperTexture;
+  uniform vec2 uPaperTexelSize;
+  uniform vec2 uTexelSize;
+  uniform float uBackgroundIsDark;
+  varying vec2 vOutputUv;
 
   float luminance(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
   }
 
-  float hsvSaturation(vec3 color) {
-    float value = channelMaximum(color);
-    return (value <= 0.001) ? 0.0 : (value - channelMinimum(color)) / value;
+  vec3 paperReference(vec2 uv, float intensity) {
+    vec2 position = uv / uPaperTexelSize - 0.5;
+    vec2 base = floor(position);
+    vec2 fraction = fract(position);
+    vec2 halfTexel = uPaperTexelSize * 0.5;
+    vec3 a = texture2D(uPaperTexture, clamp((base + vec2(0.5, 0.5)) * uPaperTexelSize, halfTexel, vec2(1.0) - halfTexel)).rgb;
+    vec3 b = texture2D(uPaperTexture, clamp((base + vec2(1.5, 0.5)) * uPaperTexelSize, halfTexel, vec2(1.0) - halfTexel)).rgb;
+    vec3 c = texture2D(uPaperTexture, clamp((base + vec2(0.5, 1.5)) * uPaperTexelSize, halfTexel, vec2(1.0) - halfTexel)).rgb;
+    vec3 d = texture2D(uPaperTexture, clamp((base + vec2(1.5, 1.5)) * uPaperTexelSize, halfTexel, vec2(1.0) - halfTexel)).rgb;
+    float lowest = min(min(a.r, b.r), min(c.r, d.r));
+    float highest = max(max(a.r, b.r), max(c.r, d.r));
+    // Keep smooth penumbrae linear: choosing the darker neighboring reference
+    // there would reduce the contrast of faint writing. Reserve range-guided
+    // sampling for a genuine discontinuity in the analysis map.
+    if (highest - lowest <= 0.04) return texture2D(uPaperTexture, uv).rgb;
+
+    // Jointly upsample the analysis map at the actual source pixel. Otherwise
+    // bilinear filtering can put a bright reference on the dark side of a
+    // sharp shadow edge and turn that paper into a band of false gray ink.
+    vec4 difference = abs(vec4(a.r, b.r, c.r, d.r) - intensity) /
+      max(vec4(0.018), vec4(a.g, b.g, c.g, d.g) * 0.5);
+    vec4 squared = difference * difference;
+    vec4 spatial = vec4(
+      (1.0 - fraction.x) * (1.0 - fraction.y),
+      fraction.x * (1.0 - fraction.y),
+      (1.0 - fraction.x) * fraction.y,
+      fraction.x * fraction.y
+    );
+    vec4 weights = spatial / (vec4(1.0) + squared * squared);
+    float weightSum = dot(weights, vec4(1.0));
+    return (a * weights.x + b * weights.y + c * weights.z + d * weights.w) /
+      max(weightSum, 0.000000001);
   }
 
-  float paperConfidence(vec3 color) {
-    // Colored surroundings should not be promoted to document ink merely
-    // because they have saturation. Bright, neutral pixels are more likely to
-    // be the paper surrounding a colored pen stroke.
-    float brightPaper = smoothstep(0.48, 0.86, luminance(color));
-    float neutralPaper = 1.0 - smoothstep(0.06, 0.24, hsvSaturation(color));
-    return brightPaper * neutralPaper;
+  float inkEvidence(vec2 uv, float paper, float neutralPaper) {
+    vec3 color = texture2D(uTexture, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+    float intensity = mix(luminance(color), 1.0 - luminance(color), uBackgroundIsDark);
+    // The reference is interpolated paper, never the mean of surrounding ink.
+    // A uniform black interior consequently retains the same evidence as its edge.
+    float relativeDarkness = max(0.0, (paper - intensity) / max(paper, 0.08));
+    float value = max(color.r, max(color.g, color.b));
+    float chroma = value - min(color.r, min(color.g, color.b));
+    float saturation = chroma / max(value, 0.001);
+    // Keep bright colored pen strokes, but avoid promoting tinted backgrounds.
+    float coloredInk = smoothstep(0.06, 0.30, chroma) *
+      smoothstep(0.12, 0.55, saturation) * smoothstep(0.18, 0.92, value) *
+      neutralPaper * (1.0 - uBackgroundIsDark) * 0.45;
+    return clamp(max(relativeDarkness, coloredInk), 0.0, 1.0);
   }
 
-  float estimateLocalPaperConfidence(vec2 centerUv) {
-    vec2 sampleStep = uTexelSize * 48.0;
-    float confidenceSum = 0.0;
-
-    for (int x = -1; x <= 1; x += 1) {
-      for (int y = -1; y <= 1; y += 1) {
-        confidenceSum += paperConfidence(texture2D(
-            uTexture,
-            clamp(centerUv + vec2(float(x), float(y)) * sampleStep, vec2(0.0), vec2(1.0))
-          ).rgb);
-      }
+  float neighboringInkEvidence(vec2 uv, vec3 centerBackground) {
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    vec3 background = texture2D(uPaperTexture, uv).rgb;
+    // The dark side of a shadow is not a foreground neighbor. Resolve its
+    // own paper reference at discontinuities before using it to support an
+    // edge; otherwise nearby show-through could be rescued as front-side ink.
+    if (abs(background.r - centerBackground.r) > max(0.01, centerBackground.r * 0.04)) {
+      float observed = luminance(texture2D(uTexture, uv).rgb);
+      observed = mix(observed, 1.0 - observed, uBackgroundIsDark);
+      background = paperReference(uv, observed);
     }
-
-    // A single white pixel beside a colorful object must not enable the color
-    // rescue for the whole neighborhood. Require broad local evidence of
-    // paper before chroma can influence the document mask.
-    return smoothstep(0.36, 0.78, confidenceSum / 9.0);
-  }
-
-  float chromaticInkStrength(vec3 color, float localPaperConfidence) {
-    // Saturated colored ink can be bright in luminance space. Use HSV-style
-    // chroma and saturation as a secondary ink signal so red, blue, green,
-    // yellow, and other colored strokes are not judged by their darkest RGB
-    // channel alone.
-    float value = channelMaximum(color);
-    float chroma = value - channelMinimum(color);
-    float saturation = hsvSaturation(color);
-    float chromaSignal = smoothstep(0.06, 0.32, chroma);
-    float saturationSignal = smoothstep(0.12, 0.55, saturation);
-    float visibleColorSignal = smoothstep(0.18, 0.92, value);
-
-    return chromaSignal * saturationSignal * visibleColorSignal * localPaperConfidence;
-  }
-
-  float inkIntensity(vec3 color, float localPaperConfidence) {
-    // Luminance handles black, gray, and naturally dark ink. The chroma
-    // signal lowers the effective intensity of bright colored ink without
-    // treating lightly tinted paper as strongly as a raw min(R, G, B) test.
-    float luminanceIntensity = luminance(color);
-    float chromaticStrength = chromaticInkStrength(color, localPaperConfidence);
-    float chromaticIntensity = 1.0 - chromaticStrength * 0.86;
-
-    return min(luminanceIntensity, chromaticIntensity);
-  }
-
-  float paperBrightness(vec3 color) {
-    return luminance(color);
-  }
-
-  float samplePaperBrightness(vec2 uv) {
-    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
-    return paperBrightness(texture2D(uTexture, clampedUv).rgb);
-  }
-
-  float estimateIlluminationAtScale(vec2 centerUv, float pixelStep) {
-    // Use the brightest point in a small cross. Dark text and narrow shadows
-    // should not lower the paper estimate, while the cross keeps the sample
-    // count lower than a full neighborhood kernel.
-    vec2 illuminationStep = uTexelSize * pixelStep;
-    float illumination = samplePaperBrightness(centerUv);
-
-    illumination = max(
-      illumination,
-      samplePaperBrightness(centerUv + vec2(-illuminationStep.x, 0.0))
-    );
-    illumination = max(
-      illumination,
-      samplePaperBrightness(centerUv + vec2(illuminationStep.x, 0.0))
-    );
-    illumination = max(
-      illumination,
-      samplePaperBrightness(centerUv + vec2(0.0, -illuminationStep.y))
-    );
-    illumination = max(
-      illumination,
-      samplePaperBrightness(centerUv + vec2(0.0, illuminationStep.y))
-    );
-
-    return illumination;
-  }
-
-  float estimateLocalIllumination(vec2 centerUv) {
-    // Combine local, page-region, and broad estimates. The fine scale reacts
-    // to nearby shadow edges, the medium scale handles ordinary uneven light,
-    // and the broad scale recovers the paper level when an entire local area
-    // is covered by a shadow. Blending avoids the discontinuities caused by a
-    // single fixed-size background window.
-    float fineIllumination = estimateIlluminationAtScale(centerUv, 12.0);
-    float mediumIllumination = estimateIlluminationAtScale(centerUv, 48.0);
-    float broadIllumination = estimateIlluminationAtScale(centerUv, 144.0);
-    float illumination =
-      fineIllumination * 0.25 +
-      mediumIllumination * 0.35 +
-      broadIllumination * 0.40;
-
-    return max(illumination, 0.5);
-  }
-
-  vec3 correctForIllumination(vec3 color, float illumination, float enabled) {
-    float scale = min(1.45, 1.0 / max(illumination, 0.5));
-    scale = mix(1.0, scale, enabled);
-    return min(color * scale, vec3(1.0));
-  }
-
-  float sampleInkIntensity(
-    vec2 uv,
-    float illumination,
-    float enabled,
-    float localPaperConfidence
-  ) {
-    vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
-    vec3 color = texture2D(uTexture, clampedUv).rgb;
-    return inkIntensity(
-      correctForIllumination(color, illumination, enabled),
-      localPaperConfidence
-    );
-  }
-
-  float blurredIntensity(
-    vec2 centerUv,
-    float illumination,
-    float enabled,
-    float localPaperConfidence
-  ) {
-    vec2 blurStep = uTexelSize;
-    float center = sampleInkIntensity(
-      centerUv,
-      illumination,
-      enabled,
-      localPaperConfidence
-    );
-    float sum = center * 4.0;
-    sum += sampleInkIntensity(
-      centerUv + vec2(-blurStep.x, 0.0),
-      illumination,
-      enabled,
-      localPaperConfidence
-    );
-    sum += sampleInkIntensity(
-      centerUv + vec2(blurStep.x, 0.0),
-      illumination,
-      enabled,
-      localPaperConfidence
-    );
-    sum += sampleInkIntensity(
-      centerUv + vec2(0.0, -blurStep.y),
-      illumination,
-      enabled,
-      localPaperConfidence
-    );
-    sum += sampleInkIntensity(
-      centerUv + vec2(0.0, blurStep.y),
-      illumination,
-      enabled,
-      localPaperConfidence
-    );
-    return sum / 8.0;
-  }
-
-  float estimateGlobalBackgroundBrightness() {
-    float brightnessSum = 0.0;
-    float confidenceSum = 0.0;
-    float fallbackSum = 0.0;
-
-    for (int x = 0; x < 3; x += 1) {
-      for (int y = 0; y < 3; y += 1) {
-        vec2 sampleUv = vec2(
-          (float(x) + 0.5) / 3.0,
-          (float(y) + 0.5) / 3.0
-        );
-        vec3 sampleColor = texture2D(uTexture, sampleUv).rgb;
-        float brightness = paperBrightness(sampleColor);
-        float confidence = paperConfidence(sampleColor);
-        brightnessSum += brightness * confidence;
-        confidenceSum += confidence;
-        fallbackSum += brightness;
-      }
-    }
-
-    // Surrounding wood, fabric, and dark objects must not make a mostly white
-    // page look like a dark-background document. Use only samples that look
-    // like paper for polarity; retain the unweighted average as a fallback
-    // when no paper evidence is available.
-    return confidenceSum > 0.35
-      ? brightnessSum / confidenceSum
-      : fallbackSum / 9.0;
-  }
-
-  float estimateDarkBackgroundConfidence(float backgroundBrightness) {
-    // Treat polarity as a probability instead of making the page switch
-    // abruptly at one brightness value. The midpoint remains 0.45, while the
-    // transition band gives gray or unevenly lit pages a lower-confidence
-    // result rather than forcing the wrong polarity.
-    return 1.0 - smoothstep(0.28, 0.62, backgroundBrightness);
-  }
-
-  float softInkConfidence(
-    float value,
-    float darkThreshold,
-    float lightThreshold,
-    float backgroundIsDark
-  ) {
-    // Keep the transition narrow. This preserves the crisp binary body of a
-    // stroke while giving anti-aliased edge pixels proportional coverage.
-    float softness = max(0.018, uThresholdBias * 0.28);
-    float darkConfidence = 1.0 - smoothstep(
-      darkThreshold - softness,
-      darkThreshold + softness,
-      value
-    );
-    float lightConfidence = smoothstep(
-      lightThreshold - softness,
-      lightThreshold + softness,
-      value
-    );
-
-    return mix(darkConfidence, lightConfidence, backgroundIsDark);
+    return inkEvidence(uv, max(background.r, 0.08), background.b);
   }
 
   void main() {
-    vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
-    // Determine polarity from the paper/background brightness, not the
-    // color-sensitive ink intensity. A saturated colored stroke must not make
-    // a mostly white page switch into inverted mode. Keep the result
-    // continuous so ambiguous backgrounds do not hard-switch polarity.
-    float backgroundIsDark = estimateDarkBackgroundConfidence(
-      estimateGlobalBackgroundBrightness()
+    float observed = luminance(texture2D(uTexture, vOutputUv).rgb);
+    observed = mix(observed, 1.0 - observed, uBackgroundIsDark);
+    vec3 background = paperReference(vOutputUv, observed);
+    float paper = max(background.r, 0.08);
+    float relativeNoise = background.g * 0.125 / paper;
+
+    // Faint show-through must not become foreground merely because it forms
+    // connected letters. Require a clearly darker stroke relative to the
+    // corrected paper; keep a lower threshold only for its anti-aliased edge.
+    float edgeThreshold = clamp(0.065 + 1.5 * relativeNoise, 0.080, 0.24);
+    float foregroundThreshold = clamp(0.16 + 3.0 * relativeNoise, 0.180, 0.42);
+    float center = inkEvidence(vOutputUv, paper, background.b);
+    vec2 stepSize = uTexelSize;
+
+    float north = neighboringInkEvidence(vOutputUv + vec2(0.0, -stepSize.y), background);
+    float south = neighboringInkEvidence(vOutputUv + vec2(0.0, stepSize.y), background);
+    float west = neighboringInkEvidence(vOutputUv + vec2(-stepSize.x, 0.0), background);
+    float east = neighboringInkEvidence(vOutputUv + vec2(stepSize.x, 0.0), background);
+    float northWest = neighboringInkEvidence(vOutputUv - stepSize, background);
+    float southEast = neighboringInkEvidence(vOutputUv + stepSize, background);
+    float northEast = neighboringInkEvidence(vOutputUv + vec2(stepSize.x, -stepSize.y), background);
+    float southWest = neighboringInkEvidence(vOutputUv + vec2(-stepSize.x, stepSize.y), background);
+
+    float foregroundInk = step(foregroundThreshold, center);
+    float strongestNeighbor = max(
+      max(max(north, south), max(west, east)),
+      max(max(northWest, southEast), max(northEast, southWest))
     );
-    float illuminationCorrectionEnabled = 1.0 - backgroundIsDark;
-    float localIllumination = estimateLocalIllumination(vOutputUv);
-    float localPaperConfidence = estimateLocalPaperConfidence(vOutputUv);
-    vec3 correctedCenterColor = correctForIllumination(
-      centerColor,
-      localIllumination,
-      illuminationCorrectionEnabled
+    // Support is one pixel wide and always requires a confident foreground
+    // neighbor. A whole pale word cannot seed itself or spread into paper.
+    float foregroundEdge = step(foregroundThreshold, strongestNeighbor);
+    float coverage = smoothstep(
+      edgeThreshold,
+      max(edgeThreshold + 0.025, foregroundThreshold * 0.90),
+      center
     );
-    float originalCenter = inkIntensity(correctedCenterColor, localPaperConfidence);
-    float blurredCenter = blurredIntensity(
-      vOutputUv,
-      localIllumination,
-      illuminationCorrectionEnabled,
-      localPaperConfidence
-    );
-    // Very conservative unsharp masking: restore only a small amount of local
-    // contrast so text edges stay clear without creating dark halos.
-    float center = clamp(
-      originalCenter + 0.12 * (originalCenter - blurredCenter),
-      0.0,
-      1.0
-    );
-    float localSum = 0.0;
-    vec2 sampleOffset = uTexelSize * uSampleStep;
-
-    for (int x = -1; x <= 1; x += 1) {
-      for (int y = -1; y <= 1; y += 1) {
-        vec2 sampleUv = clamp(
-          vOutputUv + vec2(float(x), float(y)) * sampleOffset,
-          vec2(0.0),
-          vec2(1.0)
-        );
-        localSum += sampleInkIntensity(
-          sampleUv,
-          localIllumination,
-          illuminationCorrectionEnabled,
-          localPaperConfidence
-        );
-      }
-    }
-
-    float localMean = localSum / 9.0;
-    float darkInkThreshold = localMean - uThresholdBias;
-    float lightInkThreshold = localMean + uThresholdBias;
-    float softCenterInk = softInkConfidence(
-      center,
-      darkInkThreshold,
-      lightInkThreshold,
-      backgroundIsDark
-    );
-    float darkCenterIsInk = 1.0 - step(darkInkThreshold, center);
-    float lightCenterIsInk = step(lightInkThreshold, center);
-    float centerIsInk = mix(darkCenterIsInk, lightCenterIsInk, backgroundIsDark);
-
-    // Build a small, weighted morphology neighborhood. Axial neighbors carry
-    // full weight, while diagonal neighbors carry less weight so a single
-    // diagonal contact can preserve a thin stroke without making diagonal
-    // scene noise look like connected text.
-    float axialInkSupport = 0.0;
-    float diagonalInkSupport = 0.0;
-    float softInkSupport = 0.0;
-    vec2 supportStep = uTexelSize;
-
-    for (int x = -1; x <= 1; x += 1) {
-      for (int y = -1; y <= 1; y += 1) {
-        if (x != 0 || y != 0) {
-          vec2 sampleUv = clamp(
-            vOutputUv + vec2(float(x), float(y)) * supportStep,
-            vec2(0.0),
-            vec2(1.0)
-          );
-          vec3 neighborColor = texture2D(uTexture, sampleUv).rgb;
-          vec3 correctedNeighborColor = correctForIllumination(
-            neighborColor,
-            localIllumination,
-            illuminationCorrectionEnabled
-          );
-          float neighbor = inkIntensity(correctedNeighborColor, localPaperConfidence);
-          float darkNeighborIsInk = 1.0 - step(darkInkThreshold, neighbor);
-          float lightNeighborIsInk = step(lightInkThreshold, neighbor);
-          float neighborIsInk =
-            mix(darkNeighborIsInk, lightNeighborIsInk, backgroundIsDark);
-
-          if (x == 0 || y == 0) {
-            axialInkSupport += neighborIsInk;
-          } else {
-            diagonalInkSupport += neighborIsInk;
-          }
-
-          softInkSupport += softInkConfidence(
-            neighbor,
-            darkInkThreshold,
-            lightInkThreshold,
-            backgroundIsDark
-          ) *
-          ((x == 0 || y == 0) ? 1.0 : 0.55);
-        }
-      }
-    }
-
-    // Preserve strongly contrasted text pixels even when anti-aliasing makes
-    // their immediate neighbors light. The soft support path keeps a thin
-    // anti-aliased stroke alive when its neighbors are close to, but not yet
-    // across, the hard threshold.
-    float strongDarkInk = 1.0 - step(darkInkThreshold - 0.04, center);
-    float strongLightInk = step(lightInkThreshold + 0.04, center);
-    float strongInk = mix(strongDarkInk, strongLightInk, backgroundIsDark);
-
-    float weightedHardSupport = axialInkSupport + diagonalInkSupport * 0.55;
-    float connectedStroke = max(
-      step(0.75, weightedHardSupport),
-      step(0.95, softInkSupport)
-    );
-
-    // A two-sided opening/closing rule: remove weak isolated specks, while
-    // filling small holes that sit between two or more real stroke pixels.
-    // Strong isolated marks are intentionally retained for punctuation and
-    // very small handwritten details.
-    float weakIsolatedInk = centerIsInk * (1.0 - strongInk) * connectedStroke;
-    float regularGapFill =
-      (1.0 - centerIsInk) *
-      step(2.25, weightedHardSupport);
-    float structuralInkMask = max(
-      strongInk,
-      max(weakIsolatedInk, regularGapFill)
-    );
-    // Keep morphology responsible for rejecting isolated scene noise, then
-    // use the soft confidence only where at least one neighboring pixel is
-    // already recognized as ink. This restores connected anti-aliased pen
-    // edges without turning nearby colorful objects into broad gray strokes.
-    float supportedSoftInk = softCenterInk * connectedStroke;
-    float inkMask = max(structuralInkMask, supportedSoftInk);
-    float inkColor = 0.3019608; // #4d4d4d
-    gl_FragColor = vec4(mix(vec3(1.0), vec3(inkColor), inkMask), 1.0);
+    // No dilation or hole filling: counters, punctuation, and barcode gaps
+    // remain faithful to the source. Dark isolated marks still qualify.
+    float inkMask = coverage * max(foregroundInk, foregroundEdge);
+    float inkColor = 0.3019608; // Preserve the existing #4d4d4d export style.
+    gl_FragColor = vec4(vec3(mix(1.0, inkColor, inkMask)), 1.0);
   }
 `;
 
