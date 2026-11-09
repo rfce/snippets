@@ -857,24 +857,37 @@ function CameraScreen() {
     setIsEnhancing(true);
 
     try {
-      const enhancedPhoto = mode === 'blackAndWhite'
-        ? await renderAdaptiveThresholdAsync({
-            uri: savedPhoto.uri,
-            sourceWidth: savedPhoto.width,
-            sourceHeight: savedPhoto.height,
+      // Use the retained capture so enhancement sees the same paper, shadows,
+      // and fine strokes as the uncropped path. Crop only the enhanced result.
+      const sourcePhoto = capturedPhoto ?? savedPhoto;
+      const edits = capturedPhoto ? reviewEditsRef.current : null;
+      const needsCrop = edits && (hasCustomCrop(edits.corners) || edits.rotation !== 0);
+      const renderEnhancement = mode === 'blackAndWhite'
+        ? renderAdaptiveThresholdAsync
+        : renderMagicColorAsync;
+      const enhancedSource = await renderEnhancement({
+        uri: sourcePhoto.uri,
+        sourceWidth: sourcePhoto.width,
+        sourceHeight: sourcePhoto.height,
+      });
+      trackTemporaryPreviewPhoto(enhancedSource);
+
+      const enhancedPhoto = needsCrop
+        ? await renderPerspectiveCropAsync({
+            uri: enhancedSource.uri,
+            corners: edits.corners ?? getDefaultCorners(),
+            sourceWidth: enhancedSource.width,
+            sourceHeight: enhancedSource.height,
+            rotation: edits.rotation,
           })
-        : await renderMagicColorAsync({
-            uri: savedPhoto.uri,
-            sourceWidth: savedPhoto.width,
-            sourceHeight: savedPhoto.height,
-          });
+        : enhancedSource;
+      trackTemporaryPreviewPhoto(enhancedPhoto);
 
       if (mode === 'blackAndWhite') {
         setBlackAndWhitePhoto(enhancedPhoto);
       } else {
         setMagicColorPhoto(enhancedPhoto);
       }
-      trackTemporaryPreviewPhoto(enhancedPhoto);
     } catch (error) {
       const details = getErrorDetails(error);
       console.error(`[screen] ${mode} enhancement failed`, details);

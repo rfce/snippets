@@ -1,13 +1,18 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
-// Keep the processed document close to the camera's native resolution while
-// using JPEG snapshots to avoid the large files and decode cost of PNG.
+// Enhancement exports keep their existing JPEG settings. Crop/rotation
+// snapshots are lossless so an extra render does not discard document detail.
 const MAX_OUTPUT_EDGE = 4096;
 const BLACK_AND_WHITE_ANALYSIS_EDGE = 256;
 const BLACK_AND_WHITE_PAPER_GRID = 32;
 const SNAPSHOT_OPTIONS = {
   format: 'jpeg',
   compress: 0.92,
+  flip: false,
+};
+const CROP_SNAPSHOT_OPTIONS = {
+  format: 'png',
+  compress: 1,
   flip: false,
 };
 
@@ -25,12 +30,16 @@ export async function renderPerspectiveCropAsync({
   validateCorners(corners);
 
   const normalizedRotation = normalizeRotation(rotation);
-  const width = sourceWidth || 1;
-  const height = sourceHeight || 1;
+  const width = sourceWidth;
+  const height = sourceHeight;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error('Valid image dimensions are required for perspective cropping.');
+  }
   const displayedWidth = normalizedRotation % 180 === 0 ? width : height;
   const displayedHeight = normalizedRotation % 180 === 0 ? height : width;
-  const sourceCorners = mapCornersToSource(corners, normalizedRotation);
-  const outputSize = getOutputSize(corners, displayedWidth, displayedHeight);
+  const displayedCorners = getPixelAlignedCorners(corners, displayedWidth, displayedHeight);
+  const sourceCorners = mapCornersToSource(displayedCorners, normalizedRotation);
+  const outputSize = getOutputSize(displayedCorners, displayedWidth, displayedHeight);
   const axisAlignedCrop = normalizedRotation === 0 ? getAxisAlignedCrop(sourceCorners) : null;
   const destinationToSource = axisAlignedCrop
     ? getAxisAlignedTransform(axisAlignedCrop)
@@ -91,8 +100,9 @@ export async function renderPerspectiveCropAsync({
     gl.flushEXP?.();
     checkGlError(gl, 'rendering the perspective crop');
     const snapshot = await GLView.takeSnapshotAsync(gl, {
-      ...SNAPSHOT_OPTIONS,
+      ...CROP_SNAPSHOT_OPTIONS,
       framebuffer,
+      rect: { x: 0, y: 0, width: outputSize.width, height: outputSize.height },
     });
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
     if (!snapshotUri || typeof snapshotUri !== 'string') {
@@ -829,6 +839,26 @@ function getAxisAlignedCrop(corners) {
   return { left, right, top, bottom };
 }
 
+function getPixelAlignedCorners(corners, width, height) {
+  const rectangle = getAxisAlignedCrop(corners);
+  if (!rectangle) return corners;
+
+  // A rectangular crop does not need sub-pixel resampling. Round outwards to
+  // retain the selection and align pixel centers, including after quarter turns.
+  const epsilon = 1e-7;
+  const left = Math.max(0, Math.floor(rectangle.left * width + epsilon)) / width;
+  const right = Math.min(width, Math.ceil(rectangle.right * width - epsilon)) / width;
+  const top = Math.max(0, Math.floor(rectangle.top * height + epsilon)) / height;
+  const bottom = Math.min(height, Math.ceil(rectangle.bottom * height - epsilon)) / height;
+
+  return {
+    topLeft: { x: left, y: top },
+    topRight: { x: right, y: top },
+    bottomRight: { x: right, y: bottom },
+    bottomLeft: { x: left, y: bottom },
+  };
+}
+
 function getAxisAlignedTransform(crop) {
   return [
     [crop.right - crop.left, 0, crop.left],
@@ -1083,7 +1113,7 @@ const VERTEX_SHADER = `
 `;
 
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
 
   uniform sampler2D uTexture;
   uniform float uH00;
