@@ -6,6 +6,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  BackHandler,
   FlatList,
   Platform,
   PanResponder,
@@ -16,10 +17,12 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { CaptureReview } from '@/components/capture-review';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { getDefaultCorners, hasCustomCrop } from '@/crop-geometry';
 import {
   cleanupProcessedImagesAsync,
   renderMagicColorAsync,
@@ -480,9 +483,7 @@ function CameraScreen() {
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isSavingPreview, setIsSavingPreview] = useState(false);
   const [isSavingBatch, setIsSavingBatch] = useState(false);
-  const [capturedRotation, setCapturedRotation] = useState(0);
-  const [cropCorners, setCropCorners] = useState(null);
-  const [reviewFrameSize, setReviewFrameSize] = useState({ width: 0, height: 0 });
+  const reviewEditsRef = useRef(null);
   const [cameraError, setCameraError] = useState(null);
   const [diagnosticError, setDiagnosticError] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -615,8 +616,7 @@ function CameraScreen() {
       height: asset.height,
       fileName: asset.fileName ?? null,
     });
-    setCropCorners(null);
-    setCapturedRotation(0);
+    reviewEditsRef.current = null;
     setIsImporting(false);
     setIsCameraReady(false);
   }, []);
@@ -678,8 +678,7 @@ function CameraScreen() {
         setBatchPhotos((current) => [...current, photo]);
       } else {
         setCapturedPhoto(photo);
-        setCropCorners(null);
-        setCapturedRotation(0);
+        reviewEditsRef.current = null;
       }
     } catch (error) {
       reportDiagnostic('Capture photo', error, {
@@ -746,27 +745,12 @@ function CameraScreen() {
 
   const discardPhoto = () => {
     setCapturedPhoto(null);
-    setCropCorners(null);
-    setCapturedRotation(0);
+    reviewEditsRef.current = null;
     setIsCameraReady(false);
     setCameraError(null);
   };
 
-  const rotateCapturedPhoto = () => {
-    if (!capturedPhoto?.uri || isCapturing) return;
-
-    if (Platform.OS === 'web') {
-      Alert.alert('Not available', 'Image rotation is available on a mobile device.');
-      return;
-    }
-
-    // Keep rotation as an instant display transform. The pixels are baked once
-    // on Next together with any perspective crop, avoiding a GL render per tap.
-    setCapturedRotation((current) => (current + 90) % 360);
-    setCropCorners(null);
-  };
-
-  const closeSavedPhoto = () => {
+  const returnToReview = useCallback(() => {
     cleanupTemporaryPreviewPhotos();
     savedImageModeAnimation.stopAnimation();
     savedImageModeAnimation.setValue(0);
@@ -778,7 +762,24 @@ function CameraScreen() {
     setMagicColorPhoto(null);
     setIsCameraReady(false);
     setCameraError(null);
-  };
+  }, [cleanupTemporaryPreviewPhotos, savedImageModeAnimation, savedImageLiquidScale]);
+
+  const closeSavedPhoto = useCallback(() => {
+    returnToReview();
+    setCapturedPhoto(null);
+    reviewEditsRef.current = null;
+  }, [returnToReview]);
+
+  // Preview is an editing step inside this route. Android Back returns to the
+  // retained capture, and waits for an active render/save to finish.
+  useFocusEffect(useCallback(() => {
+    if (!savedPhoto) return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!isEnhancing && !isSavingPreview) returnToReview();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [savedPhoto, isEnhancing, isSavingPreview, returnToReview]));
 
   const displayedSavedPhoto =
     savedImageMode === 'blackAndWhite' && blackAndWhitePhoto
@@ -800,14 +801,6 @@ function CameraScreen() {
     inputRange: [0, 1, 2],
     outputRange: [0, savedImageLiquidStep, savedImageLiquidStep * 2],
   });
-
-  const reviewImageAspectRatio =
-    capturedPhoto?.width && capturedPhoto?.height
-      ? capturedRotation % 180 === 0
-        ? capturedPhoto.width / capturedPhoto.height
-        : capturedPhoto.height / capturedPhoto.width
-      : 4 / 3;
-  const reviewImageSize = getImageViewport(reviewFrameSize, reviewImageAspectRatio);
 
   useEffect(() => {
     if (!savedImageModeAnimationStarted.current) {
@@ -943,9 +936,12 @@ function CameraScreen() {
     }
   };
 
-  const continueToSavedImage = async () => {
+  const continueToSavedImage = async ({ corners, rotation }) => {
     if (!capturedPhoto?.uri || isCapturing) return;
 
+    const cropCorners = corners;
+    const capturedRotation = rotation;
+    reviewEditsRef.current = { corners, rotation };
     setIsCapturing(true);
     const customCrop = hasCustomCrop(cropCorners);
     const needsProcessing = customCrop || capturedRotation !== 0;
@@ -990,9 +986,8 @@ function CameraScreen() {
       setSavedImageMode('original');
       setBlackAndWhitePhoto(null);
       setMagicColorPhoto(null);
-      setCapturedPhoto(null);
-      setCropCorners(null);
-      setCapturedRotation(0);
+      // Keep the source capture and edit snapshot for Back to review. Each
+      // preview is rendered from that source rather than from a previous crop.
       setIsCameraReady(false);
       console.log('[screen] Image prepared for final save.');
     } catch (error) {
@@ -1115,9 +1110,28 @@ function CameraScreen() {
               styles.savedImageSafeArea,
               { paddingBottom: Spacing.three },
             ]}>
-             <ThemedText type="default" style={styles.savedImageTitle}>
-               Preview
-            </ThemedText>
+            <View style={styles.savedImageHeader}>
+              <Pressable
+                accessibilityLabel="Back to review capture"
+                accessibilityRole="button"
+                disabled={isEnhancing || isSavingPreview}
+                onPress={returnToReview}
+                style={({ pressed }) => [
+                  styles.savedImageBackButton,
+                  pressed && styles.pressed,
+                  (isEnhancing || isSavingPreview) && styles.disabled,
+                ]}>
+                <SymbolView
+                  name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+                  size={24}
+                  tintColor={PREVIEW_TEXT}
+                />
+              </Pressable>
+              <ThemedText type="default" style={styles.savedImageTitle}>
+                Preview
+              </ThemedText>
+              <View style={styles.savedImageHeaderSpacer} />
+            </View>
 
             <View style={styles.savedImageFrame}>
               <Image
@@ -1251,171 +1265,14 @@ function CameraScreen() {
   if (capturedPhoto) {
     return (
       <>
-        <View style={styles.reviewContainer}>
-          <SafeAreaView
-            style={[
-              styles.reviewSafeArea,
-              { paddingBottom: Spacing.three },
-            ]}>
-            <View style={styles.reviewHeader}>
-              <ThemedText type="default" style={styles.reviewTitle}>
-                Review capture
-              </ThemedText>
-              <View style={styles.reviewReadyBadge}>
-                <SymbolView
-                  name={{ ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }}
-                  size={17}
-                  tintColor={REVIEW_NEXT_ACCENT}
-                />
-                <ThemedText type="smallBold" style={styles.reviewReadyText}>
-                  Ready
-                </ThemedText>
-              </View>
-            </View>
-
-            <View
-              style={styles.imageFrame}
-              onLayout={({ nativeEvent }) => {
-                const { width, height } = nativeEvent.layout;
-                setReviewFrameSize({ width, height });
-              }}>
-              {reviewImageSize.width > 0 && reviewImageSize.height > 0 && (
-                <View
-                  pointerEvents="none"
-                  style={[
-                    styles.reviewImageViewport,
-                    {
-                      width: reviewImageSize.width,
-                      height: reviewImageSize.height,
-                      left: reviewImageSize.left,
-                      top: reviewImageSize.top,
-                    },
-                  ]}>
-                  <Image
-                    contentFit="contain"
-                    source={{ uri: capturedPhoto.uri }}
-                    style={[
-                      styles.reviewImage,
-                      {
-                        width:
-                          capturedRotation % 180 !== 0
-                            ? reviewImageSize.height
-                            : reviewImageSize.width,
-                        height:
-                          capturedRotation % 180 !== 0
-                            ? reviewImageSize.width
-                            : reviewImageSize.height,
-                        left:
-                          capturedRotation % 180 !== 0
-                            ? (reviewImageSize.width - reviewImageSize.height) / 2
-                            : 0,
-                        top:
-                          capturedRotation % 180 !== 0
-                            ? (reviewImageSize.height - reviewImageSize.width) / 2
-                            : 0,
-                        ...(capturedRotation !== 0 && {
-                          transform: [{ rotate: `${capturedRotation}deg` }],
-                        }),
-                      },
-                    ]}
-                  />
-                </View>
-              )}
-              <CropOverlay
-                aspectRatio={reviewImageAspectRatio}
-                corners={cropCorners}
-                onCornersChange={setCropCorners}
-              />
-            </View>
-
-            <View style={styles.reviewInstruction}>
-              <SymbolView
-                name={{ ios: 'hand.draw.fill', android: 'pan_tool', web: 'pan_tool' }}
-                size={17}
-                tintColor={REVIEW_NEXT_ACCENT}
-              />
-              <ThemedText style={styles.reviewInstructionText}>
-                Drag the handles to fine-tune your crop
-              </ThemedText>
-            </View>
-
-            <Pressable
-              accessibilityLabel="Rotate image 90 degrees clockwise"
-              accessibilityRole="button"
-              disabled={isCapturing}
-              onPress={rotateCapturedPhoto}
-              style={({ pressed }) => [
-                styles.reviewRotateButton,
-                pressed && styles.pressed,
-                isCapturing && styles.disabled,
-              ]}>
-              <SymbolView
-                name={{ ios: 'arrow.clockwise', android: 'rotate_right', web: 'rotate_right' }}
-                size={22}
-                tintColor={REVIEW_NEXT_ACCENT}
-              />
-              <ThemedText type="smallBold" style={styles.reviewRotateText}>
-                Rotate
-              </ThemedText>
-            </Pressable>
-
-            <View style={[styles.savedImageActions, styles.reviewActions]}>
-              <Pressable
-                accessibilityLabel="Discard captured image"
-                accessibilityRole="button"
-                disabled={isCapturing}
-                onPress={discardPhoto}
-                style={({ pressed }) => [
-                  styles.savedImageActionButton,
-                  styles.reviewActionButton,
-                  styles.reviewDiscardAction,
-                  pressed && styles.pressed,
-                  isCapturing && styles.disabled,
-                ]}>
-                <SymbolView
-                  name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
-                  size={30}
-                  tintColor={REVIEW_DISCARD_ACCENT}
-                />
-                <ThemedText
-                  type="smallBold"
-                  allowFontScaling={false}
-                  style={styles.reviewDiscardText}>
-                  Discard
-                </ThemedText>
-              </Pressable>
-
-              <Pressable
-                accessibilityLabel="Next"
-                accessibilityRole="button"
-                disabled={isCapturing}
-                onPress={continueToSavedImage}
-                style={({ pressed }) => [
-                  styles.savedImageActionButton,
-                  styles.reviewActionButton,
-                  styles.reviewNextAction,
-                  pressed && styles.pressed,
-                  isCapturing && styles.disabled,
-                ]}>
-                <ThemedText
-                  type="smallBold"
-                  allowFontScaling={false}
-                  style={[styles.reviewNextText, styles.reviewNextTextOnAccent]}>
-                  Next
-                </ThemedText>
-                {isCapturing ? (
-                  <ActivityIndicator color={REVIEW_BACKGROUND} />
-                ) : (
-                  <SymbolView
-                    name={{ ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' }}
-                    size={30}
-                    tintColor={REVIEW_BACKGROUND}
-                  />
-                )}
-              </Pressable>
-            </View>
-          </SafeAreaView>
-        </View>
+        <CaptureReview
+          key={capturedPhoto.uri}
+          photo={capturedPhoto}
+          initialEdits={reviewEditsRef.current}
+          isProcessing={isCapturing}
+          onNext={continueToSavedImage}
+          onDiscard={discardPhoto}
+        />
         {diagnosticOverlay}
       </>
     );
@@ -1620,13 +1477,6 @@ function CameraScreen() {
   );
 }
 
-const edgeConnections = {
-  top: ['topLeft', 'topRight'],
-  right: ['topRight', 'bottomRight'],
-  bottom: ['bottomRight', 'bottomLeft'],
-  left: ['bottomLeft', 'topLeft'],
-};
-
 const GalleryImportTile = memo(function GalleryImportTile({ item, onSelect }) {
   return (
     <Pressable
@@ -1645,198 +1495,6 @@ const GalleryImportTile = memo(function GalleryImportTile({ item, onSelect }) {
     </Pressable>
   );
 });
-
-function CropOverlay({ aspectRatio, corners, onCornersChange }) {
-  const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
-
-  const imageSize = getImageViewport(frameSize, aspectRatio);
-  const visibleCorners = corners ?? getDefaultCorners();
-
-  const edgePositions = Object.fromEntries(
-    Object.entries(edgeConnections).map(([edge, [firstCorner, secondCorner]]) => {
-      const first = visibleCorners[firstCorner];
-      const second = visibleCorners[secondCorner];
-      const midpoint = {
-        x: (first.x + second.x) / 2,
-        y: (first.y + second.y) / 2,
-      };
-
-      return [edge, midpoint];
-    })
-  );
-
-  const updateCorner = (corner, position) => {
-    onCornersChange((current) => ({
-      ...(current ?? getDefaultCorners()),
-      [corner]: clampPoint(position),
-    }));
-  };
-
-  const updateEdge = (edge, position) => {
-    const [firstCorner, secondCorner] = edgeConnections[edge];
-    onCornersChange((current) => {
-      const next = current ?? getDefaultCorners();
-      const currentFirst = next[firstCorner];
-      const currentSecond = next[secondCorner];
-      const midpoint = {
-        x: (currentFirst.x + currentSecond.x) / 2,
-        y: (currentFirst.y + currentSecond.y) / 2,
-      };
-      const requestedDelta = {
-        x: position.x - midpoint.x,
-        y: position.y - midpoint.y,
-      };
-      const minX = Math.min(currentFirst.x, currentSecond.x);
-      const maxX = Math.max(currentFirst.x, currentSecond.x);
-      const minY = Math.min(currentFirst.y, currentSecond.y);
-      const maxY = Math.max(currentFirst.y, currentSecond.y);
-      const delta = {
-        x: clamp(requestedDelta.x, -minX, 1 - maxX),
-        y: clamp(requestedDelta.y, -minY, 1 - maxY),
-      };
-
-      return {
-        ...next,
-        [firstCorner]: {
-          x: next[firstCorner].x + delta.x,
-          y: next[firstCorner].y + delta.y,
-        },
-        [secondCorner]: {
-          x: next[secondCorner].x + delta.x,
-          y: next[secondCorner].y + delta.y,
-        },
-      };
-    });
-  };
-
-  const lineSegments = Object.entries(edgeConnections).flatMap(([edge, [firstCorner, secondCorner]]) => [
-    [visibleCorners[firstCorner], edgePositions[edge]],
-    [edgePositions[edge], visibleCorners[secondCorner]],
-  ]);
-
-  return (
-    <View
-      pointerEvents="box-none"
-      style={styles.cropOverlay}
-      onLayout={({ nativeEvent }) => {
-        const { width, height } = nativeEvent.layout;
-        setFrameSize({ width, height });
-      }}>
-      {imageSize.width > 0 && imageSize.height > 0 && (
-        <View
-          pointerEvents="box-none"
-          style={[
-            styles.cropViewport,
-            {
-              width: imageSize.width,
-              height: imageSize.height,
-              left: imageSize.left,
-              top: imageSize.top,
-            },
-          ]}>
-          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-            {lineSegments.map(([start, end], index) => (
-              <View key={index} style={getLineStyle(start, end, imageSize)} />
-            ))}
-          </View>
-
-          {Object.entries(visibleCorners).map(([corner, position]) => (
-            <DraggableHandle
-              key={corner}
-              label={`Move ${corner} crop corner`}
-              position={position}
-              size={imageSize}
-              onDrag={(nextPosition) => updateCorner(corner, nextPosition)}
-            />
-          ))}
-
-          {Object.entries(edgePositions).map(([edge, position]) => (
-            <DraggableHandle
-              key={edge}
-              label={`Move ${edge} crop edge`}
-              position={position}
-              size={imageSize}
-              isEdge
-              onDrag={(nextPosition) => updateEdge(edge, nextPosition)}
-            />
-          ))}
-        </View>
-      )}
-    </View>
-  );
-}
-
-function DraggableHandle({ label, position, size, isEdge = false, onDrag }) {
-  const positionRef = useRef(position);
-  const startPositionRef = useRef(position);
-  const onDragRef = useRef(onDrag);
-
-  positionRef.current = position;
-  onDragRef.current = onDrag;
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => {
-        startPositionRef.current = positionRef.current;
-      },
-      onPanResponderMove: (_, gestureState) => {
-        onDragRef.current({
-          x: startPositionRef.current.x + gestureState.dx / size.width,
-          y: startPositionRef.current.y + gestureState.dy / size.height,
-        });
-      },
-      onPanResponderTerminationRequest: () => false,
-    })
-  ).current;
-
-  const handleSize = isEdge ? 18 : 22;
-
-  return (
-    <View
-      accessible
-      accessibilityLabel={label}
-      {...panResponder.panHandlers}
-      style={[
-        styles.cropHandle,
-        isEdge && styles.edgeHandle,
-        {
-          left: position.x * size.width - handleSize / 2,
-          top: position.y * size.height - handleSize / 2,
-          width: handleSize,
-          height: handleSize,
-          borderRadius: handleSize / 2,
-        },
-      ]}
-    />
-  );
-}
-
-function clampPoint(point) {
-  return {
-    x: Math.max(0, Math.min(1, point.x)),
-    y: Math.max(0, Math.min(1, point.y)),
-  };
-}
-
-function clamp(value, minimum, maximum) {
-  return Math.max(minimum, Math.min(maximum, value));
-}
-
-function hasCustomCrop(corners) {
-  if (!corners) return false;
-
-  const defaults = getDefaultCorners();
-  return Object.keys(defaults).some((corner) => {
-    if (!corners[corner]) return true;
-
-    return (
-      Math.abs(corners[corner].x - defaults[corner].x) > 0.0001 ||
-      Math.abs(corners[corner].y - defaults[corner].y) > 0.0001
-    );
-  });
-}
 
 function getErrorDetails(error) {
   if (error instanceof Error) {
@@ -1976,65 +1634,6 @@ function VerboseErrorNotice({ diagnostic, onDismiss }) {
       </Pressable>
     </View>
   );
-}
-
-function getDefaultCorners() {
-  return {
-    topLeft: { x: 0, y: 0 },
-    topRight: { x: 1, y: 0 },
-    bottomRight: { x: 1, y: 1 },
-    bottomLeft: { x: 0, y: 1 },
-  };
-}
-
-function getImageViewport(frameSize, aspectRatio) {
-  if (!frameSize.width || !frameSize.height || !aspectRatio) {
-    return { width: 0, height: 0, left: 0, top: 0 };
-  }
-
-  const frameRatio = frameSize.width / frameSize.height;
-
-  if (frameRatio > aspectRatio) {
-    const height = frameSize.height;
-    const width = height * aspectRatio;
-    return {
-      width,
-      height,
-      left: (frameSize.width - width) / 2,
-      top: 0,
-    };
-  }
-
-  const width = frameSize.width;
-  const height = width / aspectRatio;
-  return {
-    width,
-    height,
-    left: 0,
-    top: (frameSize.height - height) / 2,
-  };
-}
-
-function getLineStyle(start, end, size) {
-  const startX = start.x * size.width;
-  const startY = start.y * size.height;
-  const endX = end.x * size.width;
-  const endY = end.y * size.height;
-  const deltaX = endX - startX;
-  const deltaY = endY - startY;
-  const length = Math.sqrt(deltaX ** 2 + deltaY ** 2);
-  const angle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-
-  return {
-    position: 'absolute',
-    left: (startX + endX) / 2 - length / 2,
-    top: (startY + endY) / 2 - 1,
-    width: length,
-    height: 2,
-    backgroundColor: REVIEW_NEXT_ACCENT,
-    opacity: 0.9,
-    transform: [{ rotate: `${angle}deg` }],
-  };
 }
 
 const styles = StyleSheet.create({
@@ -2341,6 +1940,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.three,
     paddingBottom: Spacing.three,
+  },
+  savedImageHeader: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  savedImageBackButton: {
+    width: 48,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  savedImageHeaderSpacer: {
+    width: 48,
   },
   savedImageSafeArea: {
     flex: 1,
