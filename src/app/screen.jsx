@@ -5,7 +5,6 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   BackHandler,
   FlatList,
   Platform,
@@ -18,15 +17,18 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CaptureReview } from '@/components/capture-review';
+import { PreviewFilters } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { getDefaultCorners, hasCustomCrop } from '@/crop-geometry';
+import { DEFAULT_INVERT_SETTINGS, getInvertSettingsKey, normalizeInvertSettings } from '@/invert-settings';
 import {
   cleanupProcessedImagesAsync,
   renderMagicColorAsync,
   renderAdaptiveThresholdAsync,
+  renderInvertAsync,
   renderPerspectiveCropAsync,
 } from '@/perspective-crop';
 import {
@@ -95,12 +97,6 @@ const REVIEW_BORDER = '#E4EAF2';
 const REVIEW_TEXT = '#0F172A';
 const REVIEW_MUTED = '#64748B';
 const REVIEW_SOFT_ACCENT = '#EEF4FF';
-
-const SAVED_IMAGE_OPTIONS = [
-  { label: 'Original', value: 'original' },
-  { label: 'Black & White', value: 'blackAndWhite' },
-  { label: 'Magic Color', value: 'magicColor' },
-];
 
 export default function ScreenTab() {
   if (
@@ -480,6 +476,9 @@ function CameraScreen() {
   const [savedImageMode, setSavedImageMode] = useState('original');
   const [blackAndWhitePhoto, setBlackAndWhitePhoto] = useState(null);
   const [magicColorPhoto, setMagicColorPhoto] = useState(null);
+  const [invertPhoto, setInvertPhoto] = useState(null);
+  const [invertSettings, setInvertSettings] = useState(DEFAULT_INVERT_SETTINGS);
+  const [comparisonMode, setComparisonMode] = useState(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isSavingPreview, setIsSavingPreview] = useState(false);
   const [isSavingBatch, setIsSavingBatch] = useState(false);
@@ -491,11 +490,11 @@ function CameraScreen() {
   const [hasMoreGallery, setHasMoreGallery] = useState(true);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [recentGalleryImage, setRecentGalleryImage] = useState(null);
-  const savedImageModeAnimation = useRef(new Animated.Value(0)).current;
-  const savedImageLiquidScale = useRef(new Animated.Value(1)).current;
-  const savedImageModeAnimationStarted = useRef(false);
   const temporaryPreviewPhotosRef = useRef(new Map());
-  const [savedImageToggleRowWidth, setSavedImageToggleRowWidth] = useState(0);
+  const invertPhotoCacheRef = useRef(new Map());
+  const previewRequestRef = useRef(0);
+  const previewBusyRef = useRef(false);
+  const previewMountedRef = useRef(true);
 
   const reportDiagnostic = useCallback((operation, error, context = {}) => {
     const diagnostic = createDiagnosticDetails(operation, error, context);
@@ -523,7 +522,16 @@ function CameraScreen() {
     }
   }, []);
 
-  useEffect(() => cleanupTemporaryPreviewPhotos, [cleanupTemporaryPreviewPhotos]);
+  useEffect(() => {
+    previewMountedRef.current = true;
+    return () => {
+      previewMountedRef.current = false;
+      previewRequestRef.current += 1;
+      previewBusyRef.current = false;
+      invertPhotoCacheRef.current.clear();
+      cleanupTemporaryPreviewPhotos();
+    };
+  }, [cleanupTemporaryPreviewPhotos]);
 
   const loadRecentGalleryImage = useCallback(async () => {
     if (recentImageLoadStartedRef.current) return;
@@ -751,23 +759,26 @@ function CameraScreen() {
   };
 
   const returnToReview = useCallback(() => {
+    previewRequestRef.current += 1;
+    previewBusyRef.current = false;
     cleanupTemporaryPreviewPhotos();
-    savedImageModeAnimation.stopAnimation();
-    savedImageModeAnimation.setValue(0);
-    savedImageLiquidScale.stopAnimation();
-    savedImageLiquidScale.setValue(1);
+    invertPhotoCacheRef.current.clear();
     setSavedPhoto(null);
     setSavedImageMode('original');
     setBlackAndWhitePhoto(null);
     setMagicColorPhoto(null);
+    setInvertPhoto(null);
+    setComparisonMode(null);
+    setIsEnhancing(false);
     setIsCameraReady(false);
     setCameraError(null);
-  }, [cleanupTemporaryPreviewPhotos, savedImageModeAnimation, savedImageLiquidScale]);
+  }, [cleanupTemporaryPreviewPhotos]);
 
   const closeSavedPhoto = useCallback(() => {
     returnToReview();
     setCapturedPhoto(null);
     reviewEditsRef.current = null;
+    setInvertSettings(DEFAULT_INVERT_SETTINGS);
   }, [returnToReview]);
 
   // Preview is an editing step inside this route. Android Back returns to the
@@ -786,91 +797,56 @@ function CameraScreen() {
       ? blackAndWhitePhoto
       : savedImageMode === 'magicColor' && magicColorPhoto
         ? magicColorPhoto
-        : savedPhoto;
+        : savedImageMode === 'invert' && invertPhoto
+          ? invertPhoto
+          : savedPhoto;
+  const comparisonPhoto = comparisonMode ? savedPhoto : displayedSavedPhoto;
 
-  const savedImageModeIndex = Math.max(
-    0,
-    SAVED_IMAGE_OPTIONS.findIndex((option) => option.value === savedImageMode)
-  );
-  const savedImageToggleItemWidth =
-    savedImageToggleRowWidth > 0
-      ? (savedImageToggleRowWidth - Spacing.half * 2 - Spacing.two * 2) / 3
-      : 0;
-  const savedImageLiquidStep = savedImageToggleItemWidth + Spacing.two;
-  const savedImageLiquidTranslateX = savedImageModeAnimation.interpolate({
-    inputRange: [0, 1, 2],
-    outputRange: [0, savedImageLiquidStep, savedImageLiquidStep * 2],
-  });
-
-  useEffect(() => {
-    if (!savedImageModeAnimationStarted.current) {
-      savedImageModeAnimation.setValue(savedImageModeIndex);
-      savedImageModeAnimationStarted.current = true;
-      return undefined;
-    }
-
-    Animated.parallel([
-      Animated.spring(savedImageModeAnimation, {
-        toValue: savedImageModeIndex,
-        friction: 9,
-        tension: 120,
-        useNativeDriver: true,
-      }),
-      Animated.sequence([
-        Animated.timing(savedImageLiquidScale, {
-          toValue: 1.1,
-          duration: 120,
-          useNativeDriver: true,
-        }),
-        Animated.spring(savedImageLiquidScale, {
-          toValue: 1,
-          friction: 5,
-          tension: 90,
-          useNativeDriver: true,
-        }),
-      ]),
-    ]).start();
-
-    return undefined;
-  }, [
-    savedImageLiquidScale,
-    savedImageModeAnimation,
-    savedImageModeIndex,
-  ]);
-
-  const selectSavedImageMode = async (mode) => {
+  const selectSavedImageMode = async (mode, nextSettings = invertSettings) => {
+    if (previewBusyRef.current || isSavingPreview || !savedPhoto) return;
+    const renderers = {
+      blackAndWhite: renderAdaptiveThresholdAsync,
+      magicColor: renderMagicColorAsync,
+      invert: renderInvertAsync,
+    };
+    if (mode !== 'original' && !renderers[mode]) return;
+    const settings = normalizeInvertSettings(nextSettings);
+    const settingsKey = getInvertSettingsKey(settings);
+    setComparisonMode(null);
     setSavedImageMode(mode);
+    if (mode === 'invert') setInvertSettings(settings);
 
-    const hasCachedPreview =
-      (mode === 'blackAndWhite' && blackAndWhitePhoto) ||
-      (mode === 'magicColor' && magicColorPhoto);
-
-    if (
-      (mode !== 'blackAndWhite' && mode !== 'magicColor') ||
-      hasCachedPreview ||
-      isEnhancing ||
-      !savedPhoto
-    ) {
+    const cached = mode === 'blackAndWhite' ? blackAndWhitePhoto
+      : mode === 'magicColor' ? magicColorPhoto
+        : mode === 'invert' ? invertPhotoCacheRef.current.get(settingsKey) : null;
+    if (cached) {
+      if (mode === 'invert') setInvertPhoto(cached);
       return;
     }
+    if (mode === 'original') return;
 
+    const request = ++previewRequestRef.current;
+    const isCurrent = () => previewMountedRef.current && previewRequestRef.current === request;
+    const produced = [];
+    previewBusyRef.current = true;
     setIsEnhancing(true);
 
     try {
-      // Use the retained capture so enhancement sees the same paper, shadows,
-      // and fine strokes as the uncropped path. Crop only the enhanced result.
+      // Analyze the retained full capture, then apply the current crop/rotation.
       const sourcePhoto = capturedPhoto ?? savedPhoto;
       const edits = capturedPhoto ? reviewEditsRef.current : null;
       const needsCrop = edits && (hasCustomCrop(edits.corners) || edits.rotation !== 0);
-      const renderEnhancement = mode === 'blackAndWhite'
-        ? renderAdaptiveThresholdAsync
-        : renderMagicColorAsync;
-      const enhancedSource = await renderEnhancement({
+      const enhancedSource = await renderers[mode]({
         uri: sourcePhoto.uri,
         sourceWidth: sourcePhoto.width,
         sourceHeight: sourcePhoto.height,
+        ...(mode === 'invert' ? { settings } : {}),
       });
-      trackTemporaryPreviewPhoto(enhancedSource);
+      produced.push(enhancedSource);
+      if (!isCurrent()) {
+        await cleanupProcessedImagesAsync(produced);
+        return;
+      }
 
       const enhancedPhoto = needsCrop
         ? await renderPerspectiveCropAsync({
@@ -881,30 +857,41 @@ function CameraScreen() {
             rotation: edits.rotation,
           })
         : enhancedSource;
+      if (enhancedPhoto !== enhancedSource) produced.push(enhancedPhoto);
+      if (needsCrop && enhancedSource.uri !== enhancedPhoto.uri) {
+        await cleanupProcessedImagesAsync(enhancedSource);
+      }
+      if (!isCurrent()) {
+        await cleanupProcessedImagesAsync(produced);
+        return;
+      }
       trackTemporaryPreviewPhoto(enhancedPhoto);
-
-      if (mode === 'blackAndWhite') {
-        setBlackAndWhitePhoto(enhancedPhoto);
-      } else {
-        setMagicColorPhoto(enhancedPhoto);
+      if (mode === 'blackAndWhite') setBlackAndWhitePhoto(enhancedPhoto);
+      else if (mode === 'magicColor') setMagicColorPhoto(enhancedPhoto);
+      else {
+        invertPhotoCacheRef.current.set(settingsKey, enhancedPhoto);
+        setInvertPhoto(enhancedPhoto);
       }
     } catch (error) {
-      const details = getErrorDetails(error);
-      console.error(`[screen] ${mode} enhancement failed`, details);
-      setSavedImageMode('original');
-      reportDiagnostic(`${mode} enhancement`, error, {
-        mode,
-        sourceUri: savedPhoto?.uri ?? null,
-        sourceWidth: savedPhoto?.width ?? null,
-        sourceHeight: savedPhoto?.height ?? null,
-      });
+      await cleanupProcessedImagesAsync(produced);
+      if (isCurrent()) {
+        setSavedImageMode('original');
+        reportDiagnostic(mode + ' enhancement', error, { mode, settings: mode === 'invert' ? settings : undefined });
+      }
     } finally {
-      setIsEnhancing(false);
+      if (isCurrent()) {
+        previewBusyRef.current = false;
+        setIsEnhancing(false);
+      }
     }
   };
 
+  const changeInvertSettings = (settings) => {
+    return selectSavedImageMode('invert', normalizeInvertSettings(settings));
+  };
+
   const saveSavedImage = async () => {
-    if (!displayedSavedPhoto?.uri || isSavingPreview || isEnhancing) return;
+    if (!displayedSavedPhoto?.uri || isSavingPreview || isEnhancing || previewBusyRef.current) return;
 
     setIsSavingPreview(true);
 
@@ -995,10 +982,14 @@ function CameraScreen() {
         rotation: capturedRotation,
       });
 
+      previewRequestRef.current += 1;
+      invertPhotoCacheRef.current.clear();
       setSavedPhoto(selectedPhoto);
       setSavedImageMode('original');
       setBlackAndWhitePhoto(null);
       setMagicColorPhoto(null);
+      setInvertPhoto(null);
+      setComparisonMode(null);
       // Keep the source capture and edit snapshot for Back to review. Each
       // preview is rendered from that source rather than from a previous crop.
       setIsCameraReady(false);
@@ -1143,68 +1134,63 @@ function CameraScreen() {
               <ThemedText type="default" style={styles.savedImageTitle}>
                 Preview
               </ThemedText>
-              <View style={styles.savedImageHeaderSpacer} />
+              <Pressable
+                accessibilityLabel={comparisonMode ? 'Show filtered image' : 'Compare with original'}
+                accessibilityRole="button"
+                accessibilityState={{ selected: Boolean(comparisonMode) }}
+                disabled={savedImageMode === 'original' || isEnhancing || isSavingPreview}
+                onPress={() => setComparisonMode((current) => current === 'toggle' ? null : 'toggle')}
+                style={({ pressed }) => [
+                  styles.savedImageBackButton, pressed && styles.pressed,
+                  (savedImageMode === 'original' || isEnhancing || isSavingPreview) && styles.disabled,
+                ]}>
+                <SymbolView
+                  name={{ ios: 'square.on.square', android: 'compare', web: 'compare' }}
+                  size={23}
+                  tintColor={PREVIEW_TEXT}
+                />
+              </Pressable>
             </View>
 
-            <View style={styles.savedImageFrame}>
+            <Pressable
+              accessibilityLabel="Preview image"
+              accessibilityHint="Hold to compare with the original crop. Release to return to the filter."
+              disabled={savedImageMode === 'original' || isEnhancing || isSavingPreview}
+              delayLongPress={180}
+              onLongPress={() => setComparisonMode('hold')}
+              onPressOut={() => setComparisonMode((current) => current === 'hold' ? null : current)}
+              style={styles.savedImageFrame}>
               <Image
                 contentFit="contain"
-                source={{ uri: displayedSavedPhoto?.uri ?? savedPhoto.uri }}
+                source={{ uri: comparisonPhoto?.uri ?? savedPhoto.uri }}
+                recyclingKey={comparisonPhoto?.uri ?? savedPhoto.uri}
+                transition={0}
                 style={styles.savedImage}
               />
+              {comparisonMode ? (
+                <View pointerEvents="none" style={styles.comparisonBadge}>
+                  <ThemedText type="smallBold" style={styles.comparisonBadgeText}>Original</ThemedText>
+                </View>
+              ) : null}
               {isEnhancing && (
                 <View style={styles.savedImageLoadingOverlay}>
                   <ActivityIndicator color={TEAL_ACCENT} />
                 </View>
               )}
-            </View>
-
-            <View
-              style={styles.savedImageToggleRow}
-              onLayout={({ nativeEvent }) => {
-                setSavedImageToggleRowWidth(nativeEvent.layout.width);
-              }}>
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.savedImageLiquid,
-                  {
-                    width: savedImageToggleItemWidth,
-                    transform: [
-                      { translateX: savedImageLiquidTranslateX },
-                      { scaleX: savedImageLiquidScale },
-                    ],
-                  },
-                ]}
-              />
-              {SAVED_IMAGE_OPTIONS.map((option) => {
-                const isActive = savedImageMode === option.value;
-
-                return (
-                  <Pressable
-                    key={option.value}
-                    accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
-                    accessibilityRole="button"
-                    disabled={isEnhancing || isSavingPreview}
-                    onPress={() => selectSavedImageMode(option.value)}
-                    style={({ pressed }) => [
-                      styles.savedImageToggleButton,
-                      pressed && styles.pressed,
-                    ]}>
-                    <ThemedText
-                      type="default"
-                      allowFontScaling={false}
-                      numberOfLines={1}
-                      style={[
-                        styles.savedImageToggleText,
-                        isActive && styles.savedImageToggleTextActive,
-                      ]}>
-                      {option.label}
-                    </ThemedText>
-                  </Pressable>
-                );
-              })}
-            </View>
+            </Pressable>
+            <ThemedText style={styles.comparisonHint}>
+              {savedImageMode === 'original' ? 'Choose a filter below'
+                : comparisonMode === 'hold' ? 'Original · Release to return'
+                  : comparisonMode === 'toggle' ? 'Original · Tap Compare to return'
+                    : 'Hold image to compare with original'}
+            </ThemedText>
+            <PreviewFilters
+              selectedMode={savedImageMode}
+              onModeChange={selectSavedImageMode}
+              invertSettings={invertSettings}
+              onInvertSettingsChange={changeInvertSettings}
+              disabled={isEnhancing || isSavingPreview}
+            />
 
               <View
                 style={[
@@ -1969,6 +1955,15 @@ const styles = StyleSheet.create({
   savedImageHeaderSpacer: {
     width: 48,
   },
+  comparisonHint: {
+    minHeight: 18, marginTop: 6, textAlign: 'center', fontSize: 12,
+    lineHeight: 18, color: PREVIEW_MUTED,
+  },
+  comparisonBadge: {
+    position: 'absolute', top: 12, left: 12, borderRadius: 12,
+    paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#282E42',
+  },
+  comparisonBadgeText: { color: '#F5F5F5', fontSize: 12 },
   savedImageSafeArea: {
     flex: 1,
     alignItems: 'center',

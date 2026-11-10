@@ -1,3 +1,5 @@
+import { normalizeMediaTimestamp } from './snippet-date-sections';
+
 export const SNIPPETS_ALBUM_NAME = 'Snippets';
 
 export async function getSnippetsAlbum(mediaLibrary) {
@@ -46,12 +48,34 @@ export async function normalizeMediaLibraryImage(asset) {
 
   if (!uri) return null;
 
+  let createdAt = normalizeMediaTimestamp(info?.creationTime)
+    ?? normalizeMediaTimestamp(asset.creationTime);
+  let modifiedAt = normalizeMediaTimestamp(info?.modificationTime)
+    ?? normalizeMediaTimestamp(asset.modificationTime);
+
+  if (createdAt === null && typeof asset.getCreationTime === 'function') {
+    try {
+      createdAt = normalizeMediaTimestamp(await asset.getCreationTime());
+    } catch {
+      // Missing date metadata must not prevent a saved image from appearing.
+    }
+  }
+  if (createdAt === null && modifiedAt === null && typeof asset.getModificationTime === 'function') {
+    try {
+      modifiedAt = normalizeMediaTimestamp(await asset.getModificationTime());
+    } catch {
+      // Undated images appear in their own section instead of under Today.
+    }
+  }
+
   return {
     id: info?.id ?? asset.id ?? uri,
     uri,
     width: info?.width ?? asset.width ?? 1,
     height: info?.height ?? asset.height ?? 1,
     fileName: info?.filename ?? asset.filename ?? asset.fileName ?? null,
+    createdAt,
+    modifiedAt,
   };
 }
 
@@ -104,3 +128,4 @@ export async function saveToSnippetsAlbum(mediaLibrary, uri) {
 
   return mediaLibrary.Asset.create(uri, album);
 }
+

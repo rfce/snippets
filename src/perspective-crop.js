@@ -1,5 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
+import { getInvertPalette } from '@/invert-settings';
+
 // Enhancement exports keep their existing JPEG settings. Crop/rotation
 // snapshots are lossless so an extra render does not discard document detail.
 const MAX_OUTPUT_EDGE = 4096;
@@ -259,6 +261,150 @@ export async function renderAdaptiveThresholdAsync({
       await GLView.destroyContextAsync(gl);
     } catch (cleanupError) {
       console.warn('[perspective-crop] Adaptive threshold cleanup failed', cleanupError);
+    }
+  }
+}
+
+
+export async function renderInvertAsync({
+  uri,
+  sourceWidth,
+  sourceHeight,
+  settings,
+}) {
+  if (!uri) {
+    throw new Error('A source image is required for Invert enhancement.');
+  }
+
+  const palette = getInvertPalette(settings);
+  const width = sourceWidth;
+  const height = sourceHeight;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error('Valid image dimensions are required for Invert enhancement.');
+  }
+  const outputSize = getScaledOutputSize(width, height);
+  const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
+  const analysisWidth = Math.max(1, Math.round(width * analysisScale));
+  const analysisHeight = Math.max(1, Math.round(height * analysisScale));
+  const GLView = getGLView();
+  const gl = await GLView.createContextAsync();
+  let sourceTexture;
+  let paperTexture;
+  let outputTexture;
+  let framebuffer;
+  let analysisProgram;
+  let program;
+  let positionBuffer;
+
+  try {
+    sourceTexture = createSourceTexture(gl, uri);
+    outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
+    framebuffer = createFramebuffer(gl, outputTexture);
+    analysisProgram = createProgram(gl, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.viewport(0, 0, analysisWidth, analysisHeight);
+    gl.useProgram(analysisProgram);
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW
+    );
+
+    const positionLocation = gl.getAttribLocation(analysisProgram, 'aPosition');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.uniform1i(gl.getUniformLocation(analysisProgram, 'uTexture'), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Read only a small analysis image. Paper estimation and interpolation
+    // happen once per image, rather than independently inside every ink pixel.
+    const analysisPixels = new Uint8Array(analysisWidth * analysisHeight * 4);
+    gl.readPixels(0, 0, analysisWidth, analysisHeight, gl.RGBA, gl.UNSIGNED_BYTE, analysisPixels);
+    checkGlError(gl, 'analysing the document background');
+    const paper = estimateBlackAndWhitePaper(analysisPixels, analysisWidth, analysisHeight);
+
+    paperTexture = createOutputTexture(gl, paper.width, paper.height);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, paper.width, paper.height, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, paper.pixels
+    );
+    gl.bindTexture(gl.TEXTURE_2D, outputTexture);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, outputSize.width, outputSize.height, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, null
+    );
+    checkGlError(gl, 'preparing the document paper map');
+
+    program = createProgram(gl, VERTEX_SHADER, INVERT_FRAGMENT_SHADER);
+    gl.useProgram(program);
+    gl.viewport(0, 0, outputSize.width, outputSize.height);
+    const inkPositionLocation = gl.getAttribLocation(program, 'aPosition');
+    gl.enableVertexAttribArray(inkPositionLocation);
+    gl.vertexAttribPointer(inkPositionLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, paperTexture);
+    gl.uniform1i(gl.getUniformLocation(program, 'uPaperTexture'), 1);
+    gl.uniform2f(gl.getUniformLocation(program, 'uPaperTexelSize'), 1 / paper.width, 1 / paper.height);
+    gl.uniform2f(
+      gl.getUniformLocation(program, 'uTexelSize'),
+      1 / outputSize.width,
+      1 / outputSize.height
+    );
+    gl.uniform1f(
+      gl.getUniformLocation(program, 'uBackgroundIsDark'),
+      paper.backgroundIsDark ? 1 : 0
+    );
+    gl.uniform3f(gl.getUniformLocation(program, 'uBackgroundColor'), ...palette.background);
+    gl.uniform3f(gl.getUniformLocation(program, 'uInkColor'), ...palette.ink);
+    gl.uniform1f(gl.getUniformLocation(program, 'uInkGamma'), palette.gamma);
+    gl.uniform1f(gl.getUniformLocation(program, 'uPreserveAccents'), palette.preserveAccents ? 1 : 0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.finish?.();
+    gl.flush();
+    gl.flushEXP?.();
+    checkGlError(gl, 'rendering Invert');
+
+    const snapshot = await GLView.takeSnapshotAsync(gl, {
+      format: 'png',
+      compress: 1,
+      flip: false,
+      framebuffer,
+      rect: { x: 0, y: 0, width: outputSize.width, height: outputSize.height },
+    });
+    const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
+
+    if (!snapshotUri || typeof snapshotUri !== 'string') {
+      throw new Error('Invert enhancement completed without producing an image file.');
+    }
+
+    return {
+      uri: snapshotUri,
+      width: outputSize.width,
+      height: outputSize.height,
+      temporary: true,
+    };
+  } finally {
+    try {
+      if (positionBuffer) gl.deleteBuffer(positionBuffer);
+      if (framebuffer) gl.deleteFramebuffer(framebuffer);
+      if (outputTexture) gl.deleteTexture(outputTexture);
+      if (paperTexture) gl.deleteTexture(paperTexture);
+      if (sourceTexture) gl.deleteTexture(sourceTexture);
+      if (program) gl.deleteProgram(program);
+      if (analysisProgram) gl.deleteProgram(analysisProgram);
+      await GLView.destroyContextAsync(gl);
+    } catch (cleanupError) {
+      console.warn('[perspective-crop] Invert cleanup failed', cleanupError);
     }
   }
 }
@@ -1149,7 +1295,8 @@ const BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER = `
   }
 `;
 
-const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
+// Shared detection keeps the B&W and Invert foreground masks identical.
+const DOCUMENT_INK_SHADER_HELPERS = `
   precision highp float;
 
   uniform sampler2D uTexture;
@@ -1227,7 +1374,9 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     return inkEvidence(uv, max(background.r, 0.08), background.b);
   }
 
-  void main() {
+`;
+
+const DOCUMENT_INK_SHADER_MAIN = `  void main() {
     float observed = luminance(texture2D(uTexture, vOutputUv).rgb);
     observed = mix(observed, 1.0 - observed, uBackgroundIsDark);
     vec3 background = paperReference(vOutputUv, observed);
@@ -1267,8 +1416,49 @@ const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = `
     // No dilation or hole filling: counters, punctuation, and barcode gaps
     // remain faithful to the source. Dark isolated marks still qualify.
     float inkMask = coverage * max(foregroundInk, foregroundEdge);
-    float inkColor = 0.3019608; // Preserve the existing #4d4d4d export style.
+`;
+
+const ADAPTIVE_THRESHOLD_FRAGMENT_SHADER = DOCUMENT_INK_SHADER_HELPERS +
+  DOCUMENT_INK_SHADER_MAIN + `    float inkColor = 0.3019608; // Preserve the existing #4d4d4d export style.
     gl_FragColor = vec4(vec3(mix(1.0, inkColor, inkMask)), 1.0);
+  }
+`;
+
+const INVERT_FRAGMENT_SHADER = DOCUMENT_INK_SHADER_HELPERS + `
+  uniform vec3 uBackgroundColor;
+  uniform vec3 uInkColor;
+  uniform float uInkGamma;
+  uniform float uPreserveAccents;
+
+  vec3 accentColor(vec3 color) {
+    float maximum = max(color.r, max(color.g, color.b));
+    float minimum = min(color.r, min(color.g, color.b));
+    float chroma = max(maximum - minimum, 0.0001);
+    float hue;
+    if (maximum == color.r) hue = mod((color.g - color.b) / chroma, 6.0);
+    else if (maximum == color.g) hue = (color.b - color.r) / chroma + 2.0;
+    else hue = (color.r - color.g) / chroma + 4.0;
+    hue = fract(hue / 6.0 + 1.0);
+    if (hue < 0.06 || hue >= 0.94) return vec3(255.0, 170.0, 166.0) / 255.0;
+    if (hue < 0.18) return vec3(255.0, 213.0, 138.0) / 255.0;
+    if (hue < 0.50) return vec3(166.0, 237.0, 206.0) / 255.0;
+    if (hue < 0.72) return vec3(141.0, 232.0, 245.0) / 255.0;
+    return vec3(216.0, 184.0, 255.0) / 255.0;
+  }
+
+` + DOCUMENT_INK_SHADER_MAIN + `    // Change only foreground coverage and palette; ink detection above is shared
+    // with Black & White. Zero-coverage paper remains exactly the chosen navy.
+    float inkCoverage = pow(clamp(inkMask, 0.0, 1.0), uInkGamma);
+    vec3 original = texture2D(uTexture, vOutputUv).rgb;
+    float maximum = max(original.r, max(original.g, original.b));
+    float chroma = maximum - min(original.r, min(original.g, original.b));
+    float saturation = chroma / max(maximum, 0.001);
+    // Neutral paper plus confident foreground prevents tinted paper and shadows
+    // from acquiring accent colors. Black writing keeps the selected ink color.
+    float accentConfidence = smoothstep(0.10, 0.30, chroma) *
+      smoothstep(0.22, 0.55, saturation) * smoothstep(0.45, 0.80, background.b);
+    vec3 textColor = mix(uInkColor, accentColor(original), uPreserveAccents * accentConfidence);
+    gl_FragColor = vec4(mix(uBackgroundColor, textColor, inkCoverage), 1.0);
   }
 `;
 

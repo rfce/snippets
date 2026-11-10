@@ -2,16 +2,17 @@ import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { SymbolView } from 'expo-symbols';
-import { memo, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
+  AppState,
   BackHandler,
-  FlatList,
   PanResponder,
   Platform,
   Pressable,
+  SectionList,
   StyleSheet,
   View,
 } from 'react-native';
@@ -28,6 +29,9 @@ import {
   normalizeMediaLibraryImage,
 } from '@/snippets-library';
 
+import { createSnippetDateSections, sortSnippetsNewestFirst } from '@/snippet-date-sections';
+
+const GALLERY_COLUMNS = 3;
 const GALLERY_PAGE_SIZE = 36;
 const mediaLibraryModule = getMediaLibraryModule();
 const useMediaPermissions = mediaLibraryModule?.usePermissions ?? (() => [null, null]);
@@ -47,6 +51,7 @@ export default function ExploreScreen() {
   const { selectedImageIds, setSelectedImageIds } = useContext(SelectionContext);
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
+  const paginationOffsetRef = useRef(0);
   const hasMoreRef = useRef(true);
   const permissionRef = useRef(null);
   const mediaPermissionRef = useRef(null);
@@ -57,6 +62,11 @@ export default function ExploreScreen() {
     granularPermissions: ['photo'],
   });
   const [savedImages, setSavedImages] = useState([]);
+  const [calendarNow, setCalendarNow] = useState(() => Date.now());
+  const dateSections = useMemo(
+    () => createSnippetDateSections(savedImages, { now: calendarNow, columns: GALLERY_COLUMNS }),
+    [savedImages, calendarNow]
+  );
   const [hasMoreImages, setHasMoreImages] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -79,6 +89,32 @@ export default function ExploreScreen() {
     openedImageRef.current = openedImage;
   }, [openedImage]);
 
+  useEffect(() => {
+    let midnightTimer;
+
+    const refreshCalendar = () => {
+      clearTimeout(midnightTimer);
+      const now = new Date();
+      setCalendarNow(now.getTime());
+      const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      midnightTimer = setTimeout(refreshCalendar, Math.max(1000, nextMidnight.getTime() - now.getTime() + 100));
+    };
+
+    refreshCalendar();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        refreshCalendar();
+      } else {
+        clearTimeout(midnightTimer);
+      }
+    });
+
+    return () => {
+      clearTimeout(midnightTimer);
+      subscription.remove();
+    };
+  }, []);
+
   const closeOpenedImage = useCallback(() => {
     openedImageRef.current = null;
     setActionError(null);
@@ -86,7 +122,7 @@ export default function ExploreScreen() {
   }, []);
 
   const loadSavedImages = useCallback(async (reset = false) => {
-    if (loadingRef.current || (!reset && !hasMoreRef.current)) return;
+    if (loadingRef.current || (!reset && !hasMoreRef.current)) return false;
 
     loadingRef.current = true;
     setIsLoading(true);
@@ -114,29 +150,36 @@ export default function ExploreScreen() {
       const snippetsAlbum = await getSnippetsAlbum(mediaLibraryModule);
       if (!snippetsAlbum) {
         assetsRef.current = [];
+        paginationOffsetRef.current = 0;
         hasMoreRef.current = false;
         setSavedImages([]);
         setHasMoreImages(false);
         setLoadError(null);
-        return;
+        return true;
       }
 
-      const offset = reset ? 0 : assetsRef.current.length;
+      const offset = reset ? 0 : paginationOffsetRef.current;
       const assets = await querySavedImagePage(snippetsAlbum, offset, GALLERY_PAGE_SIZE);
       const normalizedAssets = await Promise.all(assets.map(normalizeMediaLibraryImage));
       const usableAssets = normalizedAssets.filter((asset) => asset?.uri);
-      const nextImages = reset
-        ? appendUniqueMediaLibraryImages([], usableAssets)
-        : appendUniqueMediaLibraryImages(assetsRef.current, usableAssets);
-      const nextHasMore = usableAssets.length === GALLERY_PAGE_SIZE;
+      const nextImages = sortSnippetsNewestFirst(appendUniqueMediaLibraryImages(
+        reset ? [] : assetsRef.current,
+        usableAssets
+      ));
+      // Advance by the native page size, including duplicates or unusable
+      // records, so pagination cannot skip or repeatedly fetch the same page.
+      const nextHasMore = assets.length === GALLERY_PAGE_SIZE;
 
       assetsRef.current = nextImages;
+      paginationOffsetRef.current = offset + assets.length;
       hasMoreRef.current = nextHasMore;
       setSavedImages(nextImages);
       setHasMoreImages(nextHasMore);
       setLoadError(null);
+      return true;
     } catch (error) {
       setLoadError(getErrorMessage(error));
+      return false;
     } finally {
       loadingRef.current = false;
       setIsLoading(false);
@@ -237,10 +280,10 @@ export default function ExploreScreen() {
   const selectAllImages = async () => {
     if (isLoading || isDeleting) return;
 
-    let attempts = 0;
-    while (hasMoreRef.current && attempts < 100) {
-      await loadSavedImages(false);
-      attempts += 1;
+    while (hasMoreRef.current) {
+      const previousOffset = paginationOffsetRef.current;
+      const loaded = await loadSavedImages(false);
+      if (!loaded || (hasMoreRef.current && paginationOffsetRef.current <= previousOffset)) return;
     }
 
     setSelectedImageIds(new Set(assetsRef.current.map(getAssetKey)));
@@ -287,6 +330,7 @@ export default function ExploreScreen() {
       const deletedIds = new Set(images.map(getAssetKey));
       const remainingImages = assetsRef.current.filter((image) => !deletedIds.has(getAssetKey(image)));
       assetsRef.current = remainingImages;
+      paginationOffsetRef.current = Math.max(0, paginationOffsetRef.current - images.length);
       setSavedImages(remainingImages);
       clearSelection();
       setActionError(null);
@@ -374,15 +418,25 @@ export default function ExploreScreen() {
     }
   };
 
-  const renderSnippetItem = useCallback(
+  const renderSnippetRow = useCallback(
     ({ item }) => (
-      <SnippetTile
-        item={item}
-        isSelected={selectedImageIds.has(getAssetKey(item))}
-        isSelectionMode={isSelectionMode}
-        onLongPress={handleTileLongPress}
-        onPress={handleTilePress}
-      />
+      <View style={styles.galleryRow}>
+        {Array.from({ length: GALLERY_COLUMNS }, (_, column) => {
+          const image = item.images[column];
+          return image ? (
+            <SnippetTile
+              key={getAssetKey(image)}
+              item={image}
+              isSelected={selectedImageIds.has(getAssetKey(image))}
+              isSelectionMode={isSelectionMode}
+              onLongPress={handleTileLongPress}
+              onPress={handleTilePress}
+            />
+          ) : (
+            <View key={`empty-${column}`} style={styles.galleryPlaceholder} pointerEvents="none" />
+          );
+        })}
+      </View>
     ),
     [handleTileLongPress, handleTilePress, isSelectionMode, selectedImageIds]
   );
@@ -407,13 +461,13 @@ export default function ExploreScreen() {
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <FlatList
-          data={savedImages}
-          keyExtractor={(item) => item.id || item.uri}
-          numColumns={3}
+        <SectionList
+          sections={dateSections}
+          keyExtractor={(item) => item.key}
+          stickySectionHeadersEnabled={false}
           extraData={selectedImageIds}
-          initialNumToRender={12}
-          maxToRenderPerBatch={9}
+          initialNumToRender={6}
+          maxToRenderPerBatch={4}
           windowSize={5}
           updateCellsBatchingPeriod={50}
           removeClippedSubviews={Platform.OS === 'android'}
@@ -423,8 +477,14 @@ export default function ExploreScreen() {
             { paddingBottom: bottomInset },
             savedImages.length === 0 && styles.emptyListContent,
           ]}
-          columnWrapperStyle={styles.galleryRow}
-          renderItem={renderSnippetItem}
+          renderItem={renderSnippetRow}
+          renderSectionHeader={({ section }) => (
+            <View style={styles.dateSectionHeader}>
+              <ThemedText type="defaultSemiBold" style={styles.dateSectionTitle} accessibilityRole="header">
+                {section.title}
+              </ThemedText>
+            </View>
+          )}
           ListHeaderComponent={
             isSelectionMode ? (
               <SelectionHeader
@@ -1238,7 +1298,7 @@ async function querySavedImagePage(album, offset, limit) {
     .limit(limit)
     .offset(offset)
     .orderBy({
-      key: mediaLibraryModule.AssetField.MODIFICATION_TIME,
+      key: mediaLibraryModule.AssetField.CREATION_TIME ?? mediaLibraryModule.AssetField.MODIFICATION_TIME,
       ascending: false,
     })
     .exe();
@@ -1426,7 +1486,21 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 15,
   },
+  dateSectionHeader: {
+    paddingHorizontal: Spacing.one,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.two,
+  },
+  dateSectionTitle: {
+    fontSize: 18,
+    lineHeight: 24,
+  },
+  galleryPlaceholder: {
+    flex: 1,
+    aspectRatio: 1,
+  },
   galleryRow: {
+    flexDirection: 'row',
     justifyContent: 'flex-start',
     gap: Spacing.one,
     marginBottom: Spacing.one,
@@ -1449,7 +1523,7 @@ const styles = StyleSheet.create({
     shadowRadius: 5,
   },
   galleryTile: {
-    width: '32.4%',
+    flex: 1,
     aspectRatio: 1,
     overflow: 'hidden',
     borderRadius: Spacing.two,
@@ -1537,3 +1611,4 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 });
+
