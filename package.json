@@ -44,5 +44,20 @@
   "devDependencies": {
     "eslint": "^9.0.0",
     "eslint-config-expo": "~58.0.4"
+  },
+  "expo": {
+    "autolinking": {
+      "android": {
+        "buildFromSource": [
+          "expo-camera"
+        ]
+      },
+      "ios": {
+        "buildFromSource": [
+          "expo-camera"
+        ]
+      }
+    }
   }
 }
+

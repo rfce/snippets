@@ -17,6 +17,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CaptureReview } from '@/components/capture-review';
+import { FocusableCamera } from '@/components/focusable-camera';
 import { PreviewFilters } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -456,6 +457,8 @@ function CameraScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const cameraRef = useRef(null);
+  const focusControllerRef = useRef(null);
+  const captureInFlightRef = useRef(false);
   const cameraRequestStarted = useRef(false);
   const galleryLoadingRef = useRef(false);
   const recentImageLoadStartedRef = useRef(false);
@@ -495,6 +498,11 @@ function CameraScreen() {
   const previewRequestRef = useRef(0);
   const previewBusyRef = useRef(false);
   const previewMountedRef = useRef(true);
+
+  const handleCameraReadiness = useCallback((ready) => {
+    setIsCameraReady(ready);
+    if (ready) setCameraError(null);
+  }, []);
 
   const reportDiagnostic = useCallback((operation, error, context = {}) => {
     const diagnostic = createDiagnosticDetails(operation, error, context);
@@ -645,7 +653,10 @@ function CameraScreen() {
     useCallback(() => {
       setIsFocused(true);
 
-      return () => setIsFocused(false);
+      return () => {
+        setIsFocused(false);
+        setIsCameraReady(false);
+      };
     }, [])
   );
 
@@ -667,11 +678,15 @@ function CameraScreen() {
   }, [cameraPermission?.granted, loadRecentGalleryImage]);
 
   const capturePhoto = async () => {
-    if (!cameraRef.current || !isCameraReady || isCapturing) return;
+    if (!cameraRef.current || !isCameraReady || isCapturing || captureInFlightRef.current) return;
 
+    captureInFlightRef.current = true;
     setIsCapturing(true);
 
     try {
+      const focusResult = await focusControllerRef.current?.prepareCaptureAsync();
+      if (focusResult?.status === 'cancelled' || !cameraRef.current) return;
+
       const photo = await cameraRef.current.takePictureAsync({
         format: 'jpg',
         quality: 0.92,
@@ -695,6 +710,8 @@ function CameraScreen() {
         cameraReady: isCameraReady,
       });
     } finally {
+      captureInFlightRef.current = false;
+      focusControllerRef.current?.finishCapture?.();
       setIsCapturing(false);
     }
   };
@@ -1291,22 +1308,30 @@ function CameraScreen() {
   return (
     <View style={styles.container}>
       {isFocused && (
-        <CameraView
-          ref={cameraRef}
+        <FocusableCamera
+          ref={focusControllerRef}
+          CameraComponent={CameraView}
+          cameraRef={cameraRef}
+          disabled={isCapturing}
           enableTorch={flashMode === 'torch'}
-          facing="back"
           flash={flashMode === 'flash' ? 'on' : 'off'}
-          ratio={Platform.OS === 'android' ? '4:3' : undefined}
-          onCameraReady={() => setIsCameraReady(true)}
+          onReadyChange={handleCameraReadiness}
           onMountError={(event) => {
-            const message = event?.nativeEvent?.message ?? 'The camera preview could not start.';
+            const message = event?.nativeEvent?.message ?? event?.message ?? 'The camera preview could not start.';
             setCameraError(message);
             reportDiagnostic('Camera startup', event?.nativeEvent ?? new Error(message), {
               nativeEvent: event?.nativeEvent ?? null,
             });
           }}
-          style={styles.camera}
+          style={[styles.cameraStage, { top: insets.top + 88, bottom: insets.bottom + 174 }]}
         />
+      )}
+
+      {isFocused && (
+        <View pointerEvents="none" style={[styles.cameraHeading, { top: insets.top + 18 }]}>
+          <ThemedText style={styles.cameraBrand}>SNIPPETS</ThemedText>
+          <ThemedText style={styles.cameraHint}>Tap to focus</ThemedText>
+        </View>
       )}
 
       {isFocused && (
@@ -1638,7 +1663,7 @@ function VerboseErrorNotice({ diagnostic, onDismiss }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: '#080D14',
   },
   diagnosticScreen: {
     flex: 1,
@@ -1713,8 +1738,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     marginTop: Spacing.two,
   },
-  camera: {
-    flex: 1,
+  cameraStage: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+  },
+  cameraHeading: {
+    position: 'absolute',
+    alignSelf: 'center',
+    alignItems: 'center',
+    gap: 2,
+  },
+  cameraBrand: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+    letterSpacing: 3,
+    color: '#F5F7FA',
+  },
+  cameraHint: {
+    fontSize: 11,
+    lineHeight: 16,
+    letterSpacing: 0.4,
+    color: '#9AA9B8',
   },
   centeredContent: {
     flex: 1,
@@ -2287,7 +2333,9 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'transparent',
+    backgroundColor: '#17202B',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
     zIndex: 2,
   },
   cameraCloseButton: {
@@ -2298,7 +2346,9 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'transparent',
+    backgroundColor: '#17202B',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
     zIndex: 2,
   },
   captureControlsRow: {

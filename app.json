@@ -33,6 +33,7 @@
           "recordAudioAndroid": false
         }
       ],
+      "./plugins/withCameraFocus",
       "expo-media-library",
       [
         "expo-splash-screen",
@@ -60,3 +61,4 @@
     }
   }
 }
+
