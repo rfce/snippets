@@ -18,13 +18,18 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { CaptureReview } from '@/components/capture-review';
 import { FocusableCamera } from '@/components/focusable-camera';
-import { PreviewFilters } from '@/components/preview-filters';
+import { InvertAdjustments, PreviewFilters } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { getDefaultCorners, hasCustomCrop } from '@/crop-geometry';
-import { DEFAULT_INVERT_SETTINGS, getInvertSettingsKey, normalizeInvertSettings } from '@/invert-settings';
+import {
+  DEFAULT_INVERT_SETTINGS,
+  PREVIEW_FILTER_OPTIONS,
+  getInvertSettingsKey,
+  normalizeInvertSettings,
+} from '@/invert-settings';
 import {
   cleanupProcessedImagesAsync,
   renderMagicColorAsync,
@@ -161,22 +166,30 @@ function CameraModuleUnavailable() {
 function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedMode, setSelectedMode] = useState('original');
+  const [invertSettings, setInvertSettings] = useState(DEFAULT_INVERT_SETTINGS);
   const [processedPhotosByMode, setProcessedPhotosByMode] = useState({});
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
   const temporaryPhotosRef = useRef(new Map());
-  const batchImageOptions = [
-    { label: 'Original', value: 'original' },
-    { label: 'Black & White', value: 'blackAndWhite' },
-    { label: 'Magic Color', value: 'magicColor' },
-  ];
+  const processingQueueRef = useRef(Promise.resolve());
+  const renderKey = selectedMode === 'invert'
+    ? `invert:${getInvertSettingsKey(invertSettings)}`
+    : selectedMode;
+  const batchImageOptions = PREVIEW_FILTER_OPTIONS;
   const activePhotos = selectedMode === 'original'
     ? photos
-    : processedPhotosByMode[selectedMode] ?? photos;
+    : processedPhotosByMode[renderKey] ?? photos;
   const currentPhoto = activePhotos[currentIndex] ?? activePhotos[0];
   const selectedPhotos = selectedMode === 'original'
     ? photos
-    : processedPhotosByMode[selectedMode] ?? null;
+    : processedPhotosByMode[renderKey] ?? null;
+
+  const changeInvertSettings = useCallback((settings) => {
+    const normalized = normalizeInvertSettings(settings);
+    setInvertSettings((current) =>
+      getInvertSettingsKey(current) === getInvertSettingsKey(normalized) ? current : normalized
+    );
+  }, []);
 
   const trackTemporaryPhoto = useCallback((photo) => {
     if (photo?.temporary && photo.uri) {
@@ -199,22 +212,29 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
       return undefined;
     }
 
-    if (processedPhotosByMode[selectedMode]) {
+    if (processedPhotosByMode[renderKey]) {
       setIsProcessing(false);
       setProcessingProgress(photos.length);
       return undefined;
     }
 
     let cancelled = false;
-    const renderPhoto = selectedMode === 'blackAndWhite'
-      ? renderAdaptiveThresholdAsync
-      : renderMagicColorAsync;
+    const renderers = {
+      blackAndWhite: renderAdaptiveThresholdAsync,
+      magicColor: renderMagicColorAsync,
+      invert: renderInvertAsync,
+    };
+    const renderPhoto = renderers[selectedMode];
+    const enhancementLabel = PREVIEW_FILTER_OPTIONS.find((option) => option.value === selectedMode)?.label
+      ?? 'Image enhancement';
 
     setIsProcessing(true);
     setProcessingProgress(0);
 
     const processBatch = async () => {
+      if (cancelled) return;
       const processedPhotos = [];
+      let cached = false;
 
       try {
         for (let index = 0; index < photos.length; index += 1) {
@@ -225,19 +245,22 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
             uri: photo.uri,
             sourceWidth: photo.width,
             sourceHeight: photo.height,
+            ...(selectedMode === 'invert' ? { settings: invertSettings } : {}),
           });
+          if (cancelled) {
+            await cleanupProcessedImagesAsync([enhancedPhoto]);
+            return;
+          }
           trackTemporaryPhoto(enhancedPhoto);
           processedPhotos.push({ ...photo, ...enhancedPhoto });
-
-          if (!cancelled) {
-            setProcessingProgress(index + 1);
-          }
+          setProcessingProgress(index + 1);
         }
 
         if (!cancelled) {
+          cached = true;
           setProcessedPhotosByMode((current) => ({
             ...current,
-            [selectedMode]: processedPhotos,
+            [renderKey]: processedPhotos,
           }));
           setIsProcessing(false);
         }
@@ -245,19 +268,27 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
         if (!cancelled) {
           setIsProcessing(false);
           Alert.alert(
-            `${selectedMode === 'blackAndWhite' ? 'Black & white' : 'Magic Color'} failed`,
+            `${enhancementLabel} failed`,
             getErrorDetails(error).message
           );
+        }
+      } finally {
+        if (!cached) {
+          const unusedPhotos = processedPhotos.filter((photo) => temporaryPhotosRef.current.has(photo.uri));
+          unusedPhotos.forEach((photo) => temporaryPhotosRef.current.delete(photo.uri));
+          await cleanupProcessedImagesAsync(unusedPhotos);
         }
       }
     };
 
-    processBatch();
+    // Finish at most one in-flight image before applying the latest settings.
+    // Cancelled queued requests exit before allocating another GL context.
+    processingQueueRef.current = processingQueueRef.current.catch(() => {}).then(processBatch);
 
     return () => {
       cancelled = true;
     };
-  }, [photos, processedPhotosByMode, selectedMode, trackTemporaryPhoto]);
+  }, [photos, processedPhotosByMode, renderKey, selectedMode, invertSettings, trackTemporaryPhoto]);
 
   const moveToAdjacentPhoto = (direction) => {
     setCurrentIndex((index) => Math.max(0, Math.min(photos.length - 1, index + direction)));
@@ -380,9 +411,11 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
                 key={option.value}
                 accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
                 accessibilityRole="button"
+                disabled={isSaving}
                 onPress={() => setSelectedMode(option.value)}
                 style={({ pressed }) => [
                   styles.batchReviewToggle,
+                  isSaving && styles.disabled,
                   isActive && styles.batchReviewToggleActive,
                   pressed && styles.pressed,
                 ]}>
@@ -399,6 +432,13 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
             );
           })}
         </View>
+
+        <InvertAdjustments
+          visible={selectedMode === 'invert'}
+          invertSettings={invertSettings}
+          onInvertSettingsChange={changeInvertSettings}
+          disabled={isSaving}
+        />
 
         <View style={styles.batchReviewActions}>
           <Pressable
@@ -1894,7 +1934,7 @@ const styles = StyleSheet.create({
   },
   batchReviewToggle: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: Spacing.one,
@@ -1910,6 +1950,9 @@ const styles = StyleSheet.create({
   batchReviewToggleText: {
     color: REVIEW_TEXT,
     fontSize: 11,
+    lineHeight: 16,
+    textAlign: 'center',
+    flexShrink: 1,
   },
   batchReviewToggleTextActive: {
     color: REVIEW_BACKGROUND,

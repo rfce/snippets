@@ -10,7 +10,6 @@ export const PreviewFilters = memo(function PreviewFilters({
 }) {
   const scrollRef = useRef(null);
   const layoutsRef = useRef({});
-  const [showAdjustments, setShowAdjustments] = useState(false);
 
   const revealFilter = useCallback((mode) => {
     const layout = layoutsRef.current[mode];
@@ -23,10 +22,6 @@ export const PreviewFilters = memo(function PreviewFilters({
     layoutsRef.current[mode] = layout;
     if (mode === selectedMode) revealFilter(mode);
   }, [revealFilter, selectedMode]);
-
-  const changeSetting = (patch) => {
-    if (!disabled) onInvertSettingsChange({ ...invertSettings, ...patch });
-  };
 
   return (
     <View style={styles.container}>
@@ -56,60 +51,80 @@ export const PreviewFilters = memo(function PreviewFilters({
         </View>
       </ScrollView>
 
-      {selectedMode === 'invert' ? (
-        <View style={styles.invertPanel}>
-          <Pressable
-            accessibilityLabel="Adjust Invert"
-            accessibilityRole="button"
-            accessibilityState={{ expanded: showAdjustments }}
-            onPress={() => setShowAdjustments((value) => !value)}
-            style={({ pressed }) => [styles.adjustButton, pressed && styles.pressed]}>
-            <View>
-              <ThemedText type="smallBold" style={styles.panelTitle}>Adjust Invert</ThemedText>
-              <ThemedText style={styles.summary}>
-                {INVERT_CLARITY_OPTIONS.find((option) => option.value === invertSettings.inkClarity)?.label}
-                {' · '}{invertSettings.warmInk ? 'Warm ink' : 'White ink'}
-                {invertSettings.preserveAccents ? ' · Color accents' : ''}
-              </ThemedText>
-            </View>
-            <SymbolView
-              name={showAdjustments
-                ? { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' }
-                : { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }}
-              size={20}
-              tintColor="#64748B"
-            />
-          </Pressable>
-          {showAdjustments ? (
-            <View style={styles.adjustments}>
-              <ThemedText type="smallBold" style={styles.settingLabel}>Ink clarity</ThemedText>
-              <View accessibilityRole="tablist" style={styles.clarityRow}>
-                {INVERT_CLARITY_OPTIONS.map((option) => (
-                  <FilterPill
-                    key={option.value}
-                    label={option.label}
-                    value={option.value}
-                    selected={invertSettings.inkClarity === option.value}
-                    disabled={disabled}
-                    dark
-                    onPress={(inkClarity) => changeSetting({ inkClarity })}
-                  />
-                ))}
-              </View>
-              <SettingSwitch
-                label="Warm ink"
-                value={invertSettings.warmInk}
+      <InvertAdjustments
+        visible={selectedMode === 'invert'}
+        invertSettings={invertSettings}
+        onInvertSettingsChange={onInvertSettingsChange}
+        disabled={disabled}
+      />
+    </View>
+  );
+});
+
+
+export const InvertAdjustments = memo(function InvertAdjustments({
+  visible = true, invertSettings, onInvertSettingsChange, disabled,
+}) {
+  const [showAdjustments, setShowAdjustments] = useState(false);
+
+  const changeSetting = (patch) => {
+    if (!disabled) onInvertSettingsChange({ ...invertSettings, ...patch });
+  };
+
+  if (!visible) return null;
+
+  return (
+    <View style={styles.invertPanel}>
+      <Pressable
+        accessibilityLabel="Adjust Invert"
+        accessibilityRole="button"
+        accessibilityState={{ expanded: showAdjustments }}
+        onPress={() => setShowAdjustments((value) => !value)}
+        style={({ pressed }) => [styles.adjustButton, pressed && styles.pressed]}>
+        <View>
+          <ThemedText type="smallBold" style={styles.panelTitle}>Adjust Invert</ThemedText>
+          <ThemedText style={styles.summary}>
+            {INVERT_CLARITY_OPTIONS.find((option) => option.value === invertSettings.inkClarity)?.label}
+            {' · '}{invertSettings.warmInk ? 'Warm ink' : 'White ink'}
+            {invertSettings.preserveAccents ? ' · Color accents' : ''}
+          </ThemedText>
+        </View>
+        <SymbolView
+          name={showAdjustments
+            ? { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' }
+            : { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }}
+          size={20}
+          tintColor="#64748B"
+        />
+      </Pressable>
+      {showAdjustments ? (
+        <View style={styles.adjustments}>
+          <ThemedText type="smallBold" style={styles.settingLabel}>Ink clarity</ThemedText>
+          <View accessibilityRole="tablist" style={styles.clarityRow}>
+            {INVERT_CLARITY_OPTIONS.map((option) => (
+              <FilterPill
+                key={option.value}
+                label={option.label}
+                value={option.value}
+                selected={invertSettings.inkClarity === option.value}
                 disabled={disabled}
-                onValueChange={(warmInk) => changeSetting({ warmInk })}
+                dark
+                onPress={(inkClarity) => changeSetting({ inkClarity })}
               />
-              <SettingSwitch
-                label="Preserve color accents"
-                value={invertSettings.preserveAccents}
-                disabled={disabled}
-                onValueChange={(preserveAccents) => changeSetting({ preserveAccents })}
-              />
-            </View>
-          ) : null}
+            ))}
+          </View>
+          <SettingSwitch
+            label="Warm ink"
+            value={invertSettings.warmInk}
+            disabled={disabled}
+            onValueChange={(warmInk) => changeSetting({ warmInk })}
+          />
+          <SettingSwitch
+            label="Preserve color accents"
+            value={invertSettings.preserveAccents}
+            disabled={disabled}
+            onValueChange={(preserveAccents) => changeSetting({ preserveAccents })}
+          />
         </View>
       ) : null}
     </View>
