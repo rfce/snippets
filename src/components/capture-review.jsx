@@ -3,10 +3,11 @@ import { SymbolView } from 'expo-symbols';
 import {
   forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
 } from 'react';
-import { ActivityIndicator, Alert, PanResponder, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, PanResponder, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
+import { getCropMagnifierLayout, projectCropPointIntoMagnifier } from '@/crop-magnifier-geometry';
 import {
   CROP_EDGES, copyCorners, getClosestCropHandle, getCropLineStyle, getDefaultCorners, getEdgeMidpoint,
   getImageViewport, getOutsideShadeStyle, moveCropHandle, rotateCornersClockwise,
@@ -39,7 +40,7 @@ export const CaptureReview = memo(function CaptureReview({
         <CropEditor ref={editorRef} photo={photo} initialEdits={initialEdits} disabled={isProcessing} />
 
         <ThemedText style={styles.instruction}>
-          Drag the corners or edge handles to adjust your crop
+          Hold and drag a handle to magnify and fine-tune your crop
         </ThemedText>
         <View style={styles.tools}>
           <Pressable
@@ -116,6 +117,8 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
     corners: copyCorners(initialEdits?.corners ?? getDefaultCorners()),
   }));
   const [frame, setFrame] = useState({ width: 0, height: 0 });
+  const [activeHandle, setActiveHandle] = useState(null);
+  const activeHandleRef = useRef(null);
   const editsRef = useRef(edits);
   const pendingFrameRef = useRef(null);
   const dragStartCornersRef = useRef(null);
@@ -141,28 +144,39 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
   }, []);
 
   const beginDrag = useCallback((handle, touch, viewport) => {
+    if (disabled) return null;
     const corners = editsRef.current.corners;
     dragStartCornersRef.current = copyCorners(corners);
     // Enlarged targets can overlap on a small crop. Route the gesture to the
     // nearest visible handle, even if a neighboring target received the touch.
-    return touch ? getClosestCropHandle(corners, touch, viewport) : {
+    const selected = touch ? getClosestCropHandle(corners, touch, viewport) : {
       handle,
       position: CROP_EDGES[handle] ? getEdgeMidpoint(corners, handle) : corners[handle],
     };
-  }, []);
+    activeHandleRef.current = selected.handle;
+    setActiveHandle(selected.handle);
+    return selected;
+  }, [disabled]);
 
   const dragHandle = useCallback((handle, position, viewport) => {
-    const start = dragStartCornersRef.current ?? editsRef.current.corners;
+    if (disabled || activeHandleRef.current !== handle || !dragStartCornersRef.current) return;
+    const start = dragStartCornersRef.current;
     publishEdits({
       ...editsRef.current,
       corners: moveCropHandle(start, handle, position, viewport),
     });
-  }, [publishEdits]);
+  }, [disabled, publishEdits]);
 
   const endDrag = useCallback(() => {
     dragStartCornersRef.current = null;
+    activeHandleRef.current = null;
+    setActiveHandle(null);
     publishEdits(editsRef.current, true);
   }, [publishEdits]);
+
+  useEffect(() => {
+    if (disabled) endDrag();
+  }, [disabled, endDrag]);
 
   useImperativeHandle(ref, () => ({
     getEdits: () => ({
@@ -176,6 +190,8 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
         return;
       }
       dragStartCornersRef.current = null;
+      activeHandleRef.current = null;
+      setActiveHandle(null);
       publishEdits({
         rotation: (editsRef.current.rotation + 90) % 360,
         corners: rotateCornersClockwise(editsRef.current.corners),
@@ -184,6 +200,8 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
     reset: () => {
       if (disabled) return;
       dragStartCornersRef.current = null;
+      activeHandleRef.current = null;
+      setActiveHandle(null);
       publishEdits({ ...editsRef.current, corners: getDefaultCorners() }, true);
     },
   }), [disabled, publishEdits]);
@@ -201,8 +219,9 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
     <View
       style={styles.canvas}
       onLayout={({ nativeEvent: { layout } }) => {
-        setFrame((current) => current.width === layout.width && current.height === layout.height
-          ? current : { width: layout.width, height: layout.height });
+        if (frame.width === layout.width && frame.height === layout.height) return;
+        endDrag();
+        setFrame({ width: layout.width, height: layout.height });
       }}>
       {viewport.width > 0 && viewport.height > 0 ? (
         <>
@@ -236,20 +255,33 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
               onEnd={endDrag}
             />
           ))}
+          {activeHandle && !disabled ? (
+            <CropMagnifier
+              uri={photo.uri}
+              rotation={edits.rotation}
+              frame={frame}
+              viewport={viewport}
+              corners={edits.corners}
+              handles={handles}
+              activeHandle={activeHandle}
+            />
+          ) : null}
         </>
       ) : null}
     </View>
   );
 });
 
-const ReviewImage = memo(function ReviewImage({ uri, rotation, width, height, left, top }) {
+const ReviewImage = memo(function ReviewImage({ uri, rotation, width, height, left, top, onDisplay }) {
   const sideways = rotation % 180 !== 0;
   return (
     <View pointerEvents="none" style={[styles.imageViewport, { width, height, left, top }]}>
       <Image
         contentFit="contain"
+        cachePolicy="memory-disk"
         source={{ uri }}
         transition={0}
+        onDisplay={onDisplay}
         style={{
           position: 'absolute',
           width: sideways ? height : width,
@@ -260,6 +292,107 @@ const ReviewImage = memo(function ReviewImage({ uri, rotation, width, height, le
         }}
       />
     </View>
+  );
+});
+
+const CropMagnifier = memo(function CropMagnifier({
+  uri, rotation, frame, viewport, corners, handles, activeHandle,
+}) {
+  const [preferredSide, setPreferredSide] = useState(null);
+  const [imageReady, setImageReady] = useState(false);
+  const opacity = useRef(new Animated.Value(0)).current;
+  const mountedRef = useRef(true);
+  const handleImageDisplay = useCallback(() => {
+    if (mountedRef.current) setImageReady(true);
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!imageReady) return undefined;
+    const animation = Animated.timing(opacity, {
+      toValue: 1, duration: 180, useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [imageReady, opacity]);
+
+  const active = handles.find((handle) => handle.name === activeHandle);
+  const layout = getCropMagnifierLayout(frame, viewport, active?.position, preferredSide);
+  const nextSide = layout?.side ?? null;
+  useEffect(() => {
+    if (nextSide !== preferredSide) setPreferredSide(nextSide);
+  }, [nextSide, preferredSide]);
+  if (!layout) return null;
+  const center = layout.innerSize / 2;
+  const pointer = projectCropPointIntoMagnifier(active.position, layout);
+  const scaledViewport = { width: layout.source.width, height: layout.source.height };
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      accessible={false}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[
+        styles.magnifier,
+        !imageReady && styles.magnifierLoading,
+        {
+          opacity,
+          left: layout.left, top: layout.top,
+          width: layout.size, height: layout.size, borderRadius: layout.size / 2,
+        },
+      ]}>
+      <View style={[
+        styles.magnifierClip,
+        { width: layout.innerSize, height: layout.innerSize, borderRadius: center },
+      ]}>
+        <View style={[styles.magnifierSource, layout.source]}>
+          <ReviewImage
+            uri={uri}
+            rotation={rotation}
+            width={layout.source.width}
+            height={layout.source.height}
+            left={0}
+            top={0}
+            onDisplay={handleImageDisplay}
+          />
+          {Object.entries(CROP_EDGES).map(([name, [first, second]]) => {
+            const line = getCropLineStyle(corners[first], corners[second], scaledViewport);
+            return (
+              <View key={name} style={styles.magnifierLineGroup}>
+                <View style={[styles.cropLine, line, styles.magnifierLineHalo]} />
+                <View style={[styles.cropLine, line]} />
+              </View>
+            );
+          })}
+          {handles.filter((handle) => handle.name !== activeHandle).map((handle) => {
+            const size = handle.isEdge ? 8 : 10;
+            return (
+              <View key={handle.name} style={[
+                styles.magnifierHandle,
+                {
+                  left: handle.position.x * layout.source.width - size / 2,
+                  top: handle.position.y * layout.source.height - size / 2,
+                  width: size, height: size, borderRadius: size / 2,
+                },
+              ]} />
+            );
+          })}
+        </View>
+        <View style={[
+          styles.magnifierPointerHalo,
+          { left: pointer.x - 9, top: pointer.y - 9 },
+        ]}>
+          <View style={styles.magnifierPointerRing}>
+            <View style={styles.magnifierPointerDot} />
+          </View>
+        </View>
+      </View>
+    </Animated.View>
   );
 });
 
@@ -287,12 +420,14 @@ function DraggableHandle({ handle, position, viewport, isEdge, disabled, onStart
       onMoveShouldSetPanResponder: () => !inputsRef.current.disabled,
       onPanResponderGrant: (event) => {
         const inputs = inputsRef.current;
+        if (inputs.disabled) return;
         const { locationX, locationY } = event.nativeEvent;
         const touch = {
           x: inputs.position.x + ((locationX ?? TARGET_SIZE / 2) - TARGET_SIZE / 2) / inputs.viewport.width,
           y: inputs.position.y + ((locationY ?? TARGET_SIZE / 2) - TARGET_SIZE / 2) / inputs.viewport.height,
         };
         const selected = inputs.onStart(inputs.handle, touch, inputs.viewport);
+        if (!selected) return;
         // Read the current viewport at the start of each gesture, including
         // after rotation. Never retain the dimensions from the first render.
         gestureRef.current = {
@@ -367,6 +502,30 @@ const styles = StyleSheet.create({
     borderWidth: 3, borderColor: '#FFFFFF' },
   edgeHandle: { width: 18, height: 18, borderRadius: 9, backgroundColor: '#FFFFFF',
     borderWidth: 2, borderColor: ACCENT },
+  magnifier: {
+    position: 'absolute', zIndex: 10, elevation: 12, padding: 2,
+    borderWidth: 2, borderColor: '#FFFFFF', backgroundColor: ACCENT,
+    shadowColor: '#0F172A', shadowOpacity: 0.24, shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  magnifierClip: { overflow: 'hidden', backgroundColor: '#E8EDF3' },
+  magnifierLoading: { elevation: 0, shadowOpacity: 0, borderColor: 'transparent', backgroundColor: 'transparent' },
+  magnifierSource: { position: 'absolute' },
+  magnifierLineGroup: { ...StyleSheet.absoluteFillObject },
+  magnifierLineHalo: { height: 4, marginTop: -1, backgroundColor: '#FFFFFF' },
+  magnifierHandle: {
+    position: 'absolute', backgroundColor: '#FFFFFF',
+    borderWidth: 1.5, borderColor: ACCENT,
+  },
+  magnifierPointerHalo: {
+    position: 'absolute', width: 18, height: 18, borderRadius: 9,
+    borderWidth: 2, borderColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center',
+  },
+  magnifierPointerRing: {
+    width: 14, height: 14, borderRadius: 7, borderWidth: 1.5,
+    borderColor: ACCENT, alignItems: 'center', justifyContent: 'center',
+  },
+  magnifierPointerDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: ACCENT },
   instruction: { color: '#64748B', fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 4 },
   tools: { flexDirection: 'row', justifyContent: 'center', gap: 12, marginVertical: 10 },
   tool: { minHeight: 44, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center',
