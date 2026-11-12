@@ -2,13 +2,14 @@ import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { SymbolView } from 'expo-symbols';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
   AppState,
   BackHandler,
+  I18nManager,
   PanResponder,
   Platform,
   Pressable,
@@ -29,9 +30,11 @@ import {
 } from '@/snippets-library';
 
 import { createSnippetDateSections, sortSnippetsNewestFirst } from '@/snippet-date-sections';
+import { createGalleryDragSelection, getGalleryGesturePoint } from '@/snippet-drag-selection';
 
 const GALLERY_COLUMNS = 3;
 const GALLERY_PAGE_SIZE = 36;
+const GalleryDragContext = createContext(null);
 const mediaLibraryModule = getMediaLibraryModule();
 const useMediaPermissions = mediaLibraryModule?.usePermissions ?? (() => [null, null]);
 
@@ -57,10 +60,15 @@ export default function ExploreScreen() {
   const mediaPermissionRef = useRef(null);
   const suppressedPressKeyRef = useRef(null);
   const openedImageRef = useRef(null);
+  const galleryListRef = useRef(null);
+  const galleryViewportRef = useRef(null);
+  const gestureCallbacksRef = useRef({ disabled: false, onTap: null });
   const [mediaPermission, requestMediaPermission] = useMediaPermissions({
     writeOnly: false,
     granularPermissions: ['photo'],
   });
+  const requestMediaPermissionRef = useRef(requestMediaPermission);
+  requestMediaPermissionRef.current = requestMediaPermission;
   const [savedImages, setSavedImages] = useState([]);
   const [calendarNow, setCalendarNow] = useState(() => Date.now());
   const dateSections = useMemo(
@@ -73,6 +81,50 @@ export default function ExploreScreen() {
   const [actionError, setActionError] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [openedImage, setOpenedImage] = useState(null);
+  const [isDragSelecting, setIsDragSelecting] = useState(false);
+  const [dragSelection] = useState(() => createGalleryDragSelection({
+    getImages: () => assetsRef.current,
+    getSelection: selectionStore.getSnapshot,
+    setSelection: setSelectedImageIds,
+    columns: GALLERY_COLUMNS,
+    gap: Spacing.one,
+    rtl: I18nManager.isRTL,
+    isEnabled: () => !gestureCallbacksRef.current.disabled,
+    onActiveChange: setIsDragSelecting,
+    onTap: (imageId) => gestureCallbacksRef.current.onTap?.(imageId),
+    onEnd: ({ imageId, wasDragging }) => {
+      suppressedPressKeyRef.current = wasDragging ? imageId : null;
+    },
+    scrollTo: (y) => galleryListRef.current?.getScrollResponder()?.scrollTo({ y, animated: false }),
+  }));
+  gestureCallbacksRef.current.disabled = isDeleting;
+
+  const measureGalleryViewport = useCallback(() => {
+    galleryViewportRef.current?.measureInWindow((x, y, width, height) => {
+      dragSelection.setViewport({ x, y, width, height, bottomInset: 96 });
+    });
+  }, [dragSelection]);
+
+  useEffect(() => {
+    measureGalleryViewport();
+    return () => dragSelection.dispose();
+  }, [dragSelection, measureGalleryViewport]);
+
+  const gallerySwipeResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponderCapture: (event) =>
+      dragSelection.prepare(getGalleryGesturePoint(event)),
+    onMoveShouldSetPanResponderCapture: (event) =>
+      dragSelection.canClaimMove(getGalleryGesturePoint(event)),
+    onPanResponderGrant: (event) => dragSelection.begin(getGalleryGesturePoint(event)),
+    onPanResponderStart: (event) => {
+      if (getGalleryGesturePoint(event)?.touchCount !== 1) dragSelection.cancel();
+    },
+    onPanResponderMove: (event) => dragSelection.move(getGalleryGesturePoint(event)),
+    onPanResponderRelease: (event) => dragSelection.finish(getGalleryGesturePoint(event)),
+    onPanResponderTerminate: () => dragSelection.cancel(),
+    onPanResponderTerminationRequest: () => !dragSelection.isActive(),
+    onShouldBlockNativeResponder: () => dragSelection.isActive(),
+  }), [dragSelection]);
 
   useEffect(() => {
     mediaPermissionRef.current = mediaPermission;
@@ -98,6 +150,7 @@ export default function ExploreScreen() {
       if (state === 'active') {
         refreshCalendar();
       } else {
+        dragSelection.cancel();
         clearTimeout(midnightTimer);
       }
     });
@@ -106,7 +159,7 @@ export default function ExploreScreen() {
       clearTimeout(midnightTimer);
       subscription.remove();
     };
-  }, []);
+  }, [dragSelection]);
 
   const closeOpenedImage = useCallback(() => {
     openedImageRef.current = null;
@@ -116,6 +169,7 @@ export default function ExploreScreen() {
 
   const loadSavedImages = useCallback(async (reset = false) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return false;
+    if (reset) dragSelection.cancel();
 
     loadingRef.current = true;
     setIsLoading(true);
@@ -132,7 +186,7 @@ export default function ExploreScreen() {
 
       let permission = permissionRef.current ?? mediaPermissionRef.current;
       if (!permission?.granted) {
-        permission = await requestMediaPermission?.();
+        permission = await requestMediaPermissionRef.current?.();
         permissionRef.current = permission;
       }
 
@@ -177,16 +231,17 @@ export default function ExploreScreen() {
       loadingRef.current = false;
       setIsLoading(false);
     }
-  }, [requestMediaPermission]);
+  }, [dragSelection]);
 
   useFocusEffect(
     useCallback(() => {
       loadSavedImages(true);
 
       return () => {
+        dragSelection.cancel();
         suppressedPressKeyRef.current = null;
       };
-    }, [loadSavedImages])
+    }, [dragSelection, loadSavedImages])
   );
 
   useFocusEffect(
@@ -226,9 +281,10 @@ export default function ExploreScreen() {
   }, [setSelectedImageIds]);
 
   const clearSelection = useCallback(() => {
+    dragSelection.cancel();
     suppressedPressKeyRef.current = null;
     setSelectedImageIds(new Set());
-  }, [setSelectedImageIds]);
+  }, [dragSelection, setSelectedImageIds]);
 
   const openImage = useCallback((image) => {
     openedImageRef.current = image;
@@ -269,10 +325,18 @@ export default function ExploreScreen() {
 
     suppressedPressKeyRef.current = getAssetKey(image);
     startSelection(image);
-  }, [selectionStore, startSelection]);
+    dragSelection.armFromLongPress(getAssetKey(image));
+  }, [dragSelection, selectionStore, startSelection]);
+
+  gestureCallbacksRef.current.onTap = (imageId) => {
+    suppressedPressKeyRef.current = null;
+    const image = assetsRef.current.find((candidate) => getAssetKey(candidate) === imageId);
+    if (image) handleTilePress(image);
+  };
 
   const selectAllImages = useCallback(async () => {
     if (loadingRef.current || isDeleting) return;
+    dragSelection.cancel();
 
     const initialSelection = selectionStore.getSnapshot();
     while (hasMoreRef.current) {
@@ -286,7 +350,7 @@ export default function ExploreScreen() {
     if (selectionStore.getSnapshot() === initialSelection) {
       setSelectedImageIds(new Set(assetsRef.current.map(getAssetKey)));
     }
-  }, [isDeleting, loadSavedImages, selectionStore, setSelectedImageIds]);
+  }, [dragSelection, isDeleting, loadSavedImages, selectionStore, setSelectedImageIds]);
 
   const toggleSelectAll = useCallback(() => {
     const selected = selectionStore.getSnapshot();
@@ -307,6 +371,7 @@ export default function ExploreScreen() {
 
   const deleteImages = async (images) => {
     if (!images.length || isDeleting) return false;
+    dragSelection.cancel();
 
     setIsDeleting(true);
     setActionError(null);
@@ -458,69 +523,84 @@ export default function ExploreScreen() {
     );
   }
 
-  // Keep gallery geometry unchanged when selection opens or closes.
+  // Keep bottom padding stable while selection controls change.
   const bottomInset = safeAreaInsets.bottom + 112;
 
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <SectionList
-          sections={dateSections}
-          keyExtractor={(item) => item.key}
-          stickySectionHeadersEnabled={false}
-          initialNumToRender={6}
-          maxToRenderPerBatch={4}
-          windowSize={5}
-          updateCellsBatchingPeriod={50}
-          removeClippedSubviews={Platform.OS === 'android'}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: bottomInset },
-            savedImages.length === 0 && styles.emptyListContent,
-          ]}
-          renderItem={renderSnippetRow}
-          renderSectionHeader={({ section }) => (
-            <View style={styles.dateSectionHeader}>
-              <ThemedText type="defaultSemiBold" style={styles.dateSectionTitle} accessibilityRole="header">
-                {section.title}
-              </ThemedText>
-            </View>
-          )}
-          ListHeaderComponent={
-            <GallerySelectionHeader
-              selectionStore={selectionStore}
-              images={savedImages}
-              hasMoreImages={hasMoreImages}
-              isLoading={isLoading}
-              onClose={clearSelection}
-              onToggleSelectAll={toggleSelectAll}
-              textColor={theme.text}
+        <View
+          ref={galleryViewportRef}
+          collapsable={false}
+          onLayout={measureGalleryViewport}
+          style={styles.galleryViewport}
+          {...gallerySwipeResponder.panHandlers}>
+          <GalleryDragContext.Provider value={dragSelection}>
+            <SectionList
+              ref={galleryListRef}
+              CellRendererComponent={GalleryCellRenderer}
+              scrollEnabled={!isDragSelecting}
+              scrollEventThrottle={16}
+              onScroll={(event) => dragSelection.setScrollOffset(event.nativeEvent.contentOffset.y)}
+              onContentSizeChange={(_, height) => dragSelection.setContentHeight(height)}
+              sections={dateSections}
+              keyExtractor={(item) => item.key}
+              stickySectionHeadersEnabled={false}
+              initialNumToRender={6}
+              maxToRenderPerBatch={4}
+              windowSize={5}
+              updateCellsBatchingPeriod={50}
+              removeClippedSubviews={Platform.OS === 'android'}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={[
+                styles.listContent,
+                { paddingBottom: bottomInset },
+                savedImages.length === 0 && styles.emptyListContent,
+              ]}
+              renderItem={renderSnippetRow}
+              renderSectionHeader={({ section }) => (
+                <View style={styles.dateSectionHeader}>
+                  <ThemedText type="defaultSemiBold" style={styles.dateSectionTitle} accessibilityRole="header">
+                    {section.title}
+                  </ThemedText>
+                </View>
+              )}
+              ListHeaderComponent={
+                <GallerySelectionHeader
+                  selectionStore={selectionStore}
+                  images={savedImages}
+                  hasMoreImages={hasMoreImages}
+                  isLoading={isLoading}
+                  onClose={clearSelection}
+                  onToggleSelectAll={toggleSelectAll}
+                  textColor={theme.text}
+                />
+              }
+              ListEmptyComponent={
+                <ExploreEmptyState
+                  isLoading={isLoading}
+                  error={loadError}
+                  onRetry={() => loadSavedImages(true)}
+                  textColor={theme.text}
+                />
+              }
+              ListFooterComponent={
+                savedImages.length > 0 ? (
+                  <GalleryFooter
+                    isLoading={isLoading}
+                    hasMore={hasMoreImages}
+                    error={loadError}
+                    onRetry={() => loadSavedImages(false)}
+                  />
+                ) : null
+              }
+              onEndReached={() => loadSavedImages(false)}
+              onEndReachedThreshold={0.6}
+              onRefresh={() => loadSavedImages(true)}
+              refreshing={isLoading && savedImages.length > 0}
             />
-          }
-          ListEmptyComponent={
-            <ExploreEmptyState
-              isLoading={isLoading}
-              error={loadError}
-              onRetry={() => loadSavedImages(true)}
-              textColor={theme.text}
-            />
-          }
-          ListFooterComponent={
-            savedImages.length > 0 ? (
-              <GalleryFooter
-                isLoading={isLoading}
-                hasMore={hasMoreImages}
-                error={loadError}
-                onRetry={() => loadSavedImages(false)}
-              />
-            ) : null
-          }
-          onEndReached={() => loadSavedImages(false)}
-          onEndReachedThreshold={0.6}
-          onRefresh={() => loadSavedImages(true)}
-          refreshing={isLoading && savedImages.length > 0}
-        />
+          </GalleryDragContext.Provider>
+        </View>
       </SafeAreaView>
       <GallerySelectionActions
         selectionStore={selectionStore}
@@ -535,6 +615,40 @@ export default function ExploreScreen() {
     </ThemedView>
   );
 }
+
+// Forward VirtualizedList's own layout/focus events as well as caching grid geometry.
+const GalleryCellRenderer = memo(function GalleryCellRenderer({
+  cellKey, item, style, onLayout, onFocusCapture, children,
+}) {
+  const dragSelection = useContext(GalleryDragContext);
+  const layoutRef = useRef(null);
+  const rowKey = item?.images ? cellKey : null;
+
+  useLayoutEffect(() => {
+    if (rowKey && layoutRef.current) {
+      dragSelection.setRowLayout(rowKey, layoutRef.current, item.images.map(getAssetKey));
+    }
+    return () => { if (rowKey) dragSelection.removeRow(rowKey); };
+  }, [dragSelection, item, rowKey]);
+
+  const handleLayout = useCallback((event) => {
+    onLayout?.(event);
+    layoutRef.current = event.nativeEvent.layout;
+    if (rowKey) {
+      dragSelection.setRowLayout(rowKey, layoutRef.current, item.images.map(getAssetKey));
+    }
+  }, [dragSelection, item, onLayout, rowKey]);
+
+  return (
+    <View
+      collapsable={false}
+      onLayout={handleLayout}
+      onFocusCapture={onFocusCapture}
+      style={style}>
+      {children}
+    </View>
+  );
+});
 
 // Only controls and tiles whose selected value changed subscribe to selection.
 // Gallery rows, image decoding, and the navigation root stay out of this update.
@@ -590,29 +704,25 @@ const GallerySelectionHeader = memo(function GallerySelectionHeader({
   const allSelected = images.length > 0 && !hasMoreImages &&
     selected.size === images.length && images.every((image) => selected.has(getAssetKey(image)));
 
+  if (isSelectionMode) {
+    return (
+      <SelectionHeader
+        selectedCount={selected.size}
+        allSelected={allSelected}
+        onClose={onClose}
+        onToggleSelectAll={onToggleSelectAll}
+        isLoading={isLoading}
+        textColor={textColor}
+      />
+    );
+  }
+
   return (
-    <View>
-      <View
-        accessibilityElementsHidden={isSelectionMode}
-        importantForAccessibility={isSelectionMode ? 'no-hide-descendants' : 'auto'}
-        style={[styles.header, isSelectionMode && styles.hiddenHeader]}>
-        <ThemedText type="title">Snippets</ThemedText>
-        <ThemedText themeColor="textSecondary" style={styles.subtitle}>
-          Your saved snippets
-        </ThemedText>
-      </View>
-      {isSelectionMode && (
-        <View style={styles.selectionHeaderOverlay}>
-          <SelectionHeader
-            selectedCount={selected.size}
-            allSelected={allSelected}
-            onClose={onClose}
-            onToggleSelectAll={onToggleSelectAll}
-            isLoading={isLoading}
-            textColor={textColor}
-          />
-        </View>
-      )}
+    <View style={styles.header}>
+      <ThemedText type="title">Snippets</ThemedText>
+      <ThemedText themeColor="textSecondary" style={styles.subtitle}>
+        Your saved snippets
+      </ThemedText>
     </View>
   );
 });
@@ -682,7 +792,7 @@ const SnippetTile = memo(function SnippetTile({
   return (
     <Pressable
       accessibilityLabel={item.fileName || 'Snippet'}
-      accessibilityHint="Hold to select. Tap to open, or toggle selection while selecting images."
+      accessibilityHint="Hold to select, then drag across images to extend the selection. Drag back to shrink it. Tap to toggle selection."
       accessibilityRole="button"
       accessibilityState={{ selected: isSelected }}
       delayLongPress={200}
@@ -1461,6 +1571,9 @@ const styles = StyleSheet.create({
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
   },
+  galleryViewport: {
+    flex: 1,
+  },
   listContent: {
     paddingHorizontal: Spacing.three,
   },
@@ -1472,13 +1585,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.one,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
-  },
-  hiddenHeader: {
-    opacity: 0,
-  },
-  selectionHeaderOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
   },
   selectionTick: {
     width: 6,
@@ -1730,5 +1836,4 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 });
-
 
