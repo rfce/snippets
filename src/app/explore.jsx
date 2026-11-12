@@ -58,11 +58,10 @@ export default function ExploreScreen() {
   const hasMoreRef = useRef(true);
   const permissionRef = useRef(null);
   const mediaPermissionRef = useRef(null);
-  const suppressedPressKeyRef = useRef(null);
   const openedImageRef = useRef(null);
   const galleryListRef = useRef(null);
   const galleryViewportRef = useRef(null);
-  const gestureCallbacksRef = useRef({ disabled: false, onTap: null });
+  const gestureCallbacksRef = useRef({ disabled: false });
   const [mediaPermission, requestMediaPermission] = useMediaPermissions({
     writeOnly: false,
     granularPermissions: ['photo'],
@@ -91,10 +90,6 @@ export default function ExploreScreen() {
     rtl: I18nManager.isRTL,
     isEnabled: () => !gestureCallbacksRef.current.disabled,
     onActiveChange: setIsDragSelecting,
-    onTap: (imageId) => gestureCallbacksRef.current.onTap?.(imageId),
-    onEnd: ({ imageId, wasDragging }) => {
-      suppressedPressKeyRef.current = wasDragging ? imageId : null;
-    },
     scrollTo: (y) => galleryListRef.current?.getScrollResponder()?.scrollTo({ y, animated: false }),
   }));
   gestureCallbacksRef.current.disabled = isDeleting;
@@ -121,6 +116,7 @@ export default function ExploreScreen() {
     },
     onPanResponderMove: (event) => dragSelection.move(getGalleryGesturePoint(event)),
     onPanResponderRelease: (event) => dragSelection.finish(getGalleryGesturePoint(event)),
+    onPanResponderReject: () => dragSelection.cancel(),
     onPanResponderTerminate: () => dragSelection.cancel(),
     onPanResponderTerminationRequest: () => !dragSelection.isActive(),
     onShouldBlockNativeResponder: () => dragSelection.isActive(),
@@ -239,7 +235,6 @@ export default function ExploreScreen() {
 
       return () => {
         dragSelection.cancel();
-        suppressedPressKeyRef.current = null;
       };
     }, [dragSelection, loadSavedImages])
   );
@@ -261,10 +256,6 @@ export default function ExploreScreen() {
     }, [closeOpenedImage])
   );
 
-  const startSelection = useCallback((image) => {
-    setSelectedImageIds(new Set([getAssetKey(image)]));
-  }, [setSelectedImageIds]);
-
   const toggleSelection = useCallback((image) => {
     setSelectedImageIds((current) => {
       const next = new Set(current);
@@ -282,7 +273,6 @@ export default function ExploreScreen() {
 
   const clearSelection = useCallback(() => {
     dragSelection.cancel();
-    suppressedPressKeyRef.current = null;
     setSelectedImageIds(new Set());
   }, [dragSelection, setSelectedImageIds]);
 
@@ -301,18 +291,6 @@ export default function ExploreScreen() {
   }, []);
 
   const handleTilePress = useCallback((image) => {
-    const imageKey = getAssetKey(image);
-
-    // React Native can dispatch an onPress after onLongPress for the same
-    // tile. Ignore only that synthetic press; a tap on any other tile must
-    // continue through to selection immediately.
-    if (suppressedPressKeyRef.current === imageKey) {
-      suppressedPressKeyRef.current = null;
-      return;
-    }
-
-    suppressedPressKeyRef.current = null;
-
     if (selectionStore.getSnapshot().size > 0) {
       toggleSelection(image);
     } else {
@@ -320,19 +298,17 @@ export default function ExploreScreen() {
     }
   }, [openImage, selectionStore, toggleSelection]);
 
-  const handleTileLongPress = useCallback((image) => {
-    if (selectionStore.getSnapshot().size > 0) return;
-
-    suppressedPressKeyRef.current = getAssetKey(image);
-    startSelection(image);
-    dragSelection.armFromLongPress(getAssetKey(image));
-  }, [dragSelection, selectionStore, startSelection]);
-
-  gestureCallbacksRef.current.onTap = (imageId) => {
-    suppressedPressKeyRef.current = null;
-    const image = assetsRef.current.find((candidate) => getAssetKey(candidate) === imageId);
-    if (image) handleTilePress(image);
-  };
+  const handleTileLongPress = useCallback((image, event) => {
+    if (gestureCallbacksRef.current.disabled) return;
+    const imageId = getAssetKey(image);
+    const armed = dragSelection.armFromLongPress(imageId);
+    // Accessibility can select a tile without a touch-driven drag.
+    if (!armed && getGalleryGesturePoint(event)) return;
+    const current = selectionStore.getSnapshot();
+    if (!current.has(imageId)) {
+      setSelectedImageIds(new Set([...current, imageId]));
+    }
+  }, [dragSelection, selectionStore, setSelectedImageIds]);
 
   const selectAllImages = useCallback(async () => {
     if (loadingRef.current || isDeleting) return;
@@ -529,10 +505,21 @@ export default function ExploreScreen() {
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
+        <GallerySelectionHeader
+          selectionStore={selectionStore}
+          images={savedImages}
+          hasMoreImages={hasMoreImages}
+          isLoading={isLoading}
+          onClose={clearSelection}
+          onToggleSelectAll={toggleSelectAll}
+          textColor={theme.text}
+        />
         <View
           ref={galleryViewportRef}
           collapsable={false}
           onLayout={measureGalleryViewport}
+          onTouchEnd={() => dragSelection.endTouch()}
+          onTouchCancel={() => dragSelection.cancel()}
           style={styles.galleryViewport}
           {...gallerySwipeResponder.panHandlers}>
           <GalleryDragContext.Provider value={dragSelection}>
@@ -541,6 +528,8 @@ export default function ExploreScreen() {
               CellRendererComponent={GalleryCellRenderer}
               scrollEnabled={!isDragSelecting}
               scrollEventThrottle={16}
+              onScrollBeginDrag={() => dragSelection.cancel({ preserveRange: true })}
+              onMomentumScrollBegin={() => dragSelection.cancel({ preserveRange: true })}
               onScroll={(event) => dragSelection.setScrollOffset(event.nativeEvent.contentOffset.y)}
               onContentSizeChange={(_, height) => dragSelection.setContentHeight(height)}
               sections={dateSections}
@@ -565,17 +554,7 @@ export default function ExploreScreen() {
                   </ThemedText>
                 </View>
               )}
-              ListHeaderComponent={
-                <GallerySelectionHeader
-                  selectionStore={selectionStore}
-                  images={savedImages}
-                  hasMoreImages={hasMoreImages}
-                  isLoading={isLoading}
-                  onClose={clearSelection}
-                  onToggleSelectAll={toggleSelectAll}
-                  textColor={theme.text}
-                />
-              }
+              ListHeaderComponent={<GalleryTitleHeader selectionStore={selectionStore} />}
               ListEmptyComponent={
                 <ExploreEmptyState
                   isLoading={isLoading}
@@ -700,12 +679,13 @@ const GallerySelectionHeader = memo(function GallerySelectionHeader({
   const selected = useSyncExternalStore(
     selectionStore.subscribe, selectionStore.getSnapshot, selectionStore.getSnapshot
   );
-  const isSelectionMode = selected.size > 0;
+  if (selected.size === 0) return null;
+
   const allSelected = images.length > 0 && !hasMoreImages &&
     selected.size === images.length && images.every((image) => selected.has(getAssetKey(image)));
 
-  if (isSelectionMode) {
-    return (
+  return (
+    <View style={styles.pinnedSelectionHeader}>
       <SelectionHeader
         selectedCount={selected.size}
         allSelected={allSelected}
@@ -714,8 +694,16 @@ const GallerySelectionHeader = memo(function GallerySelectionHeader({
         isLoading={isLoading}
         textColor={textColor}
       />
-    );
-  }
+    </View>
+  );
+});
+
+const GalleryTitleHeader = memo(function GalleryTitleHeader({ selectionStore }) {
+  const getSnapshot = useCallback(() => selectionStore.getSnapshot().size > 0, [selectionStore]);
+  const isSelectionMode = useSyncExternalStore(
+    selectionStore.subscribe, getSnapshot, getSnapshot
+  );
+  if (isSelectionMode) return null;
 
   return (
     <View style={styles.header}>
@@ -792,11 +780,20 @@ const SnippetTile = memo(function SnippetTile({
   return (
     <Pressable
       accessibilityLabel={item.fileName || 'Snippet'}
-      accessibilityHint="Hold to select, then drag across images to extend the selection. Drag back to shrink it. Tap to toggle selection."
+      accessibilityHint="Tap to open or toggle selection. Hold still, then drag to select a range. Swipe normally to scroll."
       accessibilityRole="button"
       accessibilityState={{ selected: isSelected }}
+      accessibilityActions={[
+        { name: 'select', label: isSelected ? 'Deselect image' : 'Select image' },
+      ]}
+      onAccessibilityAction={({ nativeEvent: { actionName } }) => {
+        if (actionName === 'select') {
+          if (isSelected) onPress(item);
+          else onLongPress(item);
+        }
+      }}
       delayLongPress={200}
-      onLongPress={() => onLongPress(item)}
+      onLongPress={(event) => onLongPress(item, event)}
       onPress={() => onPress(item)}
       style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
       <SnippetThumbnail item={item} />
@@ -1570,6 +1567,10 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
+  },
+  pinnedSelectionHeader: {
+    paddingHorizontal: Spacing.three,
+    flexShrink: 0,
   },
   galleryViewport: {
     flex: 1,

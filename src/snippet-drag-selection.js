@@ -1,4 +1,5 @@
 const DRAG_THRESHOLD = 6;
+const HOLD_MOVE_SLOP = 8;
 const EDGE_SIZE = 56;
 const MAX_SCROLL_SPEED = 0.55;
 
@@ -17,9 +18,7 @@ export function createGalleryDragSelection({
   getImages,
   getSelection,
   setSelection,
-  onTap,
   onActiveChange = () => {},
-  onEnd = () => {},
   scrollTo,
   isEnabled = () => true,
   columns = 3,
@@ -92,8 +91,6 @@ export function createGalleryDragSelection({
     requestedOffset = null;
     scrollDirection = 0;
     const wasActive = active;
-    const endedImageId = pending?.tapId;
-    const wasDragging = dragging;
     active = false;
     dragging = false;
     pending = null;
@@ -105,7 +102,6 @@ export function createGalleryDragSelection({
     if (clearContinuation) continuation = null;
     if (wasActive) {
       if (notify) onActiveChange(false);
-      onEnd({ imageId: endedImageId, wasDragging });
     }
   };
 
@@ -189,7 +185,7 @@ export function createGalleryDragSelection({
       if (!point || point.touchCount !== 1 || !isEnabled()) return false;
       refreshImages();
       const id = hitTest(point);
-      pending = { anchorId: id, tapId: id, origin: point, point, allowTap: true };
+      pending = { anchorId: id, tapId: id, origin: point, point, armed: false };
       if (id && continuation?.selection === getSelection()) {
         const anchor = indices.get(continuation.anchorId);
         const end = indices.get(continuation.endpoint);
@@ -200,23 +196,45 @@ export function createGalleryDragSelection({
           pending.resume = continuation;
         }
       }
-      return id !== null && getSelection().size > 0;
+      // A touch alone never claims the list, even when images are selected.
+      return false;
     },
     armFromLongPress(imageId) {
-      if (!pending || !isEnabled()) return;
-      pending.anchorId = imageId;
+      if (active) return false;
+      if (!pending || !isEnabled() ||
+          Math.hypot(pending.point.x - pending.origin.x, pending.point.y - pending.origin.y) > HOLD_MOVE_SLOP) {
+        return false;
+      }
+      refreshImages();
+      if (!indices.has(imageId)) return false;
+      // The actual tile is authoritative if scroll metrics lag behind a touch.
+      if (pending.tapId !== imageId || pending.resume?.selection !== getSelection()) {
+        pending.resume = null;
+      }
+      if (!pending.resume) pending.anchorId = imageId;
       pending.tapId = imageId;
-      pending.allowTap = false;
-      pending.resume = null;
-      continuation = null;
+      // Measure drag movement from the confirmed hold, not pre-hold finger jitter.
+      pending.origin = pending.point;
+      pending.armed = true;
+      return true;
     },
     canClaimMove(point) {
-      if (!point || point.touchCount !== 1 || !pending?.anchorId || !isEnabled() || getSelection().size === 0) return false;
+      if (!point || point.touchCount !== 1) {
+        stop();
+        return false;
+      }
+      if (!pending || !isEnabled()) return false;
       pending.point = point;
-      return Math.hypot(point.x - pending.origin.x, point.y - pending.origin.y) >= DRAG_THRESHOLD;
+      const distance = Math.hypot(point.x - pending.origin.x, point.y - pending.origin.y);
+      if (!pending.armed) {
+        if (distance > HOLD_MOVE_SLOP) pending = null;
+        return false;
+      }
+      return getSelection().size > 0 && distance >= DRAG_THRESHOLD;
     },
     begin(point) {
-      if (!pending?.anchorId || !isEnabled() || getSelection().size === 0 || (point && point.touchCount !== 1)) return false;
+      if (!pending?.armed || !isEnabled() || getSelection().size === 0 ||
+          (point && point.touchCount !== 1)) return false;
       refreshImages();
       if (!indices.has(pending.anchorId)) return false;
       baseline = new Set(pending.resume?.baseline ?? getSelection());
@@ -245,9 +263,12 @@ export function createGalleryDragSelection({
         pending = null;
         return;
       }
+      if (point && point.touchCount > 1) {
+        stop();
+        return;
+      }
       if (point) updatePointer(point);
       if (dragging) applyRange();
-      const tapId = !dragging && pending?.allowTap ? pending.tapId : null;
       const resume = dragging && active && lastEndpoint ? {
         anchorId: pending.anchorId,
         endpoint: lastEndpoint,
@@ -256,13 +277,12 @@ export function createGalleryDragSelection({
       } : null;
       stop(true, false);
       continuation = resume;
-      if (tapId) {
-        continuation = null;
-        onTap(tapId);
-      }
     },
-    cancel() {
-      stop();
+    endTouch() {
+      if (!active) pending = null;
+    },
+    cancel({ preserveRange = false } = {}) {
+      stop(true, !preserveRange);
     },
     dispose() {
       stop(false);
@@ -271,9 +291,11 @@ export function createGalleryDragSelection({
     setViewport(layout) {
       if (!layout || ![layout.x, layout.y, layout.width, layout.height].every(Number.isFinite) ||
           layout.width <= 0 || layout.height <= 0) return;
-      if (active && viewport && (layout.width !== viewport.width || layout.height !== viewport.height ||
-          layout.x !== viewport.x || layout.y !== viewport.y)) stop();
+      // The pinned header changes height/Y on first selection; keep coordinates fresh.
+      // Width changes invalidate the grid and require a fresh hold.
+      if (active && viewport && layout.width !== viewport.width) stop();
       viewport = layout;
+      schedule();
     },
     setContentHeight(height) {
       if (Number.isFinite(height)) contentHeight = Math.max(0, height);
