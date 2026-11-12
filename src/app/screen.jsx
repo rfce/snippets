@@ -1,4 +1,4 @@
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, usePreventRemove, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
@@ -171,6 +171,7 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
   const temporaryPhotosRef = useRef(new Map());
+  const savingPromiseRef = useRef(null);
   const processingQueueRef = useRef(Promise.resolve());
   const renderKey = selectedMode === 'invert'
     ? `invert:${getInvertSettingsKey(invertSettings)}`
@@ -201,7 +202,13 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
     return () => {
       const temporaryPhotos = [...temporaryPhotosRef.current.values()];
       temporaryPhotosRef.current.clear();
-      void cleanupProcessedImagesAsync(temporaryPhotos);
+      const cleanup = () => cleanupProcessedImagesAsync(temporaryPhotos);
+      // A save owns these files until every native save operation has settled.
+      if (savingPromiseRef.current) {
+        void savingPromiseRef.current.then(cleanup, cleanup);
+      } else {
+        void cleanup();
+      }
     };
   }, []);
 
@@ -290,6 +297,17 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
     };
   }, [photos, processedPhotosByMode, renderKey, selectedMode, invertSettings, trackTemporaryPhoto]);
 
+  const saveSelectedPhotos = () => {
+    if (savingPromiseRef.current || isSaving || isProcessing || !selectedPhotos) return;
+
+    const save = Promise.resolve().then(() => onSave(selectedPhotos));
+    savingPromiseRef.current = save;
+    const finish = () => {
+      if (savingPromiseRef.current === save) savingPromiseRef.current = null;
+    };
+    void save.then(finish, finish);
+  };
+
   const moveToAdjacentPhoto = (direction) => {
     setCurrentIndex((index) => Math.max(0, Math.min(photos.length - 1, index + direction)));
   };
@@ -314,8 +332,13 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
           <Pressable
             accessibilityLabel="Return to batch camera"
             accessibilityRole="button"
+            disabled={isSaving}
             onPress={onBack}
-            style={({ pressed }) => [styles.batchReviewBackButton, pressed && styles.pressed]}>
+            style={({ pressed }) => [
+              styles.batchReviewBackButton,
+              pressed && styles.pressed,
+              isSaving && styles.disabled,
+            ]}>
             <SymbolView
               name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
               size={22}
@@ -466,7 +489,7 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
             accessibilityLabel="Save batch"
             accessibilityRole="button"
             disabled={isSaving || isProcessing || !selectedPhotos}
-            onPress={() => onSave(selectedPhotos)}
+            onPress={saveSelectedPhotos}
             style={({ pressed }) => [
               styles.batchReviewAction,
               styles.batchReviewSaveAction,
@@ -501,6 +524,10 @@ function CameraScreen() {
   const captureInFlightRef = useRef(false);
   const cameraRequestStarted = useRef(false);
   const galleryLoadingRef = useRef(false);
+  const galleryOffsetRef = useRef(0);
+  const galleryHasMoreRef = useRef(true);
+  const galleryRequestRef = useRef(0);
+  const batchSaveInFlightRef = useRef(false);
   const recentImageLoadStartedRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = cameraModule.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = mediaLibraryModule.usePermissions({
@@ -530,7 +557,6 @@ function CameraScreen() {
   const [diagnosticError, setDiagnosticError] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
   const [galleryAssets, setGalleryAssets] = useState([]);
-  const [hasMoreGallery, setHasMoreGallery] = useState(true);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [recentGalleryImage, setRecentGalleryImage] = useState(null);
   const temporaryPreviewPhotosRef = useRef(new Map());
@@ -538,6 +564,9 @@ function CameraScreen() {
   const previewRequestRef = useRef(0);
   const previewBusyRef = useRef(false);
   const previewMountedRef = useRef(true);
+
+  // Cover stack actions and native back gestures while saved files are in use.
+  usePreventRemove(isSavingBatch);
 
   const handleCameraReadiness = useCallback((ready) => {
     setIsCameraReady(ready);
@@ -608,9 +637,22 @@ function CameraScreen() {
     }
   }, [mediaPermission, requestMediaPermission]);
 
-  const loadGalleryPage = useCallback(async (reset = false) => {
-    if (galleryLoadingRef.current || (!reset && !hasMoreGallery)) return;
+  const invalidateGalleryLoad = useCallback(() => {
+    galleryRequestRef.current += 1;
+    galleryLoadingRef.current = false;
+    setIsLoadingGallery(false);
+  }, []);
 
+  const loadGalleryPage = useCallback(async (reset = false) => {
+    if (!reset && (galleryLoadingRef.current || !galleryHasMoreRef.current)) return;
+
+    const request = ++galleryRequestRef.current;
+    const isCurrent = () => previewMountedRef.current && galleryRequestRef.current === request;
+    const offset = reset ? 0 : galleryOffsetRef.current;
+    if (reset) {
+      galleryOffsetRef.current = 0;
+      galleryHasMoreRef.current = true;
+    }
     galleryLoadingRef.current = true;
     setIsLoadingGallery(true);
 
@@ -619,53 +661,56 @@ function CameraScreen() {
       if (!permission?.granted) {
         permission = await requestMediaPermission();
       }
+      if (!isCurrent()) return;
 
       if (!permission?.granted) {
         throw new Error('Photo-library permission was not granted.');
       }
 
-      const offset = reset ? 0 : galleryAssets.length;
       const page = await queryGalleryPage(offset, GALLERY_PAGE_SIZE);
+      if (!isCurrent()) return;
       const normalizedAssets = await Promise.all(page.assets.map(normalizeMediaLibraryImage));
+      if (!isCurrent()) return;
       const usableAssets = normalizedAssets.filter((asset) => asset?.uri);
 
+      // Native offsets count all fetched records, including unusable duplicates.
+      galleryOffsetRef.current = offset + page.assets.length;
+      galleryHasMoreRef.current = page.hasNextPage ?? page.assets.length === GALLERY_PAGE_SIZE;
       setGalleryAssets((current) =>
         reset
           ? appendUniqueMediaLibraryImages([], usableAssets)
           : appendUniqueMediaLibraryImages(current, usableAssets)
       );
-      setHasMoreGallery(page.hasNextPage ?? usableAssets.length === GALLERY_PAGE_SIZE);
     } catch (error) {
-      reportDiagnostic('Load gallery images', error, {
-        reset,
-        requestedOffset: reset ? 0 : galleryAssets.length,
-        pageSize: GALLERY_PAGE_SIZE,
-      });
+      if (isCurrent()) {
+        reportDiagnostic('Load gallery images', error, {
+          reset,
+          requestedOffset: offset,
+          pageSize: GALLERY_PAGE_SIZE,
+        });
+      }
     } finally {
-      galleryLoadingRef.current = false;
-      setIsLoadingGallery(false);
+      if (isCurrent()) {
+        galleryLoadingRef.current = false;
+        setIsLoadingGallery(false);
+      }
     }
-  }, [
-    galleryAssets.length,
-    hasMoreGallery,
-    mediaPermission,
-    requestMediaPermission,
-    reportDiagnostic,
-  ]);
+  }, [mediaPermission, requestMediaPermission, reportDiagnostic]);
 
   const openImportImage = async () => {
     setIsImporting(true);
     setGalleryAssets([]);
-    setHasMoreGallery(true);
     await loadGalleryPage(true);
   };
 
   const closeImportImage = () => {
+    invalidateGalleryLoad();
     setIsImporting(false);
     setIsCameraReady(false);
   };
 
   const selectGalleryImage = useCallback((asset) => {
+    invalidateGalleryLoad();
     setCapturedPhoto({
       uri: asset.uri,
       width: asset.width,
@@ -675,13 +720,13 @@ function CameraScreen() {
     reviewEditsRef.current = null;
     setIsImporting(false);
     setIsCameraReady(false);
-  }, []);
+  }, [invalidateGalleryLoad]);
 
   const selectCaptureMode = useCallback((mode) => {
-    if (mode === captureMode) return;
+    if (mode === captureMode || captureInFlightRef.current || batchSaveInFlightRef.current) return;
 
+    // Retain captures so switching back to Batch resumes the existing batch.
     setCaptureMode(mode);
-    setBatchPhotos([]);
   }, [captureMode]);
 
   const renderGalleryItem = useCallback(
@@ -763,12 +808,23 @@ function CameraScreen() {
     setIsCameraReady(false);
   };
 
-  const returnToBatchCamera = () => {
+  const returnToBatchCamera = useCallback(() => {
+    if (batchSaveInFlightRef.current) return;
     setBatchReviewPhotos(null);
     setIsCameraReady(false);
-  };
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    if (!batchReviewPhotos) return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      returnToBatchCamera();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [batchReviewPhotos, returnToBatchCamera]));
 
   const discardBatch = () => {
+    if (batchSaveInFlightRef.current) return;
     setBatchPhotos([]);
     setBatchReviewPhotos(null);
     setCaptureMode('single');
@@ -776,8 +832,9 @@ function CameraScreen() {
   };
 
   const saveBatch = async (photosToSave = batchPhotos) => {
-    if (!photosToSave.length || isSavingBatch) return;
+    if (!photosToSave.length || batchSaveInFlightRef.current) return;
 
+    batchSaveInFlightRef.current = true;
     setIsSavingBatch(true);
 
     try {
@@ -804,6 +861,7 @@ function CameraScreen() {
       console.error('[screen] Batch save failed', details);
       Alert.alert('Could not save batch', details.message);
     } finally {
+      batchSaveInFlightRef.current = false;
       setIsSavingBatch(false);
     }
   };
@@ -889,35 +947,17 @@ function CameraScreen() {
     setIsEnhancing(true);
 
     try {
-      // Analyze the retained full capture, then apply the current crop/rotation.
+      // Analyze the full capture and render the selected crop in one pass.
       const sourcePhoto = capturedPhoto ?? savedPhoto;
       const edits = capturedPhoto ? reviewEditsRef.current : null;
-      const needsCrop = edits && (hasCustomCrop(edits.corners) || edits.rotation !== 0);
-      const enhancedSource = await renderers[mode]({
+      const enhancedPhoto = await renderers[mode]({
         uri: sourcePhoto.uri,
         sourceWidth: sourcePhoto.width,
         sourceHeight: sourcePhoto.height,
+        ...(edits ? { corners: edits.corners, rotation: edits.rotation } : {}),
         ...(mode === 'invert' ? { settings } : {}),
       });
-      produced.push(enhancedSource);
-      if (!isCurrent()) {
-        await cleanupProcessedImagesAsync(produced);
-        return;
-      }
-
-      const enhancedPhoto = needsCrop
-        ? await renderPerspectiveCropAsync({
-            uri: enhancedSource.uri,
-            corners: edits.corners ?? getDefaultCorners(),
-            sourceWidth: enhancedSource.width,
-            sourceHeight: enhancedSource.height,
-            rotation: edits.rotation,
-          })
-        : enhancedSource;
-      if (enhancedPhoto !== enhancedSource) produced.push(enhancedPhoto);
-      if (needsCrop && enhancedSource.uri !== enhancedPhoto.uri) {
-        await cleanupProcessedImagesAsync(enhancedSource);
-      }
+      produced.push(enhancedPhoto);
       if (!isCurrent()) {
         await cleanupProcessedImagesAsync(produced);
         return;
@@ -2588,3 +2628,4 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
 });
+

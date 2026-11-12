@@ -31,34 +31,12 @@ export async function renderPerspectiveCropAsync({
 
   validateCorners(corners);
 
-  const normalizedRotation = normalizeRotation(rotation);
   const width = sourceWidth;
   const height = sourceHeight;
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Valid image dimensions are required for perspective cropping.');
   }
-  const displayedWidth = normalizedRotation % 180 === 0 ? width : height;
-  const displayedHeight = normalizedRotation % 180 === 0 ? height : width;
-  const displayedCorners = getPixelAlignedCorners(corners, displayedWidth, displayedHeight);
-  const sourceCorners = mapCornersToSource(displayedCorners, normalizedRotation);
-  const outputSize = getOutputSize(displayedCorners, displayedWidth, displayedHeight);
-  const axisAlignedCrop = normalizedRotation === 0 ? getAxisAlignedCrop(sourceCorners) : null;
-  const destinationToSource = axisAlignedCrop
-    ? getAxisAlignedTransform(axisAlignedCrop)
-    : solveHomography(
-        [
-          { x: 0, y: 0 },
-          { x: 1, y: 0 },
-          { x: 1, y: 1 },
-          { x: 0, y: 1 },
-        ],
-        [
-          sourceCorners.topLeft,
-          sourceCorners.topRight,
-          sourceCorners.bottomRight,
-          sourceCorners.bottomLeft,
-        ]
-      );
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
@@ -135,6 +113,8 @@ export async function renderAdaptiveThresholdAsync({
   uri,
   sourceWidth,
   sourceHeight,
+  corners,
+  rotation = 0,
 }) {
   if (!uri) {
     throw new Error('A source image is required for black-and-white enhancement.');
@@ -145,7 +125,7 @@ export async function renderAdaptiveThresholdAsync({
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Valid image dimensions are required for black-and-white enhancement.');
   }
-  const outputSize = getScaledOutputSize(width, height);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
   const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
   const analysisHeight = Math.max(1, Math.round(height * analysisScale));
@@ -206,6 +186,7 @@ export async function renderAdaptiveThresholdAsync({
 
     program = createProgram(gl, VERTEX_SHADER, ADAPTIVE_THRESHOLD_FRAGMENT_SHADER);
     gl.useProgram(program);
+    setHomographyUniforms(gl, program, destinationToSource);
     gl.viewport(0, 0, outputSize.width, outputSize.height);
     const inkPositionLocation = gl.getAttribLocation(program, 'aPosition');
     gl.enableVertexAttribArray(inkPositionLocation);
@@ -236,6 +217,7 @@ export async function renderAdaptiveThresholdAsync({
     const snapshot = await GLView.takeSnapshotAsync(gl, {
       ...SNAPSHOT_OPTIONS,
       framebuffer,
+      rect: { x: 0, y: 0, width: outputSize.width, height: outputSize.height },
     });
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
 
@@ -271,6 +253,8 @@ export async function renderInvertAsync({
   sourceWidth,
   sourceHeight,
   settings,
+  corners,
+  rotation = 0,
 }) {
   if (!uri) {
     throw new Error('A source image is required for Invert enhancement.');
@@ -282,7 +266,7 @@ export async function renderInvertAsync({
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Valid image dimensions are required for Invert enhancement.');
   }
-  const outputSize = getScaledOutputSize(width, height);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
   const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
   const analysisHeight = Math.max(1, Math.round(height * analysisScale));
@@ -343,6 +327,7 @@ export async function renderInvertAsync({
 
     program = createProgram(gl, VERTEX_SHADER, INVERT_FRAGMENT_SHADER);
     gl.useProgram(program);
+    setHomographyUniforms(gl, program, destinationToSource);
     gl.viewport(0, 0, outputSize.width, outputSize.height);
     const inkPositionLocation = gl.getAttribLocation(program, 'aPosition');
     gl.enableVertexAttribArray(inkPositionLocation);
@@ -800,6 +785,8 @@ export async function renderMagicColorAsync({
   uri,
   sourceWidth,
   sourceHeight,
+  corners,
+  rotation = 0,
 }) {
   if (!uri) {
     throw new Error('A source image is required for magic-color enhancement.');
@@ -807,7 +794,7 @@ export async function renderMagicColorAsync({
 
   const width = sourceWidth || 1;
   const height = sourceHeight || 1;
-  const outputSize = getScaledOutputSize(width, height);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
@@ -825,6 +812,7 @@ export async function renderMagicColorAsync({
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     gl.viewport(0, 0, outputSize.width, outputSize.height);
     gl.useProgram(program);
+    setHomographyUniforms(gl, program, destinationToSource);
     gl.clearColor(1, 1, 1, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
@@ -869,6 +857,7 @@ export async function renderMagicColorAsync({
     const snapshot = await GLView.takeSnapshotAsync(gl, {
       ...SNAPSHOT_OPTIONS,
       framebuffer,
+      rect: { x: 0, y: 0, width: outputSize.width, height: outputSize.height },
     });
     const snapshotUri = snapshot?.localUri ?? snapshot?.uri;
 
@@ -921,6 +910,48 @@ export async function cleanupProcessedImagesAsync(images) {
   });
 
   await Promise.all(cleanupTasks);
+}
+
+function getEnhancementGeometry(width, height, corners, rotation = 0) {
+  const normalizedRotation = normalizeRotation(rotation);
+  if (!corners && normalizedRotation === 0) {
+    return {
+      outputSize: getScaledOutputSize(width, height),
+      destinationToSource: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    };
+  }
+
+  const cropCorners = corners ?? {
+    topLeft: { x: 0, y: 0 },
+    topRight: { x: 1, y: 0 },
+    bottomRight: { x: 1, y: 1 },
+    bottomLeft: { x: 0, y: 1 },
+  };
+  validateCorners(cropCorners);
+  const displayedWidth = normalizedRotation % 180 === 0 ? width : height;
+  const displayedHeight = normalizedRotation % 180 === 0 ? height : width;
+  const displayedCorners = getPixelAlignedCorners(cropCorners, displayedWidth, displayedHeight);
+  const sourceCorners = mapCornersToSource(displayedCorners, normalizedRotation);
+  const outputSize = getOutputSize(displayedCorners, displayedWidth, displayedHeight);
+  const axisAlignedCrop = normalizedRotation === 0 ? getAxisAlignedCrop(sourceCorners) : null;
+  const destinationToSource = axisAlignedCrop
+    ? getAxisAlignedTransform(axisAlignedCrop)
+    : solveHomography(
+        [
+          { x: 0, y: 0 },
+          { x: 1, y: 0 },
+          { x: 1, y: 1 },
+          { x: 0, y: 1 },
+        ],
+        [
+          sourceCorners.topLeft,
+          sourceCorners.topRight,
+          sourceCorners.bottomRight,
+          sourceCorners.bottomLeft,
+        ]
+      );
+
+  return { outputSize, destinationToSource };
 }
 
 function validateCorners(corners) {
@@ -1295,9 +1326,30 @@ const BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER = `
   }
 `;
 
+const ENHANCEMENT_TRANSFORM_SHADER = `
+  uniform float uH00;
+  uniform float uH01;
+  uniform float uH02;
+  uniform float uH10;
+  uniform float uH11;
+  uniform float uH12;
+  uniform float uH20;
+  uniform float uH21;
+  uniform float uH22;
+
+  vec2 mapEnhancementUv(vec2 outputUv) {
+    float sourceW = uH20 * outputUv.x + uH21 * outputUv.y + uH22;
+    return vec2(
+      (uH00 * outputUv.x + uH01 * outputUv.y + uH02) / sourceW,
+      (uH10 * outputUv.x + uH11 * outputUv.y + uH12) / sourceW
+    );
+  }
+`;
+
 // Shared detection keeps the B&W and Invert foreground masks identical.
 const DOCUMENT_INK_SHADER_HELPERS = `
   precision highp float;
+  ${ENHANCEMENT_TRANSFORM_SHADER}
 
   uniform sampler2D uTexture;
   uniform sampler2D uPaperTexture;
@@ -1377,9 +1429,10 @@ const DOCUMENT_INK_SHADER_HELPERS = `
 `;
 
 const DOCUMENT_INK_SHADER_MAIN = `  void main() {
-    float observed = luminance(texture2D(uTexture, vOutputUv).rgb);
+    vec2 sourceUv = mapEnhancementUv(vOutputUv);
+    float observed = luminance(texture2D(uTexture, sourceUv).rgb);
     observed = mix(observed, 1.0 - observed, uBackgroundIsDark);
-    vec3 background = paperReference(vOutputUv, observed);
+    vec3 background = paperReference(sourceUv, observed);
     float paper = max(background.r, 0.08);
     float relativeNoise = background.g * 0.125 / paper;
 
@@ -1388,17 +1441,17 @@ const DOCUMENT_INK_SHADER_MAIN = `  void main() {
     // corrected paper; keep a lower threshold only for its anti-aliased edge.
     float edgeThreshold = clamp(0.065 + 1.5 * relativeNoise, 0.080, 0.24);
     float foregroundThreshold = clamp(0.16 + 3.0 * relativeNoise, 0.180, 0.42);
-    float center = inkEvidence(vOutputUv, paper, background.b);
+    float center = inkEvidence(sourceUv, paper, background.b);
     vec2 stepSize = uTexelSize;
 
-    float north = neighboringInkEvidence(vOutputUv + vec2(0.0, -stepSize.y), background);
-    float south = neighboringInkEvidence(vOutputUv + vec2(0.0, stepSize.y), background);
-    float west = neighboringInkEvidence(vOutputUv + vec2(-stepSize.x, 0.0), background);
-    float east = neighboringInkEvidence(vOutputUv + vec2(stepSize.x, 0.0), background);
-    float northWest = neighboringInkEvidence(vOutputUv - stepSize, background);
-    float southEast = neighboringInkEvidence(vOutputUv + stepSize, background);
-    float northEast = neighboringInkEvidence(vOutputUv + vec2(stepSize.x, -stepSize.y), background);
-    float southWest = neighboringInkEvidence(vOutputUv + vec2(-stepSize.x, stepSize.y), background);
+    float north = neighboringInkEvidence(mapEnhancementUv(vOutputUv + vec2(0.0, -stepSize.y)), background);
+    float south = neighboringInkEvidence(mapEnhancementUv(vOutputUv + vec2(0.0, stepSize.y)), background);
+    float west = neighboringInkEvidence(mapEnhancementUv(vOutputUv + vec2(-stepSize.x, 0.0)), background);
+    float east = neighboringInkEvidence(mapEnhancementUv(vOutputUv + vec2(stepSize.x, 0.0)), background);
+    float northWest = neighboringInkEvidence(mapEnhancementUv(vOutputUv - stepSize), background);
+    float southEast = neighboringInkEvidence(mapEnhancementUv(vOutputUv + stepSize), background);
+    float northEast = neighboringInkEvidence(mapEnhancementUv(vOutputUv + vec2(stepSize.x, -stepSize.y)), background);
+    float southWest = neighboringInkEvidence(mapEnhancementUv(vOutputUv + vec2(-stepSize.x, stepSize.y)), background);
 
     float foregroundInk = step(foregroundThreshold, center);
     float strongestNeighbor = max(
@@ -1449,7 +1502,7 @@ const INVERT_FRAGMENT_SHADER = DOCUMENT_INK_SHADER_HELPERS + `
 ` + DOCUMENT_INK_SHADER_MAIN + `    // Change only foreground coverage and palette; ink detection above is shared
     // with Black & White. Zero-coverage paper remains exactly the chosen navy.
     float inkCoverage = pow(clamp(inkMask, 0.0, 1.0), uInkGamma);
-    vec3 original = texture2D(uTexture, vOutputUv).rgb;
+    vec3 original = texture2D(uTexture, sourceUv).rgb;
     float maximum = max(original.r, max(original.g, original.b));
     float chroma = maximum - min(original.r, min(original.g, original.b));
     float saturation = chroma / max(maximum, 0.001);
@@ -1463,7 +1516,8 @@ const INVERT_FRAGMENT_SHADER = DOCUMENT_INK_SHADER_HELPERS + `
 `;
 
 const MAGIC_COLOR_FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
+  ${ENHANCEMENT_TRANSFORM_SHADER}
 
   uniform sampler2D uTexture;
   uniform vec2 uTexelSize;
@@ -1727,10 +1781,11 @@ const MAGIC_COLOR_FRAGMENT_SHADER = `
   }
 
   void main() {
-    vec3 centerColor = texture2D(uTexture, vOutputUv).rgb;
+    vec2 sourceUv = mapEnhancementUv(vOutputUv);
+    vec3 centerColor = texture2D(uTexture, sourceUv).rgb;
     vec3 centerLab = rgbToLab(centerColor);
-    vec3 exposurePaperLab = estimatePaperLab(vOutputUv);
-    vec3 paperLab = estimateLocalPaperLab(vOutputUv);
+    vec3 exposurePaperLab = estimatePaperLab(sourceUv);
+    vec3 paperLab = estimateLocalPaperLab(sourceUv);
     float centerEvidence = inkEvidence(centerLab, paperLab);
 
     // Use the estimated paper L value as the local exposure reference. A
@@ -1753,7 +1808,7 @@ const MAGIC_COLOR_FRAGMENT_SHADER = `
       for (int y = -1; y <= 1; y += 1) {
         if (x != 0 || y != 0) {
           vec3 neighborLab = sampleLab(
-            vOutputUv + vec2(float(x), float(y)) * supportOffset
+            sourceUv + vec2(float(x), float(y)) * supportOffset
           );
           support += inkEvidence(neighborLab, paperLab);
         }
@@ -1796,3 +1851,4 @@ const MAGIC_COLOR_FRAGMENT_SHADER = `
     gl_FragColor = vec4(clamp(outputColor, vec3(0.0), vec3(0.995)), 1.0);
   }
 `;
+
