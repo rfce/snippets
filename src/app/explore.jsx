@@ -505,7 +505,7 @@ export default function ExploreScreen() {
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <GallerySelectionHeader
+        <GalleryHeader
           selectionStore={selectionStore}
           images={savedImages}
           hasMoreImages={hasMoreImages}
@@ -554,7 +554,6 @@ export default function ExploreScreen() {
                   </ThemedText>
                 </View>
               )}
-              ListHeaderComponent={<GalleryTitleHeader selectionStore={selectionStore} />}
               ListEmptyComponent={
                 <ExploreEmptyState
                   isLoading={isLoading}
@@ -673,38 +672,48 @@ function createSnippetSelectionStore() {
   };
 }
 
-const GallerySelectionHeader = memo(function GallerySelectionHeader({
+const GalleryHeader = memo(function GalleryHeader({
   selectionStore, images, hasMoreImages, isLoading, onClose, onToggleSelectAll, textColor,
 }) {
   const selected = useSyncExternalStore(
     selectionStore.subscribe, selectionStore.getSnapshot, selectionStore.getSnapshot
   );
-  if (selected.size === 0) return null;
-
+  const isSelectionMode = selected.size > 0;
   const allSelected = images.length > 0 && !hasMoreImages &&
     selected.size === images.length && images.every((image) => selected.has(getAssetKey(image)));
 
   return (
-    <View style={styles.pinnedSelectionHeader}>
-      <SelectionHeader
-        selectedCount={selected.size}
-        allSelected={allSelected}
-        onClose={onClose}
-        onToggleSelectAll={onToggleSelectAll}
-        isLoading={isLoading}
-        textColor={textColor}
-      />
+    <View style={styles.galleryHeader}>
+      {/* The title always determines the shared header height, including font scaling. */}
+      <View
+        pointerEvents={isSelectionMode ? 'none' : 'auto'}
+        accessibilityElementsHidden={isSelectionMode}
+        importantForAccessibility={isSelectionMode ? 'no-hide-descendants' : 'auto'}
+        style={isSelectionMode && styles.inactiveHeaderLayer}>
+        <GalleryTitleHeader />
+      </View>
+      <View
+        pointerEvents={isSelectionMode ? 'auto' : 'none'}
+        accessibilityElementsHidden={!isSelectionMode}
+        importantForAccessibility={isSelectionMode ? 'auto' : 'no-hide-descendants'}
+        style={[
+          styles.selectionHeaderLayer,
+          !isSelectionMode && styles.inactiveHeaderLayer,
+        ]}>
+        <SelectionHeader
+          selectedCount={selected.size}
+          allSelected={allSelected}
+          onClose={onClose}
+          onToggleSelectAll={onToggleSelectAll}
+          isLoading={isLoading}
+          textColor={textColor}
+        />
+      </View>
     </View>
   );
 });
 
-const GalleryTitleHeader = memo(function GalleryTitleHeader({ selectionStore }) {
-  const getSnapshot = useCallback(() => selectionStore.getSnapshot().size > 0, [selectionStore]);
-  const isSelectionMode = useSyncExternalStore(
-    selectionStore.subscribe, getSnapshot, getSnapshot
-  );
-  if (isSelectionMode) return null;
-
+const GalleryTitleHeader = memo(function GalleryTitleHeader() {
   return (
     <View style={styles.header}>
       <ThemedText type="title">Snippets</ThemedText>
@@ -1341,7 +1350,7 @@ function SelectionHeader({
           tintColor={textColor}
         />
       </Pressable>
-      <ThemedText type="subtitle" style={styles.selectedCountText}>
+      <ThemedText type="subtitle" numberOfLines={1} style={styles.selectedCountText}>
         {selectedCount} selected
       </ThemedText>
       <Pressable
@@ -1568,9 +1577,19 @@ const styles = StyleSheet.create({
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
   },
-  pinnedSelectionHeader: {
+  galleryHeader: {
     paddingHorizontal: Spacing.three,
+    minHeight: 72,
     flexShrink: 0,
+  },
+  selectionHeaderLayer: {
+    position: 'absolute',
+    top: 0,
+    left: Spacing.three,
+    right: Spacing.three,
+  },
+  inactiveHeaderLayer: {
+    opacity: 0,
   },
   galleryViewport: {
     flex: 1,
