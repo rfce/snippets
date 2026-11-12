@@ -2,7 +2,7 @@ import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { SymbolView } from 'expo-symbols';
-import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -21,7 +21,6 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
-import { SelectionContext } from '@/context/SelectionContext';
 import { useTheme } from '@/hooks/use-theme';
 import {
   appendUniqueMediaLibraryImages,
@@ -48,7 +47,8 @@ export default function ExploreScreen() {
   const theme = useTheme();
   const safeAreaInsets = useSafeAreaInsets();
   const router = useRouter();
-  const { selectedImageIds, setSelectedImageIds } = useContext(SelectionContext);
+  const [selectionStore] = useState(createSnippetSelectionStore);
+  const setSelectedImageIds = selectionStore.setSelectedImageIds;
   const loadingRef = useRef(false);
   const assetsRef = useRef([]);
   const paginationOffsetRef = useRef(0);
@@ -73,13 +73,6 @@ export default function ExploreScreen() {
   const [actionError, setActionError] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [openedImage, setOpenedImage] = useState(null);
-  const isSelectionMode = selectedImageIds.size > 0;
-  const isSelectionModeRef = useRef(isSelectionMode);
-  isSelectionModeRef.current = isSelectionMode;
-  const allImagesSelected =
-    savedImages.length > 0 &&
-    !hasMoreImages &&
-    savedImages.every((image) => selectedImageIds.has(getAssetKey(image)));
 
   useEffect(() => {
     mediaPermissionRef.current = mediaPermission;
@@ -233,6 +226,7 @@ export default function ExploreScreen() {
   }, [setSelectedImageIds]);
 
   const clearSelection = useCallback(() => {
+    suppressedPressKeyRef.current = null;
     setSelectedImageIds(new Set());
   }, [setSelectedImageIds]);
 
@@ -263,43 +257,52 @@ export default function ExploreScreen() {
 
     suppressedPressKeyRef.current = null;
 
-    if (isSelectionModeRef.current) {
+    if (selectionStore.getSnapshot().size > 0) {
       toggleSelection(image);
     } else {
       openImage(image);
     }
-  }, [openImage, toggleSelection]);
+  }, [openImage, selectionStore, toggleSelection]);
 
   const handleTileLongPress = useCallback((image) => {
-    if (isSelectionModeRef.current) return;
+    if (selectionStore.getSnapshot().size > 0) return;
 
     suppressedPressKeyRef.current = getAssetKey(image);
     startSelection(image);
-  }, [startSelection]);
+  }, [selectionStore, startSelection]);
 
-  const selectAllImages = async () => {
-    if (isLoading || isDeleting) return;
+  const selectAllImages = useCallback(async () => {
+    if (loadingRef.current || isDeleting) return;
 
+    const initialSelection = selectionStore.getSnapshot();
     while (hasMoreRef.current) {
       const previousOffset = paginationOffsetRef.current;
       const loaded = await loadSavedImages(false);
+      // Closing or changing selection cancels an unfinished Select all.
+      if (selectionStore.getSnapshot() !== initialSelection) return;
       if (!loaded || (hasMoreRef.current && paginationOffsetRef.current <= previousOffset)) return;
     }
 
-    setSelectedImageIds(new Set(assetsRef.current.map(getAssetKey)));
-  };
-
-  const toggleSelectAll = () => {
-    if (allImagesSelected) {
-      clearSelection();
-      return;
+    if (selectionStore.getSnapshot() === initialSelection) {
+      setSelectedImageIds(new Set(assetsRef.current.map(getAssetKey)));
     }
+  }, [isDeleting, loadSavedImages, selectionStore, setSelectedImageIds]);
 
-    selectAllImages();
-  };
+  const toggleSelectAll = useCallback(() => {
+    const selected = selectionStore.getSnapshot();
+    const images = assetsRef.current;
+    const allSelected = images.length > 0 && !hasMoreRef.current &&
+      selected.size === images.length && images.every((image) => selected.has(getAssetKey(image)));
+    if (allSelected) {
+      clearSelection();
+    } else {
+      void selectAllImages();
+    }
+  }, [clearSelection, selectAllImages, selectionStore]);
 
   const getSelectedImages = () => {
-    return assetsRef.current.filter((image) => selectedImageIds.has(getAssetKey(image)));
+    const selected = selectionStore.getSnapshot();
+    return assetsRef.current.filter((image) => selected.has(getAssetKey(image)));
   };
 
   const deleteImages = async (images) => {
@@ -351,7 +354,7 @@ export default function ExploreScreen() {
   };
 
   const confirmDeleteSelectedImages = () => {
-    const selectedCount = selectedImageIds.size;
+    const selectedCount = selectionStore.getSnapshot().size;
     if (!selectedCount || isDeleting) return;
 
     Alert.alert(
@@ -427,8 +430,7 @@ export default function ExploreScreen() {
             <SnippetTile
               key={getAssetKey(image)}
               item={image}
-              isSelected={selectedImageIds.has(getAssetKey(image))}
-              isSelectionMode={isSelectionMode}
+              selectionStore={selectionStore}
               onLongPress={handleTileLongPress}
               onPress={handleTilePress}
             />
@@ -438,7 +440,7 @@ export default function ExploreScreen() {
         })}
       </View>
     ),
-    [handleTileLongPress, handleTilePress, isSelectionMode, selectedImageIds]
+    [handleTileLongPress, handleTilePress, selectionStore]
   );
 
   if (openedImage) {
@@ -456,7 +458,8 @@ export default function ExploreScreen() {
     );
   }
 
-  const bottomInset = safeAreaInsets.bottom + (isSelectionMode ? 96 : 112);
+  // Keep gallery geometry unchanged when selection opens or closes.
+  const bottomInset = safeAreaInsets.bottom + 112;
 
   return (
     <ThemedView style={styles.container}>
@@ -465,7 +468,6 @@ export default function ExploreScreen() {
           sections={dateSections}
           keyExtractor={(item) => item.key}
           stickySectionHeadersEnabled={false}
-          extraData={selectedImageIds}
           initialNumToRender={6}
           maxToRenderPerBatch={4}
           windowSize={5}
@@ -486,23 +488,15 @@ export default function ExploreScreen() {
             </View>
           )}
           ListHeaderComponent={
-            isSelectionMode ? (
-              <SelectionHeader
-                selectedCount={selectedImageIds.size}
-                allSelected={allImagesSelected}
-                onClose={clearSelection}
-                onToggleSelectAll={toggleSelectAll}
-                isLoading={isLoading}
-                textColor={theme.text}
-              />
-            ) : (
-              <View style={styles.header}>
-                <ThemedText type="title">Snippets</ThemedText>
-                <ThemedText themeColor="textSecondary" style={styles.subtitle}>
-                  Your saved snippets
-                </ThemedText>
-              </View>
-            )
+            <GallerySelectionHeader
+              selectionStore={selectionStore}
+              images={savedImages}
+              hasMoreImages={hasMoreImages}
+              isLoading={isLoading}
+              onClose={clearSelection}
+              onToggleSelectAll={toggleSelectAll}
+              textColor={theme.text}
+            />
           }
           ListEmptyComponent={
             <ExploreEmptyState
@@ -525,71 +519,180 @@ export default function ExploreScreen() {
           onEndReached={() => loadSavedImages(false)}
           onEndReachedThreshold={0.6}
           onRefresh={() => loadSavedImages(true)}
-          refreshing={isLoading && savedImages.length > 0 && !isSelectionMode}
+          refreshing={isLoading && savedImages.length > 0}
         />
       </SafeAreaView>
-      {isSelectionMode && (
-        <SelectionActionBar
-          bottomInset={safeAreaInsets.bottom}
-          disabled={isDeleting}
-          onDelete={confirmDeleteSelectedImages}
-          onShare={shareSelectedImages}
-          backgroundColor={theme.background}
-          textColor={theme.text}
-        />
-      )}
-      {!isSelectionMode && (
-        <Pressable
-          accessibilityLabel="Open camera"
-          accessibilityRole="button"
-          onPress={() => router.navigate('/screen')}
-          style={({ pressed }) => [styles.cameraFab, pressed && styles.pressed]}>
-          <SymbolView
-            name={{ ios: 'camera.fill', android: 'photo_camera', web: 'photo_camera' }}
-            size={28}
-            tintColor={theme.background}
-          />
-        </Pressable>
-      )}
+      <GallerySelectionActions
+        selectionStore={selectionStore}
+        bottomInset={safeAreaInsets.bottom}
+        disabled={isDeleting}
+        onDelete={confirmDeleteSelectedImages}
+        onShare={shareSelectedImages}
+        onOpenCamera={() => router.navigate('/screen')}
+        backgroundColor={theme.background}
+        textColor={theme.text}
+      />
     </ThemedView>
   );
 }
 
-const SnippetTile = memo(function SnippetTile({
-  item,
-  isSelected,
-  isSelectionMode,
-  onLongPress,
-  onPress,
+// Only controls and tiles whose selected value changed subscribe to selection.
+// Gallery rows, image decoding, and the navigation root stay out of this update.
+function createSnippetSelectionStore() {
+  let selectedImageIds = new Set();
+  const listeners = new Set();
+  const imageListeners = new Map();
+
+  return {
+    getSnapshot: () => selectedImageIds,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    subscribeImage(imageId, listener) {
+      let subscribers = imageListeners.get(imageId);
+      if (!subscribers) {
+        subscribers = new Set();
+        imageListeners.set(imageId, subscribers);
+      }
+      subscribers.add(listener);
+      return () => {
+        subscribers.delete(listener);
+        if (subscribers.size === 0) imageListeners.delete(imageId);
+      };
+    },
+    setSelectedImageIds(update) {
+      const next = typeof update === 'function' ? update(selectedImageIds) : update;
+      if (next === selectedImageIds || (
+        next.size === selectedImageIds.size && [...next].every((id) => selectedImageIds.has(id))
+      )) return;
+
+      const previous = selectedImageIds;
+      selectedImageIds = next;
+      const notifyImage = (id) => {
+        const subscribers = imageListeners.get(id);
+        if (subscribers) [...subscribers].forEach((listener) => listener());
+      };
+      previous.forEach((id) => { if (!next.has(id)) notifyImage(id); });
+      next.forEach((id) => { if (!previous.has(id)) notifyImage(id); });
+      [...listeners].forEach((listener) => listener());
+    },
+  };
+}
+
+const GallerySelectionHeader = memo(function GallerySelectionHeader({
+  selectionStore, images, hasMoreImages, isLoading, onClose, onToggleSelectAll, textColor,
 }) {
+  const selected = useSyncExternalStore(
+    selectionStore.subscribe, selectionStore.getSnapshot, selectionStore.getSnapshot
+  );
+  const isSelectionMode = selected.size > 0;
+  const allSelected = images.length > 0 && !hasMoreImages &&
+    selected.size === images.length && images.every((image) => selected.has(getAssetKey(image)));
+
+  return (
+    <View>
+      <View
+        accessibilityElementsHidden={isSelectionMode}
+        importantForAccessibility={isSelectionMode ? 'no-hide-descendants' : 'auto'}
+        style={[styles.header, isSelectionMode && styles.hiddenHeader]}>
+        <ThemedText type="title">Snippets</ThemedText>
+        <ThemedText themeColor="textSecondary" style={styles.subtitle}>
+          Your saved snippets
+        </ThemedText>
+      </View>
+      {isSelectionMode && (
+        <View style={styles.selectionHeaderOverlay}>
+          <SelectionHeader
+            selectedCount={selected.size}
+            allSelected={allSelected}
+            onClose={onClose}
+            onToggleSelectAll={onToggleSelectAll}
+            isLoading={isLoading}
+            textColor={textColor}
+          />
+        </View>
+      )}
+    </View>
+  );
+});
+
+const GallerySelectionActions = memo(function GallerySelectionActions({
+  selectionStore, bottomInset, disabled, onDelete, onShare, onOpenCamera, backgroundColor, textColor,
+}) {
+  const selected = useSyncExternalStore(
+    selectionStore.subscribe, selectionStore.getSnapshot, selectionStore.getSnapshot
+  );
+  if (selected.size > 0) {
+    return (
+      <SelectionActionBar
+        bottomInset={bottomInset}
+        disabled={disabled}
+        onDelete={onDelete}
+        onShare={onShare}
+        backgroundColor={backgroundColor}
+        textColor={textColor}
+      />
+    );
+  }
+
   return (
     <Pressable
-      accessibilityLabel={
-        isSelectionMode
-          ? `${isSelected ? 'Unselect' : 'Select'} ${item.fileName || 'snippet'}`
-          : `Open ${item.fileName || 'snippet'}`
-      }
+      accessibilityLabel="Open camera"
       accessibilityRole="button"
-      delayLongPress={300}
+      onPress={onOpenCamera}
+      style={({ pressed }) => [styles.cameraFab, pressed && styles.pressed]}>
+      <SymbolView
+        name={{ ios: 'camera.fill', android: 'photo_camera', web: 'photo_camera' }}
+        size={28}
+        tintColor={backgroundColor}
+      />
+    </Pressable>
+  );
+});
+
+const SnippetThumbnail = memo(function SnippetThumbnail({ item }) {
+  return (
+    <Image
+      accessibilityLabel={item.fileName || 'Snippet'}
+      contentFit="cover"
+      priority="low"
+      recyclingKey={item.id || item.uri}
+      source={item.uri}
+      style={styles.galleryImage}
+      transition={0}
+    />
+  );
+});
+
+const SnippetTile = memo(function SnippetTile({
+  item, selectionStore, onLongPress, onPress,
+}) {
+  const imageId = getAssetKey(item);
+  const subscribe = useCallback(
+    (listener) => selectionStore.subscribeImage(imageId, listener),
+    [imageId, selectionStore]
+  );
+  const getSnapshot = useCallback(
+    () => selectionStore.getSnapshot().has(imageId),
+    [imageId, selectionStore]
+  );
+  const isSelected = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  return (
+    <Pressable
+      accessibilityLabel={item.fileName || 'Snippet'}
+      accessibilityHint="Hold to select. Tap to open, or toggle selection while selecting images."
+      accessibilityRole="button"
+      accessibilityState={{ selected: isSelected }}
+      delayLongPress={200}
       onLongPress={() => onLongPress(item)}
       onPress={() => onPress(item)}
       style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
-      <Image
-        accessibilityLabel={item.fileName || 'Snippet'}
-        contentFit="cover"
-        priority="low"
-        recyclingKey={item.id || item.uri}
-        source={item.uri}
-        style={styles.galleryImage}
-        transition={0}
-      />
+      <SnippetThumbnail item={item} />
       {isSelected && (
-        <View style={styles.selectionCheckmark}>
-          <SymbolView
-            name={{ ios: 'checkmark', android: 'check', web: 'check' }}
-            size={16}
-            tintColor={Colors.light.background}
-          />
+        <View pointerEvents="none" style={styles.selectionCheckmark}>
+          <View style={styles.selectionTick} />
         </View>
       )}
     </Pressable>
@@ -1370,6 +1473,22 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
   },
+  hiddenHeader: {
+    opacity: 0,
+  },
+  selectionHeaderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+  },
+  selectionTick: {
+    width: 6,
+    height: 11,
+    borderRightWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: Colors.light.background,
+    marginTop: -2,
+    transform: [{ rotate: '45deg' }],
+  },
   openedImageContainer: {
     flex: 1,
     backgroundColor: '#000000',
@@ -1611,4 +1730,5 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 });
+
 
