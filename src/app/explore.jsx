@@ -179,6 +179,12 @@ export default function ExploreScreen() {
     setOpenedImage(null);
   }, []);
 
+  const clearSelection = useCallback(() => {
+    pdfExportRequestRef.current += 1;
+    dragSelection.cancel();
+    setSelectedImageIds(new Set());
+  }, [dragSelection, setSelectedImageIds]);
+
   const loadSavedImages = useCallback(async (reset = false) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return false;
     if (reset) dragSelection.cancel();
@@ -208,6 +214,7 @@ export default function ExploreScreen() {
 
       const snippetsAlbum = await getSnippetsAlbum(mediaLibraryModule);
       if (!snippetsAlbum) {
+        clearSelection();
         assetsRef.current = [];
         paginationOffsetRef.current = 0;
         hasMoreRef.current = false;
@@ -229,6 +236,9 @@ export default function ExploreScreen() {
       // records, so pagination cannot skip or repeatedly fetch the same page.
       const nextHasMore = assets.length === GALLERY_PAGE_SIZE;
 
+      // A full refresh replaces the loaded pages. Clear selection at commit
+      // so selections made while the request was pending cannot become stale.
+      if (reset) clearSelection();
       assetsRef.current = nextImages;
       paginationOffsetRef.current = offset + assets.length;
       hasMoreRef.current = nextHasMore;
@@ -243,7 +253,7 @@ export default function ExploreScreen() {
       loadingRef.current = false;
       setIsLoading(false);
     }
-  }, [dragSelection]);
+  }, [clearSelection, dragSelection]);
 
   useFocusEffect(
     useCallback(() => {
@@ -261,6 +271,10 @@ export default function ExploreScreen() {
       if (!BackHandler?.addEventListener) return undefined;
 
       const handleBackPress = () => {
+        if (selectionStore.getSnapshot().size > 0) {
+          clearSelection();
+          return true;
+        }
         if (!openedImageRef.current) return false;
 
         closeOpenedImage();
@@ -270,7 +284,7 @@ export default function ExploreScreen() {
       const subscription = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
 
       return () => subscription.remove();
-    }, [closeOpenedImage])
+    }, [clearSelection, closeOpenedImage, selectionStore])
   );
 
   const toggleSelection = useCallback((image) => {
@@ -287,12 +301,6 @@ export default function ExploreScreen() {
       return next;
     });
   }, [setSelectedImageIds]);
-
-  const clearSelection = useCallback(() => {
-    pdfExportRequestRef.current += 1;
-    dragSelection.cancel();
-    setSelectedImageIds(new Set());
-  }, [dragSelection, setSelectedImageIds]);
 
   const openImage = useCallback((image) => {
     openedImageRef.current = image;
@@ -409,12 +417,11 @@ export default function ExploreScreen() {
     }
   };
 
-  const deleteSelectedImages = async () => {
-    await deleteImages(getSelectedImages());
-  };
-
   const confirmDeleteSelectedImages = () => {
-    const selectedCount = selectionStore.getSnapshot().size;
+    // Keep the confirmation and its action tied to the same assets, even if
+    // Select all finishes or a refresh replaces the gallery while it is open.
+    const imagesToDelete = getSelectedImages();
+    const selectedCount = imagesToDelete.length;
     if (!selectedCount || isDeleting) return;
 
     Alert.alert(
@@ -422,7 +429,7 @@ export default function ExploreScreen() {
       `This will permanently delete ${selectedCount} ${selectedCount === 1 ? 'image' : 'images'}.`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: deleteSelectedImages },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteImages(imagesToDelete) },
       ]
     );
   };
