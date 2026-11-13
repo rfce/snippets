@@ -13,7 +13,8 @@ const TINTS = {
 };
 
 export const SelectionActionBar = memo(function SelectionActionBar({
-  bottomInset = 0, disabled, pdfDisabled, pdfProgress, onDelete, onShare, onSavePdf,
+  bottomInset = 0, disabled, pdfDisabled, pdfProgress, isSharing = false, shareDisabled = false,
+  onDelete, onShare, onSavePdf,
 }) {
   const busy = Boolean(pdfProgress);
   const pdfUnavailable = Boolean(disabled || pdfDisabled);
@@ -23,9 +24,10 @@ export const SelectionActionBar = memo(function SelectionActionBar({
     <View style={[styles.bar, { paddingBottom: Math.max(bottomInset, Spacing.one) }]}>
       <View style={styles.tabs}>
         <ActionTab
-          title="Share"
-          label="Share selected images"
-          disabled={disabled}
+          title={isSharing ? 'Sharing...' : 'Share'}
+          label={isSharing ? 'Preparing images for sharing' : 'Share selected images'}
+          disabled={disabled || shareDisabled}
+          busy={isSharing}
           tint={TINTS.share}
           onPress={onShare}>
           <SymbolView

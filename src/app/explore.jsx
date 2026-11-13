@@ -33,6 +33,7 @@ import {
 import { createSnippetDateSections, sortSnippetsNewestFirst } from '@/snippet-date-sections';
 import { createGalleryDragSelection, getGalleryGesturePoint } from '@/snippet-drag-selection';
 import { createSnippetsPdfAsync } from '@/snippets-pdf';
+import { shareImagesAsync } from '@/multi-image-sharing';
 
 const GALLERY_COLUMNS = 3;
 const GALLERY_PAGE_SIZE = 36;
@@ -65,6 +66,9 @@ export default function ExploreScreen() {
   const pdfExportRequestRef = useRef(0);
   const pdfExportMountedRef = useRef(true);
   const pdfShareSheetOpenRef = useRef(false);
+  const imageShareSheetOpenRef = useRef(false);
+  const shareBusyRef = useRef(false);
+  const shareRequestRef = useRef(0);
   const galleryListRef = useRef(null);
   const galleryViewportRef = useRef(null);
   const gestureCallbacksRef = useRef({ disabled: false });
@@ -85,6 +89,7 @@ export default function ExploreScreen() {
   const [loadError, setLoadError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
   const [openedImage, setOpenedImage] = useState(null);
   const [pdfProgress, setPdfProgress] = useState(null);
 
@@ -93,6 +98,7 @@ export default function ExploreScreen() {
     return () => {
       pdfExportMountedRef.current = false;
       pdfExportRequestRef.current += 1;
+      shareRequestRef.current += 1;
     };
   }, []);
   const [isDragSelecting, setIsDragSelecting] = useState(false);
@@ -107,7 +113,7 @@ export default function ExploreScreen() {
     onActiveChange: setIsDragSelecting,
     scrollTo: (y) => galleryListRef.current?.getScrollResponder()?.scrollTo({ y, animated: false }),
   }));
-  gestureCallbacksRef.current.disabled = isDeleting || Boolean(pdfProgress);
+  gestureCallbacksRef.current.disabled = isDeleting || isSharing || Boolean(pdfProgress);
 
   const measureGalleryViewport = useCallback(() => {
     galleryViewportRef.current?.measureInWindow((x, y, width, height) => {
@@ -163,6 +169,7 @@ export default function ExploreScreen() {
       } else {
         dragSelection.cancel();
         if (!pdfShareSheetOpenRef.current) pdfExportRequestRef.current += 1;
+        if (!imageShareSheetOpenRef.current) shareRequestRef.current += 1;
         clearTimeout(midnightTimer);
       }
     });
@@ -174,6 +181,7 @@ export default function ExploreScreen() {
   }, [dragSelection]);
 
   const closeOpenedImage = useCallback(() => {
+    shareRequestRef.current += 1;
     openedImageRef.current = null;
     setActionError(null);
     setOpenedImage(null);
@@ -181,6 +189,7 @@ export default function ExploreScreen() {
 
   const clearSelection = useCallback(() => {
     pdfExportRequestRef.current += 1;
+    shareRequestRef.current += 1;
     dragSelection.cancel();
     setSelectedImageIds(new Set());
   }, [dragSelection, setSelectedImageIds]);
@@ -262,6 +271,7 @@ export default function ExploreScreen() {
       return () => {
         dragSelection.cancel();
         pdfExportRequestRef.current += 1;
+        shareRequestRef.current += 1;
       };
     }, [dragSelection, loadSavedImages])
   );
@@ -317,7 +327,7 @@ export default function ExploreScreen() {
   }, []);
 
   const handleTilePress = useCallback((image) => {
-    if (pdfExportBusyRef.current) return;
+    if (pdfExportBusyRef.current || shareBusyRef.current) return;
     if (selectionStore.getSnapshot().size > 0) {
       toggleSelection(image);
     } else {
@@ -338,7 +348,7 @@ export default function ExploreScreen() {
   }, [dragSelection, selectionStore, setSelectedImageIds]);
 
   const selectAllImages = useCallback(async () => {
-    if (loadingRef.current || isDeleting || pdfExportBusyRef.current) return;
+    if (loadingRef.current || isDeleting || pdfExportBusyRef.current || shareBusyRef.current) return;
     dragSelection.cancel();
 
     const initialSelection = selectionStore.getSnapshot();
@@ -373,7 +383,7 @@ export default function ExploreScreen() {
   };
 
   const deleteImages = async (images) => {
-    if (!images.length || isDeleting || pdfExportBusyRef.current) return false;
+    if (!images.length || isDeleting || pdfExportBusyRef.current || shareBusyRef.current) return false;
     dragSelection.cancel();
 
     setIsDeleting(true);
@@ -422,7 +432,7 @@ export default function ExploreScreen() {
     // Select all finishes or a refresh replaces the gallery while it is open.
     const imagesToDelete = getSelectedImages();
     const selectedCount = imagesToDelete.length;
-    if (!selectedCount || isDeleting) return;
+    if (!selectedCount || isDeleting || shareBusyRef.current) return;
 
     Alert.alert(
       'Delete snippets?',
@@ -434,31 +444,41 @@ export default function ExploreScreen() {
     );
   };
 
-  const shareSelectedImages = async () => {
-    const selectedImages = getSelectedImages();
-    if (!selectedImages.length || isDeleting || pdfExportBusyRef.current) return;
-
-    if (selectedImages.length > 1) {
-      Alert.alert(
-        'Share images',
-        'The current app build can share one local image at a time. Select one image to continue.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
+  const performShare = async (images) => {
+    if (!images.length || isDeleting || pdfExportBusyRef.current || shareBusyRef.current) return;
+    shareBusyRef.current = true;
+    const request = ++shareRequestRef.current;
+    const isCancelled = () => !pdfExportMountedRef.current || request !== shareRequestRef.current;
+    dragSelection.cancel();
+    setIsSharing(true);
+    setActionError(null);
 
     try {
-      await shareImageFile(selectedImages[0]);
+      await shareImagesAsync(images, {
+        isCancelled,
+        onHandoff: () => { imageShareSheetOpenRef.current = true; },
+      });
     } catch (error) {
-      const message = getErrorMessage(error);
-      setActionError(message);
-      Alert.alert('Could not share image', message);
+      if (!isCancelled() && error.name !== 'AbortError') {
+        const message = getErrorMessage(error);
+        setActionError(message);
+        Alert.alert('Could not share images', message);
+      }
+    } finally {
+      imageShareSheetOpenRef.current = false;
+      shareBusyRef.current = false;
+      if (pdfExportMountedRef.current) setIsSharing(false);
     }
+  };
+
+  const shareSelectedImages = async () => {
+    if (loadingRef.current) return;
+    await performShare(getSelectedImages());
   };
 
   const saveSelectedImagesAsPdf = async () => {
     const images = getSelectedImages();
-    if (!images.length || isDeleting || loadingRef.current || pdfExportBusyRef.current) return;
+    if (!images.length || isDeleting || loadingRef.current || pdfExportBusyRef.current || shareBusyRef.current) return;
     if (Platform.OS === 'web') {
       Alert.alert('Save as PDF', 'PDF export is available in the Android and iOS app.');
       return;
@@ -509,7 +529,7 @@ export default function ExploreScreen() {
   };
 
   const confirmDeleteOpenedImage = () => {
-    if (!openedImage || isDeleting) return;
+    if (!openedImage || isDeleting || shareBusyRef.current) return;
 
     Alert.alert(
       'Delete snippet?',
@@ -529,15 +549,8 @@ export default function ExploreScreen() {
   };
 
   const shareOpenedImage = async () => {
-    if (!openedImage || isDeleting) return;
-
-    try {
-      await shareImageFile(openedImage);
-    } catch (error) {
-      const message = getErrorMessage(error);
-      setActionError(message);
-      Alert.alert('Could not share image', message);
-    }
+    if (!openedImage) return;
+    await performShare([openedImage]);
   };
 
   const renderSnippetRow = useCallback(
@@ -567,7 +580,7 @@ export default function ExploreScreen() {
       <OpenedImageView
         image={openedImage}
         images={savedImages}
-        disabled={isDeleting}
+        disabled={isDeleting || isSharing}
         onBack={closeOpenedImage}
         onDelete={confirmDeleteOpenedImage}
         onNavigate={navigateOpenedImage}
@@ -587,7 +600,7 @@ export default function ExploreScreen() {
           selectionStore={selectionStore}
           images={savedImages}
           hasMoreImages={hasMoreImages}
-          isLoading={isLoading || Boolean(pdfProgress)}
+          isLoading={isLoading || isSharing || Boolean(pdfProgress)}
           onClose={clearSelection}
           onToggleSelectAll={toggleSelectAll}
           textColor={theme.text}
@@ -661,7 +674,9 @@ export default function ExploreScreen() {
       <GallerySelectionActions
         selectionStore={selectionStore}
         bottomInset={safeAreaInsets.bottom}
-        disabled={isDeleting || Boolean(pdfProgress)}
+        disabled={isDeleting || isSharing || Boolean(pdfProgress)}
+        shareDisabled={isLoading}
+        isSharing={isSharing}
         pdfDisabled={isLoading}
         pdfProgress={pdfProgress}
         onDelete={confirmDeleteSelectedImages}
@@ -806,7 +821,7 @@ const GalleryTitleHeader = memo(function GalleryTitleHeader() {
 });
 
 const GallerySelectionActions = memo(function GallerySelectionActions({
-  selectionStore, bottomInset, disabled, pdfDisabled, pdfProgress,
+  selectionStore, bottomInset, disabled, pdfDisabled, pdfProgress, shareDisabled, isSharing,
   onDelete, onShare, onSavePdf, onOpenCamera, backgroundColor, textColor,
 }) {
   const selected = useSyncExternalStore(
@@ -817,6 +832,8 @@ const GallerySelectionActions = memo(function GallerySelectionActions({
       <SelectionActionBar
         bottomInset={bottomInset}
         disabled={disabled}
+        shareDisabled={shareDisabled}
+        isSharing={isSharing}
         pdfDisabled={pdfDisabled}
         pdfProgress={pdfProgress}
         onDelete={onDelete}
@@ -1559,31 +1576,6 @@ async function querySavedImagePage(album, offset, limit) {
     .exe();
 
   return assets ?? [];
-}
-
-async function shareImageFile(image) {
-  if (!image?.uri) {
-    throw new Error('The selected snippet does not have a shareable file.');
-  }
-
-  const isAvailable = await Sharing.isAvailableAsync();
-  if (!isAvailable) {
-    throw new Error('Image sharing is not available on this device.');
-  }
-
-  await Sharing.shareAsync(image.uri, {
-    dialogTitle: 'Share image',
-    mimeType: getImageMimeType(image.fileName ?? image.uri),
-  });
-}
-
-function getImageMimeType(fileNameOrUri) {
-  const extension = String(fileNameOrUri).split(/[?#]/)[0].split('.').pop()?.toLowerCase();
-
-  if (extension === 'png') return 'image/png';
-  if (extension === 'webp') return 'image/webp';
-  if (extension === 'heic' || extension === 'heif') return 'image/heic';
-  return 'image/jpeg';
 }
 
 function getErrorMessage(error) {
