@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { SelectionActionBar } from '@/components/selection-actions';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
@@ -31,6 +32,7 @@ import {
 
 import { createSnippetDateSections, sortSnippetsNewestFirst } from '@/snippet-date-sections';
 import { createGalleryDragSelection, getGalleryGesturePoint } from '@/snippet-drag-selection';
+import { createSnippetsPdfAsync } from '@/snippets-pdf';
 
 const GALLERY_COLUMNS = 3;
 const GALLERY_PAGE_SIZE = 36;
@@ -59,6 +61,10 @@ export default function ExploreScreen() {
   const permissionRef = useRef(null);
   const mediaPermissionRef = useRef(null);
   const openedImageRef = useRef(null);
+  const pdfExportBusyRef = useRef(false);
+  const pdfExportRequestRef = useRef(0);
+  const pdfExportMountedRef = useRef(true);
+  const pdfShareSheetOpenRef = useRef(false);
   const galleryListRef = useRef(null);
   const galleryViewportRef = useRef(null);
   const gestureCallbacksRef = useRef({ disabled: false });
@@ -80,6 +86,15 @@ export default function ExploreScreen() {
   const [actionError, setActionError] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [openedImage, setOpenedImage] = useState(null);
+  const [pdfProgress, setPdfProgress] = useState(null);
+
+  useEffect(() => {
+    pdfExportMountedRef.current = true;
+    return () => {
+      pdfExportMountedRef.current = false;
+      pdfExportRequestRef.current += 1;
+    };
+  }, []);
   const [isDragSelecting, setIsDragSelecting] = useState(false);
   const [dragSelection] = useState(() => createGalleryDragSelection({
     getImages: () => assetsRef.current,
@@ -92,7 +107,7 @@ export default function ExploreScreen() {
     onActiveChange: setIsDragSelecting,
     scrollTo: (y) => galleryListRef.current?.getScrollResponder()?.scrollTo({ y, animated: false }),
   }));
-  gestureCallbacksRef.current.disabled = isDeleting;
+  gestureCallbacksRef.current.disabled = isDeleting || Boolean(pdfProgress);
 
   const measureGalleryViewport = useCallback(() => {
     galleryViewportRef.current?.measureInWindow((x, y, width, height) => {
@@ -147,6 +162,7 @@ export default function ExploreScreen() {
         refreshCalendar();
       } else {
         dragSelection.cancel();
+        if (!pdfShareSheetOpenRef.current) pdfExportRequestRef.current += 1;
         clearTimeout(midnightTimer);
       }
     });
@@ -235,6 +251,7 @@ export default function ExploreScreen() {
 
       return () => {
         dragSelection.cancel();
+        pdfExportRequestRef.current += 1;
       };
     }, [dragSelection, loadSavedImages])
   );
@@ -272,6 +289,7 @@ export default function ExploreScreen() {
   }, [setSelectedImageIds]);
 
   const clearSelection = useCallback(() => {
+    pdfExportRequestRef.current += 1;
     dragSelection.cancel();
     setSelectedImageIds(new Set());
   }, [dragSelection, setSelectedImageIds]);
@@ -291,6 +309,7 @@ export default function ExploreScreen() {
   }, []);
 
   const handleTilePress = useCallback((image) => {
+    if (pdfExportBusyRef.current) return;
     if (selectionStore.getSnapshot().size > 0) {
       toggleSelection(image);
     } else {
@@ -299,7 +318,7 @@ export default function ExploreScreen() {
   }, [openImage, selectionStore, toggleSelection]);
 
   const handleTileLongPress = useCallback((image, event) => {
-    if (gestureCallbacksRef.current.disabled) return;
+    if (gestureCallbacksRef.current.disabled || pdfExportBusyRef.current) return;
     const imageId = getAssetKey(image);
     const armed = dragSelection.armFromLongPress(imageId);
     // Accessibility can select a tile without a touch-driven drag.
@@ -311,7 +330,7 @@ export default function ExploreScreen() {
   }, [dragSelection, selectionStore, setSelectedImageIds]);
 
   const selectAllImages = useCallback(async () => {
-    if (loadingRef.current || isDeleting) return;
+    if (loadingRef.current || isDeleting || pdfExportBusyRef.current) return;
     dragSelection.cancel();
 
     const initialSelection = selectionStore.getSnapshot();
@@ -346,7 +365,7 @@ export default function ExploreScreen() {
   };
 
   const deleteImages = async (images) => {
-    if (!images.length || isDeleting) return false;
+    if (!images.length || isDeleting || pdfExportBusyRef.current) return false;
     dragSelection.cancel();
 
     setIsDeleting(true);
@@ -410,7 +429,7 @@ export default function ExploreScreen() {
 
   const shareSelectedImages = async () => {
     const selectedImages = getSelectedImages();
-    if (!selectedImages.length || isDeleting) return;
+    if (!selectedImages.length || isDeleting || pdfExportBusyRef.current) return;
 
     if (selectedImages.length > 1) {
       Alert.alert(
@@ -427,6 +446,58 @@ export default function ExploreScreen() {
       const message = getErrorMessage(error);
       setActionError(message);
       Alert.alert('Could not share image', message);
+    }
+  };
+
+  const saveSelectedImagesAsPdf = async () => {
+    const images = getSelectedImages();
+    if (!images.length || isDeleting || loadingRef.current || pdfExportBusyRef.current) return;
+    if (Platform.OS === 'web') {
+      Alert.alert('Save as PDF', 'PDF export is available in the Android and iOS app.');
+      return;
+    }
+
+    pdfExportBusyRef.current = true;
+    const request = ++pdfExportRequestRef.current;
+    const isCancelled = () => !pdfExportMountedRef.current || request !== pdfExportRequestRef.current;
+    dragSelection.cancel();
+    setPdfProgress({ completed: 0, total: images.length });
+    let document;
+    let handedToSystem = false;
+
+    try {
+      if (!await Sharing.isAvailableAsync()) {
+        throw new Error('Saving PDF files is not available on this device.');
+      }
+      if (isCancelled()) return;
+      document = await createSnippetsPdfAsync(images, {
+        isCancelled,
+        onProgress: (progress) => {
+          if (!isCancelled()) setPdfProgress(progress);
+        },
+      });
+      if (isCancelled()) return;
+      pdfShareSheetOpenRef.current = true;
+      handedToSystem = true;
+      await Sharing.shareAsync(document.uri, {
+        dialogTitle: 'Save PDF',
+        mimeType: 'application/pdf',
+        UTI: 'com.adobe.pdf',
+      });
+      // Retain the cache file: a receiving app may read it after the sheet closes.
+    } catch (error) {
+      if (!isCancelled() && error.name !== 'AbortError') {
+        const message = getErrorMessage(error);
+        setActionError(message);
+        Alert.alert('Could not create PDF', message);
+      }
+    } finally {
+      pdfShareSheetOpenRef.current = false;
+      if (document && !handedToSystem) {
+        try { await document.remove(); } catch {}
+      }
+      pdfExportBusyRef.current = false;
+      if (pdfExportMountedRef.current) setPdfProgress(null);
     }
   };
 
@@ -509,7 +580,7 @@ export default function ExploreScreen() {
           selectionStore={selectionStore}
           images={savedImages}
           hasMoreImages={hasMoreImages}
-          isLoading={isLoading}
+          isLoading={isLoading || Boolean(pdfProgress)}
           onClose={clearSelection}
           onToggleSelectAll={toggleSelectAll}
           textColor={theme.text}
@@ -583,9 +654,12 @@ export default function ExploreScreen() {
       <GallerySelectionActions
         selectionStore={selectionStore}
         bottomInset={safeAreaInsets.bottom}
-        disabled={isDeleting}
+        disabled={isDeleting || Boolean(pdfProgress)}
+        pdfDisabled={isLoading}
+        pdfProgress={pdfProgress}
         onDelete={confirmDeleteSelectedImages}
         onShare={shareSelectedImages}
+        onSavePdf={saveSelectedImagesAsPdf}
         onOpenCamera={() => router.navigate('/screen')}
         backgroundColor={theme.background}
         textColor={theme.text}
@@ -725,7 +799,8 @@ const GalleryTitleHeader = memo(function GalleryTitleHeader() {
 });
 
 const GallerySelectionActions = memo(function GallerySelectionActions({
-  selectionStore, bottomInset, disabled, onDelete, onShare, onOpenCamera, backgroundColor, textColor,
+  selectionStore, bottomInset, disabled, pdfDisabled, pdfProgress,
+  onDelete, onShare, onSavePdf, onOpenCamera, backgroundColor, textColor,
 }) {
   const selected = useSyncExternalStore(
     selectionStore.subscribe, selectionStore.getSnapshot, selectionStore.getSnapshot
@@ -735,8 +810,11 @@ const GallerySelectionActions = memo(function GallerySelectionActions({
       <SelectionActionBar
         bottomInset={bottomInset}
         disabled={disabled}
+        pdfDisabled={pdfDisabled}
+        pdfProgress={pdfProgress}
         onDelete={onDelete}
         onShare={onShare}
+        onSavePdf={onSavePdf}
         backgroundColor={backgroundColor}
         textColor={textColor}
       />
@@ -1367,55 +1445,6 @@ function SelectionHeader({
   );
 }
 
-function SelectionActionBar({ bottomInset, disabled, onDelete, onShare, backgroundColor, textColor }) {
-  return (
-    <View
-      style={[
-        styles.selectionActionBar,
-        { backgroundColor, paddingBottom: bottomInset + Spacing.two },
-      ]}>
-      <Pressable
-        accessibilityLabel="Delete selected images"
-        accessibilityRole="button"
-        disabled={disabled}
-        onPress={onDelete}
-        style={({ pressed }) => [
-          styles.selectionAction,
-          styles.horizontalAction,
-          pressed && styles.pressed,
-          disabled && styles.disabled,
-        ]}>
-        <SymbolView
-          name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
-          size={27}
-          tintColor="#d92d20"
-        />
-        <ThemedText type="smallBold" style={styles.deleteActionText}>
-          Delete
-        </ThemedText>
-      </Pressable>
-      <Pressable
-        accessibilityLabel="Share selected images"
-        accessibilityRole="button"
-        disabled={disabled}
-        onPress={onShare}
-        style={({ pressed }) => [
-          styles.selectionAction,
-          styles.horizontalAction,
-          pressed && styles.pressed,
-          disabled && styles.disabled,
-        ]}>
-        <SymbolView
-          name={{ ios: 'square.and.arrow.up', android: 'share', web: 'share' }}
-          size={27}
-          tintColor={textColor}
-        />
-        <ThemedText type="smallBold">Share</ThemedText>
-      </Pressable>
-    </View>
-  );
-}
-
 function ExploreEmptyState({ isLoading, error, onRetry, textColor }) {
   if (isLoading) {
     return (
@@ -1790,27 +1819,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#3c87f7',
     borderWidth: 2,
     borderColor: Colors.light.background,
-  },
-  selectionActionBar: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    minHeight: 82,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-evenly',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#d0d0d0',
-    zIndex: 20,
-    elevation: 20,
-  },
-  selectionAction: {
-    minWidth: 120,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.one,
-    paddingVertical: Spacing.one,
   },
   deleteActionText: {
     color: '#d92d20',
