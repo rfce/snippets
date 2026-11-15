@@ -16,7 +16,9 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BatchCaptureOverlay, BatchCaptureTray } from '@/components/batch-capture-feedback';
 import { BatchEditor } from '@/components/batch-editor';
+import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeometry } from '@/batch-capture-geometry';
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { CaptureReview } from '@/components/capture-review';
 import { getBatchPhotoId, releaseTemporaryImagesAsync, savePendingBatchAsync } from '@/batch-workflow';
@@ -480,9 +482,15 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving, savePr
 function CameraScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const windowSize = useWindowDimensions();
   const router = useRouter();
   const cameraRef = useRef(null);
   const focusControllerRef = useRef(null);
+  const batchTrayRef = useRef(null);
+  const captureBoundsRef = useRef({ preview: null, tray: null });
+  const cameraViewportRef = useRef(null);
+  const cameraFeedbackFocusedRef = useRef(true);
+  const batchCaptureSequenceRef = useRef(0);
   const captureInFlightRef = useRef(false);
   const cameraRequestStarted = useRef(false);
   const galleryLoadingRef = useRef(false);
@@ -505,6 +513,10 @@ function CameraScreen() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [captureMode, setCaptureMode] = useState('single');
   const [batchPhotos, setBatchPhotos] = useState([]);
+  const [batchCaptureFlights, setBatchCaptureFlights] = useState([]);
+  const completeBatchCaptureFlight = useCallback((id) => {
+    setBatchCaptureFlights((current) => current.filter((capture) => capture.id !== id));
+  }, []);
   const [batchReviewPhotos, setBatchReviewPhotos] = useState(null);
   const [batchEditorPhotos, setBatchEditorPhotos] = useState(null);
   const [batchEdits, setBatchEdits] = useState({});
@@ -540,10 +552,35 @@ function CameraScreen() {
   // Cover stack actions and native back gestures while saved files are in use.
   usePreventRemove(isSavingBatch || isSavingPreview || isPreparingBatch);
 
+  const refreshCaptureBounds = useCallback(() => {
+    // Cache idle-camera bounds before the shutter runs; feedback never awaits
+    // a newly mounted overlay or a post-capture measurement.
+    focusControllerRef.current?.measurePreviewInWindow((x, y, width, height) => {
+      const rect = { x, y, width, height };
+      if (isBatchCaptureRect(rect)) captureBoundsRef.current.preview = rect;
+    });
+    batchTrayRef.current?.measureInWindow((x, y, width, height) => {
+      const rect = { x, y, width, height };
+      if (isBatchCaptureRect(rect)) captureBoundsRef.current.tray = rect;
+    });
+  }, []);
+
+  const handleCameraViewportLayout = useCallback(({ nativeEvent: { layout } }) => {
+    const previous = cameraViewportRef.current;
+    if (!previous || previous.width !== layout.width || previous.height !== layout.height) {
+      cameraViewportRef.current = { width: layout.width, height: layout.height };
+      captureBoundsRef.current = { preview: null, tray: null };
+    }
+    refreshCaptureBounds();
+  }, [refreshCaptureBounds]);
+
   const handleCameraReadiness = useCallback((ready) => {
     setIsCameraReady(ready);
-    if (ready) setCameraError(null);
-  }, []);
+    if (ready) {
+      setCameraError(null);
+      refreshCaptureBounds();
+    }
+  }, [refreshCaptureBounds]);
 
   const reportDiagnostic = useCallback((operation, error, context = {}) => {
     const diagnostic = createDiagnosticDetails(operation, error, context);
@@ -702,6 +739,7 @@ function CameraScreen() {
     if (mode === captureMode || captureInFlightRef.current || batchSaveInFlightRef.current) return;
 
     // Retain captures so switching back to Batch resumes the existing batch.
+    setBatchCaptureFlights([]);
     setCaptureMode(mode);
   }, [captureMode]);
 
@@ -712,11 +750,14 @@ function CameraScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      cameraFeedbackFocusedRef.current = true;
       setIsFocused(true);
 
       return () => {
+        cameraFeedbackFocusedRef.current = false;
         setIsFocused(false);
         setIsCameraReady(false);
+        setBatchCaptureFlights([]);
       };
     }, [])
   );
@@ -745,6 +786,7 @@ function CameraScreen() {
     setIsCapturing(true);
 
     try {
+      if (captureMode === 'batch') refreshCaptureBounds();
       const focusResult = await focusControllerRef.current?.prepareCaptureAsync();
       if (focusResult?.status === 'cancelled' || !cameraRef.current) return;
 
@@ -760,6 +802,13 @@ function CameraScreen() {
 
       if (captureMode === 'batch') {
         setBatchPhotos((current) => [...current, photo]);
+        if (cameraFeedbackFocusedRef.current && previewMountedRef.current) {
+          const geometry = snapshotBatchCaptureGeometry(
+            photo, cameraViewportRef.current ?? windowSize, insets, captureBoundsRef.current, Spacing.three, windowSize
+          );
+          const capture = { id: ++batchCaptureSequenceRef.current, photo, geometry };
+          setBatchCaptureFlights((current) => appendBatchCaptureFlight(current, capture));
+        }
       } else {
         setCapturedPhoto(photo);
         reviewEditsRef.current = null;
@@ -779,6 +828,7 @@ function CameraScreen() {
 
   const finishBatchCapture = () => {
     if (captureMode !== 'batch' || !batchPhotos.length || isCapturing || captureInFlightRef.current) return;
+    setBatchCaptureFlights([]);
     setBatchEditorPhotos(batchPhotos);
     setIsCameraReady(false);
   };
@@ -1461,13 +1511,14 @@ function CameraScreen() {
   }
 
   return (
-    <View style={styles.container}>
+    <View onLayout={handleCameraViewportLayout} style={styles.container}>
       {isFocused && (
         <FocusableCamera
           ref={focusControllerRef}
           CameraComponent={CameraView}
           cameraRef={cameraRef}
           disabled={isCapturing}
+          animateShutter={captureMode !== 'batch'}
           enableTorch={flashMode === 'torch'}
           flash={flashMode === 'flash' ? 'on' : 'off'}
           onReadyChange={handleCameraReadiness}
@@ -1531,16 +1582,13 @@ function CameraScreen() {
         style={[styles.controls, { paddingBottom: insets.bottom + Spacing.three }]}> 
         <View style={styles.captureControlsRow}>
           {captureMode === 'batch' ? (
-            <View
-              accessible={false}
-              pointerEvents="none"
-              style={styles.importButtonSpacer}
-            >
-              {batchPhotos.length > 0 ? (
-                <ThemedText type="title" style={styles.batchCaptureCountText}>
-                  {batchPhotos.length}
-                </ThemedText>
-              ) : null}
+            <View style={styles.importButtonSpacer}>
+              <BatchCaptureTray
+                ref={batchTrayRef}
+                onLayout={refreshCaptureBounds}
+                photo={batchPhotos[batchPhotos.length - 1]}
+                count={batchPhotos.length}
+              />
             </View>
           ) : (
             <Pressable
@@ -1645,6 +1693,13 @@ function CameraScreen() {
           )}
         </View>
       </View>
+
+      {isFocused && captureMode === 'batch' && batchCaptureFlights.length > 0 && (
+        <BatchCaptureOverlay
+          flights={batchCaptureFlights}
+          onComplete={completeBatchCaptureFlight}
+        />
+      )}
 
       {cameraError && (
         <View style={styles.errorOverlay} pointerEvents="none">
@@ -2564,11 +2619,6 @@ const styles = StyleSheet.create({
     height: 93,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  batchCaptureCountText: {
-    color: '#dedede',
-    fontSize: 28,
-    lineHeight: 34,
   },
   importContainer: {
     flex: 1,

@@ -21,11 +21,12 @@ const STATUS_LABELS = {
 
 // Indicator state never updates camera props or restarts the native preview.
 const CameraPreview = memo(function CameraPreview({
-  CameraComponent, cameraRef, enableTorch, flash, onCameraReady, onMountError,
+  CameraComponent, cameraRef, animateShutter, enableTorch, flash, onCameraReady, onMountError,
 }) {
   return (
     <CameraComponent
       ref={cameraRef}
+      animateShutter={animateShutter}
       autofocus={Platform.OS === 'ios' ? 'on' : undefined}
       enableTorch={enableTorch}
       facing="back"
@@ -42,6 +43,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   CameraComponent,
   cameraRef,
   disabled,
+  animateShutter = true,
   enableTorch,
   flash,
   onReadyChange,
@@ -56,6 +58,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   const [displayIndicator, setDisplayIndicator] = useState(null);
   const [ready, setReady] = useState(false);
   const mountedRef = useRef(true);
+  const previewFrameRef = useRef(null);
   const activeRef = useRef(appActive);
   const indicatorRef = useRef(indicator);
   const opacity = useRef(new Animated.Value(0)).current;
@@ -76,6 +79,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   useImperativeHandle(ref, () => ({
     prepareCaptureAsync: () => controller.prepareCaptureAsync(),
     finishCapture: () => controller.setEnabled(activeRef.current && ready),
+    measurePreviewInWindow: (callback) => previewFrameRef.current?.measureInWindow(callback),
   }), [controller, ready]);
 
   useEffect(() => {
@@ -168,11 +172,12 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   return (
     <View onLayout={handleLayout} style={[styles.stage, style]}>
       {previewSize.width > 0 && (
-        <View style={[styles.frame, previewSize]}>
+        <View ref={previewFrameRef} collapsable={false} style={[styles.frame, previewSize]}>
           {appActive && (
             <CameraPreview
               CameraComponent={CameraComponent}
               cameraRef={cameraRef}
+              animateShutter={animateShutter}
               enableTorch={enableTorch}
               flash={flash}
               onCameraReady={handleReady}
