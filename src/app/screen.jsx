@@ -8,15 +8,18 @@ import {
   BackHandler,
   FlatList,
   Platform,
-  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BatchEditor } from '@/components/batch-editor';
+import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { CaptureReview } from '@/components/capture-review';
+import { getBatchPhotoId, releaseTemporaryImagesAsync, savePendingBatchAsync } from '@/batch-workflow';
 import { FocusableCamera } from '@/components/focusable-camera';
 import { InvertAdjustments, PreviewFilters } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
@@ -163,7 +166,8 @@ function CameraModuleUnavailable() {
   );
 }
 
-function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
+function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving, saveProgress }) {
+  const { height } = useWindowDimensions();
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedMode, setSelectedMode] = useState('original');
   const [invertSettings, setInvertSettings] = useState(DEFAULT_INVERT_SETTINGS);
@@ -177,6 +181,8 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
     ? `invert:${getInvertSettingsKey(invertSettings)}`
     : selectedMode;
   const batchImageOptions = PREVIEW_FILTER_OPTIONS;
+  const hasSavedImages = saveProgress.completed > 0;
+  const changesLocked = isSaving || hasSavedImages;
   const activePhotos = selectedMode === 'original'
     ? photos
     : processedPhotosByMode[renderKey] ?? photos;
@@ -248,10 +254,12 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
           if (cancelled) return;
 
           const photo = photos[index];
+          const source = photo.sourcePhoto ?? photo;
           const enhancedPhoto = await renderPhoto({
-            uri: photo.uri,
-            sourceWidth: photo.width,
-            sourceHeight: photo.height,
+            uri: source.uri,
+            sourceWidth: source.width,
+            sourceHeight: source.height,
+            ...(photo.edits ? { corners: photo.edits.corners, rotation: photo.edits.rotation } : {}),
             ...(selectedMode === 'invert' ? { settings: invertSettings } : {}),
           });
           if (cancelled) {
@@ -308,36 +316,19 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
     void save.then(finish, finish);
   };
 
-  const moveToAdjacentPhoto = (direction) => {
-    setCurrentIndex((index) => Math.max(0, Math.min(photos.length - 1, index + direction)));
-  };
-
-  const swipeResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: (_, gestureState) =>
-        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.15 && Math.abs(gestureState.dx) > 12,
-      onPanResponderRelease: (_, gestureState) => {
-        if (Math.abs(gestureState.dx) >= 48) {
-          moveToAdjacentPhoto(gestureState.dx < 0 ? 1 : -1);
-        }
-      },
-    })
-  ).current;
-
   return (
     <View style={styles.batchReviewContainer}>
       <SafeAreaView style={styles.batchReviewSafeArea}>
         <View style={styles.batchReviewHeader}>
           <Pressable
-            accessibilityLabel="Return to batch camera"
+            accessibilityLabel="Edit batch framing"
             accessibilityRole="button"
-            disabled={isSaving}
+            disabled={changesLocked}
             onPress={onBack}
             style={({ pressed }) => [
               styles.batchReviewBackButton,
               pressed && styles.pressed,
-              isSaving && styles.disabled,
+              changesLocked && styles.disabled,
             ]}>
             <SymbolView
               name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
@@ -350,31 +341,13 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
               Review
             </ThemedText>
             <ThemedText style={styles.batchReviewSubtitle}>
-              {photos.length} {photos.length === 1 ? 'image' : 'images'} captured
+              {photos.length} {photos.length === 1 ? 'image' : 'images'} · Choose your finish
             </ThemedText>
           </View>
           <View style={styles.batchReviewHeaderSpacer} />
         </View>
 
-        <View style={styles.batchReviewImageFrame} {...swipeResponder.panHandlers}>
-          <Pressable
-            accessibilityLabel="Previous batch image"
-            accessibilityRole="button"
-            disabled={currentIndex === 0}
-            onPress={() => moveToAdjacentPhoto(-1)}
-            style={({ pressed }) => [
-              styles.batchReviewArrow,
-              styles.batchReviewPreviousArrow,
-              pressed && styles.pressed,
-              currentIndex === 0 && styles.disabled,
-            ]}>
-            <SymbolView
-              name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
-              size={24}
-              tintColor={REVIEW_BACKGROUND}
-            />
-          </Pressable>
-
+        <View style={styles.batchReviewImageFrame}>
           {currentPhoto ? (
             <Image
               key={currentPhoto.uri}
@@ -394,36 +367,24 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
             </View>
           ) : null}
 
-          <Pressable
-            accessibilityLabel="Next batch image"
-            accessibilityRole="button"
-            disabled={currentIndex >= photos.length - 1}
-            onPress={() => moveToAdjacentPhoto(1)}
-            style={({ pressed }) => [
-              styles.batchReviewArrow,
-              styles.batchReviewNextArrow,
-              pressed && styles.pressed,
-              currentIndex >= photos.length - 1 && styles.disabled,
-            ]}>
-            <SymbolView
-              name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
-              size={24}
-              tintColor={REVIEW_BACKGROUND}
-            />
-          </Pressable>
         </View>
 
-        <View accessibilityRole="none" style={styles.batchReviewPagination}>
-          {photos.map((photo, index) => (
-            <View
-              key={photo.uri || String(index)}
-              style={[
-                styles.batchReviewDot,
-                index === currentIndex && styles.batchReviewDotActive,
-              ]}
-            />
-          ))}
-        </View>
+        <BatchFilmstrip
+          photos={activePhotos}
+          selectedIndex={currentIndex}
+          onSelect={setCurrentIndex}
+          disabled={isSaving}
+          compact
+          showCaption={height >= 740}
+        />
+
+        {hasSavedImages && (
+          <View style={styles.batchSaveNotice} accessibilityLiveRegion="polite">
+            <ThemedText style={styles.batchSaveNoticeText}>
+              {saveProgress.completed} of {photos.length} saved. Retry saves only the remaining images.
+            </ThemedText>
+          </View>
+        )}
 
         <View style={styles.batchReviewToggleRow}>
           {batchImageOptions.map((option) => {
@@ -434,11 +395,11 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
                 key={option.value}
                 accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
                 accessibilityRole="button"
-                disabled={isSaving}
+                disabled={changesLocked}
                 onPress={() => setSelectedMode(option.value)}
                 style={({ pressed }) => [
                   styles.batchReviewToggle,
-                  isSaving && styles.disabled,
+                  changesLocked && styles.disabled,
                   isActive && styles.batchReviewToggleActive,
                   pressed && styles.pressed,
                 ]}>
@@ -460,12 +421,12 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
           visible={selectedMode === 'invert'}
           invertSettings={invertSettings}
           onInvertSettingsChange={changeInvertSettings}
-          disabled={isSaving}
+          disabled={changesLocked}
         />
 
         <View style={styles.batchReviewActions}>
           <Pressable
-            accessibilityLabel="Discard batch"
+            accessibilityLabel={hasSavedImages ? "Discard unsaved images" : "Discard batch"}
             accessibilityRole="button"
             disabled={isSaving}
             onPress={onDiscard}
@@ -481,12 +442,12 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
               tintColor={REVIEW_DISCARD_ACCENT}
             />
             <ThemedText type="smallBold" style={styles.batchReviewDiscardText}>
-              Discard
+              {hasSavedImages ? 'Discard remaining' : 'Discard'}
             </ThemedText>
           </Pressable>
 
           <Pressable
-            accessibilityLabel="Save batch"
+            accessibilityLabel={hasSavedImages ? "Save remaining batch images" : "Save batch"}
             accessibilityRole="button"
             disabled={isSaving || isProcessing || !selectedPhotos}
             onPress={saveSelectedPhotos}
@@ -506,7 +467,8 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving }) {
               />
             )}
             <ThemedText type="smallBold" style={styles.batchReviewSaveText}>
-              Save
+              {isSaving ? `${saveProgress.completed} / ${photos.length}`
+                : hasSavedImages ? `Retry (${photos.length - saveProgress.completed})` : 'Save batch'}
             </ThemedText>
           </Pressable>
         </View>
@@ -528,6 +490,10 @@ function CameraScreen() {
   const galleryHasMoreRef = useRef(true);
   const galleryRequestRef = useRef(0);
   const batchSaveInFlightRef = useRef(false);
+  const batchSavePromiseRef = useRef(null);
+  const singleSavePromiseRef = useRef(null);
+  const batchSavedAssetsRef = useRef(new Map());
+  const batchPrepareInFlightRef = useRef(false);
   const recentImageLoadStartedRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = cameraModule.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = mediaLibraryModule.usePermissions({
@@ -540,6 +506,12 @@ function CameraScreen() {
   const [captureMode, setCaptureMode] = useState('single');
   const [batchPhotos, setBatchPhotos] = useState([]);
   const [batchReviewPhotos, setBatchReviewPhotos] = useState(null);
+  const [batchEditorPhotos, setBatchEditorPhotos] = useState(null);
+  const [batchEdits, setBatchEdits] = useState({});
+  const [batchSelectedIndex, setBatchSelectedIndex] = useState(0);
+  const [isPreparingBatch, setIsPreparingBatch] = useState(false);
+  const [batchPreparationProgress, setBatchPreparationProgress] = useState(0);
+  const [batchSaveProgress, setBatchSaveProgress] = useState({ completed: 0, total: 0 });
   const [flashMode, setFlashMode] = useState('off');
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [savedPhoto, setSavedPhoto] = useState(null);
@@ -566,7 +538,7 @@ function CameraScreen() {
   const previewMountedRef = useRef(true);
 
   // Cover stack actions and native back gestures while saved files are in use.
-  usePreventRemove(isSavingBatch);
+  usePreventRemove(isSavingBatch || isSavingPreview || isPreparingBatch);
 
   const handleCameraReadiness = useCallback((ready) => {
     setIsCameraReady(ready);
@@ -590,7 +562,11 @@ function CameraScreen() {
   const cleanupTemporaryPreviewPhotos = useCallback(() => {
     const photos = [...temporaryPreviewPhotosRef.current.values()];
     temporaryPreviewPhotosRef.current.clear();
-    void cleanupProcessedImagesAsync(photos);
+    void releaseTemporaryImagesAsync(
+      photos,
+      [singleSavePromiseRef.current, batchSavePromiseRef.current],
+      cleanupProcessedImagesAsync
+    );
   }, []);
 
   const trackTemporaryPreviewPhoto = useCallback((photo) => {
@@ -802,31 +778,83 @@ function CameraScreen() {
   };
 
   const finishBatchCapture = () => {
-    if (captureMode !== 'batch' || !batchPhotos.length || isCapturing) return;
-
-    setBatchReviewPhotos(batchPhotos);
+    if (captureMode !== 'batch' || !batchPhotos.length || isCapturing || captureInFlightRef.current) return;
+    setBatchEditorPhotos(batchPhotos);
     setIsCameraReady(false);
   };
 
   const returnToBatchCamera = useCallback(() => {
-    if (batchSaveInFlightRef.current) return;
-    setBatchReviewPhotos(null);
+    if (batchSaveInFlightRef.current || batchPrepareInFlightRef.current) return;
+    setBatchEditorPhotos(null);
     setIsCameraReady(false);
   }, []);
+
+  const returnToBatchEditor = useCallback(() => {
+    if (batchSaveInFlightRef.current || batchSavedAssetsRef.current.size) return;
+    setBatchReviewPhotos(null);
+    setBatchEditorPhotos(batchPhotos);
+    cleanupTemporaryPreviewPhotos();
+  }, [batchPhotos, cleanupTemporaryPreviewPhotos]);
 
   useFocusEffect(useCallback(() => {
     if (!batchReviewPhotos) return undefined;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      returnToBatchCamera();
+      returnToBatchEditor();
       return true;
     });
     return () => subscription.remove();
-  }, [batchReviewPhotos, returnToBatchCamera]));
+  }, [batchReviewPhotos, returnToBatchEditor]));
+
+  const prepareBatchReview = async (editsById) => {
+    if (batchPrepareInFlightRef.current || batchSaveInFlightRef.current) return;
+    batchPrepareInFlightRef.current = true;
+    setIsPreparingBatch(true);
+    setBatchPreparationProgress(0);
+    setBatchEdits(editsById);
+    const prepared = [];
+    let committed = false;
+    try {
+      for (const photo of batchEditorPhotos) {
+        const edits = editsById[getBatchPhotoId(photo)] ?? { corners: getDefaultCorners(), rotation: 0 };
+        const needsProcessing = hasCustomCrop(edits.corners) || edits.rotation !== 0;
+        const rendered = needsProcessing
+          ? await renderPerspectiveCropAsync({
+              uri: photo.uri,
+              sourceWidth: photo.width,
+              sourceHeight: photo.height,
+              corners: edits.corners,
+              rotation: edits.rotation,
+            })
+          : photo;
+        prepared.push({ ...photo, ...rendered, sourcePhoto: photo, edits });
+        if (!previewMountedRef.current) return;
+        setBatchPreparationProgress(prepared.length);
+      }
+      prepared.forEach(trackTemporaryPreviewPhoto);
+      committed = true;
+      setBatchReviewPhotos(prepared);
+      setBatchEditorPhotos(null);
+    } catch (error) {
+      if (previewMountedRef.current) {
+        Alert.alert('Could not prepare batch', getErrorDetails(error).message);
+      }
+    } finally {
+      if (!committed) await cleanupProcessedImagesAsync(prepared);
+      batchPrepareInFlightRef.current = false;
+      if (previewMountedRef.current) setIsPreparingBatch(false);
+    }
+  };
 
   const discardBatch = () => {
-    if (batchSaveInFlightRef.current) return;
+    if (batchSaveInFlightRef.current || batchPrepareInFlightRef.current) return;
     setBatchPhotos([]);
     setBatchReviewPhotos(null);
+    setBatchEditorPhotos(null);
+    setBatchEdits({});
+    setBatchSelectedIndex(0);
+    batchSavedAssetsRef.current.clear();
+    setBatchSaveProgress({ completed: 0, total: 0 });
+    cleanupTemporaryPreviewPhotos();
     setCaptureMode('single');
     setIsCameraReady(false);
   };
@@ -836,33 +864,55 @@ function CameraScreen() {
 
     batchSaveInFlightRef.current = true;
     setIsSavingBatch(true);
+    const save = Promise.resolve().then(async () => {
+      try {
+        let permission = mediaPermission;
+        if (!permission?.granted) permission = await requestMediaPermission();
+        if (!permission?.granted) {
+          if (previewMountedRef.current) {
+            Alert.alert('Permission needed', 'Allow photo access to save this batch.');
+          }
+          return;
+        }
 
+        await savePendingBatchAsync(photosToSave, {
+          savedAssets: batchSavedAssetsRef.current,
+          savePhoto: (photo) => saveToSnippetsAlbum(mediaLibraryModule, photo.uri),
+          onProgress: (progress) => {
+            if (previewMountedRef.current) setBatchSaveProgress(progress);
+          },
+        });
+
+        if (!previewMountedRef.current) return;
+        setBatchPhotos([]);
+        setBatchReviewPhotos(null);
+        setBatchEdits({});
+        setBatchSelectedIndex(0);
+        batchSavedAssetsRef.current.clear();
+        setBatchSaveProgress({ completed: 0, total: 0 });
+        cleanupTemporaryPreviewPhotos();
+        setCaptureMode('single');
+        setIsCameraReady(false);
+      } catch (error) {
+        if (previewMountedRef.current) {
+          const completed = batchSavedAssetsRef.current.size;
+          Alert.alert(
+            'Could not finish saving batch',
+            getErrorDetails(error).message + (completed
+              ? `\n\n${completed} of ${photosToSave.length} images are already saved. Retry will save only the remaining images.`
+              : '')
+          );
+        }
+      }
+    });
+    // Register ownership before permission prompts or native saves can start.
+    batchSavePromiseRef.current = save;
     try {
-      let permission = mediaPermission;
-      if (!permission?.granted) {
-        permission = await requestMediaPermission();
-      }
-
-      if (!permission?.granted) {
-        Alert.alert('Permission needed', 'Allow photo access to save this batch.');
-        return;
-      }
-
-      for (const photo of photosToSave) {
-        await saveToSnippetsAlbum(mediaLibraryModule, photo.uri);
-      }
-
-      setBatchPhotos([]);
-      setBatchReviewPhotos(null);
-      setCaptureMode('single');
-      setIsCameraReady(false);
-    } catch (error) {
-      const details = getErrorDetails(error);
-      console.error('[screen] Batch save failed', details);
-      Alert.alert('Could not save batch', details.message);
+      await save;
     } finally {
+      batchSavePromiseRef.current = null;
       batchSaveInFlightRef.current = false;
-      setIsSavingBatch(false);
+      if (previewMountedRef.current) setIsSavingBatch(false);
     }
   };
 
@@ -988,48 +1038,56 @@ function CameraScreen() {
   };
 
   const saveSavedImage = async () => {
-    if (!displayedSavedPhoto?.uri || isSavingPreview || isEnhancing || previewBusyRef.current) return;
+    if (!displayedSavedPhoto?.uri || singleSavePromiseRef.current ||
+        isSavingPreview || isEnhancing || previewBusyRef.current) return;
 
     setIsSavingPreview(true);
+    const save = Promise.resolve().then(async () => {
+      try {
+        let permission = mediaPermission;
+        if (!permission?.granted) {
+          permission = await requestMediaPermission();
+        }
 
-    try {
-      let permission = mediaPermission;
-      if (!permission?.granted) {
-        permission = await requestMediaPermission();
-      }
+        if (!permission?.granted) {
+          Alert.alert('Permission needed', 'Allow photo access to save this image.');
+          return;
+        }
 
-      if (!permission?.granted) {
-        Alert.alert('Permission needed', 'Allow photo access to save this image.');
-        return;
-      }
+        const savedAsset = await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
+        const savedImage = await normalizeMediaLibraryImage(savedAsset);
 
-      const savedAsset = await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
-      const savedImage = await normalizeMediaLibraryImage(savedAsset);
-
-      if (savedImage?.uri) {
-        setRecentGalleryImage(savedImage);
-      } else if (!displayedSavedPhoto.temporary) {
-        setRecentGalleryImage({
+        if (!previewMountedRef.current) return;
+        if (savedImage?.uri) {
+          setRecentGalleryImage(savedImage);
+        } else if (!displayedSavedPhoto.temporary) {
+          setRecentGalleryImage({
+            uri: displayedSavedPhoto.uri,
+            width: displayedSavedPhoto.width,
+            height: displayedSavedPhoto.height,
+            fileName: displayedSavedPhoto.fileName ?? null,
+          });
+        }
+        console.log('[screen] Final image saved', {
+          mode: savedImageMode,
           uri: displayedSavedPhoto.uri,
-          width: displayedSavedPhoto.width,
-          height: displayedSavedPhoto.height,
-          fileName: displayedSavedPhoto.fileName ?? null,
+        });
+        closeSavedPhoto();
+      } catch (error) {
+        const details = getErrorDetails(error);
+        console.error('[screen] Final image save failed', details);
+        if (previewMountedRef.current) reportDiagnostic('Save final image', error, {
+          mode: savedImageMode,
+          sourceUri: displayedSavedPhoto?.uri ?? null,
         });
       }
-      console.log('[screen] Final image saved', {
-        mode: savedImageMode,
-        uri: displayedSavedPhoto.uri,
-      });
-      closeSavedPhoto();
-    } catch (error) {
-      const details = getErrorDetails(error);
-      console.error('[screen] Final image save failed', details);
-      reportDiagnostic('Save final image', error, {
-        mode: savedImageMode,
-        sourceUri: displayedSavedPhoto?.uri ?? null,
-      });
+    });
+    singleSavePromiseRef.current = save;
+    try {
+      await save;
     } finally {
-      setIsSavingPreview(false);
+      singleSavePromiseRef.current = null;
+      if (previewMountedRef.current) setIsSavingPreview(false);
     }
   };
 
@@ -1190,12 +1248,29 @@ function CameraScreen() {
     );
   }
 
+  if (batchEditorPhotos) {
+    return (
+      <BatchEditor
+        photos={batchEditorPhotos}
+        editsById={batchEdits}
+        onEditsChange={setBatchEdits}
+        selectedIndex={batchSelectedIndex}
+        onSelect={setBatchSelectedIndex}
+        onBack={returnToBatchCamera}
+        onNext={prepareBatchReview}
+        isPreparing={isPreparingBatch}
+        preparationProgress={batchPreparationProgress}
+      />
+    );
+  }
+
   if (batchReviewPhotos) {
     return (
       <BatchReviewScreen
         photos={batchReviewPhotos}
         isSaving={isSavingBatch}
-        onBack={returnToBatchCamera}
+        saveProgress={batchSaveProgress}
+        onBack={returnToBatchEditor}
         onDiscard={discardBatch}
         onSave={saveBatch}
       />
@@ -1912,24 +1987,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: PREVIEW_SURFACE,
   },
-  batchReviewArrow: {
-    position: 'absolute',
-    top: '50%',
-    zIndex: 2,
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: -22,
-    borderRadius: 22,
-    backgroundColor: 'rgba(0, 0, 0, 0.48)',
-  },
-  batchReviewPreviousArrow: {
-    left: Spacing.two,
-  },
-  batchReviewNextArrow: {
-    right: Spacing.two,
-  },
   batchReviewProcessingOverlay: {
     position: 'absolute',
     top: 0,
@@ -1944,25 +2001,16 @@ const styles = StyleSheet.create({
   batchReviewProcessingText: {
     color: REVIEW_BACKGROUND,
   },
-  batchReviewPagination: {
-    minHeight: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.one,
-    marginTop: Spacing.two,
+  batchSaveNotice: {
+    padding: 10,
+    borderRadius: 12,
+    backgroundColor: '#EAF6EF',
+    marginBottom: Spacing.one,
   },
-  batchReviewDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#B9C2CF',
-  },
-  batchReviewDotActive: {
-    width: 14,
-    height: 14,
-    borderRadius: 4,
-    backgroundColor: REVIEW_NEXT_ACCENT,
+  batchSaveNoticeText: {
+    color: '#28754F',
+    fontSize: 12,
+    lineHeight: 17,
   },
   batchReviewToggleRow: {
     width: '100%',
@@ -2034,9 +2082,13 @@ const styles = StyleSheet.create({
   },
   batchReviewDiscardText: {
     color: REVIEW_DISCARD_ACCENT,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   batchReviewSaveText: {
     color: REVIEW_BACKGROUND,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   batchReviewGrid: {
     paddingBottom: Spacing.four,

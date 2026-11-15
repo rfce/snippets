@@ -10,6 +10,7 @@ import { ThemedText } from '@/components/themed-text';
 import { getCropMagnifierLayout, projectCropPointIntoMagnifier } from '@/crop-magnifier-geometry';
 import {
   CROP_EDGES, copyCorners, getClosestCropHandle, getCropLineStyle, getDefaultCorners, getEdgeMidpoint,
+  hasCustomCrop,
   getImageViewport, getOutsideShadeStyle, moveCropHandle, rotateCornersClockwise,
 } from '@/crop-geometry';
 
@@ -111,7 +112,9 @@ export const CaptureReview = memo(function CaptureReview({
 
 // Only this canvas re-renders during a drag. The camera controller, review
 // controls, and source image do not receive a state update for every move.
-const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disabled }, ref) {
+export const CropEditor = forwardRef(function CropEditor({
+  photo, initialEdits, disabled, showCropHandles = true,
+}, ref) {
   const [edits, setEdits] = useState(() => ({
     rotation: initialEdits?.rotation ?? 0,
     corners: copyCorners(initialEdits?.corners ?? getDefaultCorners()),
@@ -175,8 +178,8 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
   }, [publishEdits]);
 
   useEffect(() => {
-    if (disabled) endDrag();
-  }, [disabled, endDrag]);
+    if (disabled || !showCropHandles) endDrag();
+  }, [disabled, showCropHandles, endDrag]);
 
   useImperativeHandle(ref, () => ({
     getEdits: () => ({
@@ -226,23 +229,25 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
       {viewport.width > 0 && viewport.height > 0 ? (
         <>
           <ReviewImage uri={photo.uri} rotation={edits.rotation} {...viewport} />
-          <View pointerEvents="none" style={[styles.imageOverlay, viewport]}>
-            <View needsOffscreenAlphaCompositing style={styles.shadeClip}>
+          {(showCropHandles || hasCustomCrop(edits.corners)) && (
+            <View pointerEvents="none" style={[styles.imageOverlay, viewport]}>
+              <View needsOffscreenAlphaCompositing style={styles.shadeClip}>
+                {edges.map(([name, [first, second]]) => (
+                  <View key={name} style={[
+                    styles.shade,
+                    getOutsideShadeStyle(edits.corners[first], edits.corners[second], viewport),
+                  ]} />
+                ))}
+              </View>
               {edges.map(([name, [first, second]]) => (
                 <View key={name} style={[
-                  styles.shade,
-                  getOutsideShadeStyle(edits.corners[first], edits.corners[second], viewport),
+                  styles.cropLine,
+                  getCropLineStyle(edits.corners[first], edits.corners[second], viewport),
                 ]} />
               ))}
             </View>
-            {edges.map(([name, [first, second]]) => (
-              <View key={name} style={[
-                styles.cropLine,
-                getCropLineStyle(edits.corners[first], edits.corners[second], viewport),
-              ]} />
-            ))}
-          </View>
-          {handles.map(({ name, position, isEdge }) => (
+          )}
+          {showCropHandles && handles.map(({ name, position, isEdge }) => (
             <DraggableHandle
               key={name}
               handle={name}
@@ -255,7 +260,7 @@ const CropEditor = forwardRef(function CropEditor({ photo, initialEdits, disable
               onEnd={endDrag}
             />
           ))}
-          {activeHandle && !disabled ? (
+          {showCropHandles && activeHandle && !disabled ? (
             <CropMagnifier
               uri={photo.uri}
               rotation={edits.rotation}
