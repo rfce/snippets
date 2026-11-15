@@ -160,17 +160,20 @@ function CaptureFlight({ capture, shown, onComplete }) {
   const { from } = geometry;
   const cardSize = useMemo(() => ({ width: from.width, height: from.height }), [from.width, from.height]);
   const progress = useRef(new Animated.Value(0)).current;
+  const visibility = useRef(new Animated.Value(0)).current;
   const playerRef = useRef(null);
-  const imageReadyRef = useRef(false);
+  const imageDisplayedRef = useRef(false);
   const shownRef = useRef(shown);
   shownRef.current = shown;
 
   useEffect(() => {
     let cancelled = false;
     progress.setValue(0);
+    visibility.setValue(0);
     const player = createBatchCapturePlayer({
       onComplete: () => { if (!cancelled) onComplete(capture.id); },
       startAnimation: (done) => {
+        visibility.setValue(1);
         const animation = Animated.sequence([
           Animated.delay(180),
           Animated.timing(progress, {
@@ -184,7 +187,7 @@ function CaptureFlight({ capture, shown, onComplete }) {
     });
     playerRef.current = player;
     // These signals may arrive in either order, including before this effect.
-    if (imageReadyRef.current) player.imageReady();
+    if (imageDisplayedRef.current) player.imageReady();
     if (shownRef.current) player.show();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') player.finish();
@@ -195,20 +198,21 @@ function CaptureFlight({ capture, shown, onComplete }) {
       cancelled = true;
       subscription.remove();
       player.dispose();
+      visibility.setValue(0);
       if (playerRef.current === player) playerRef.current = null;
     };
-  }, [capture.id, onComplete, progress]);
+  }, [capture.id, onComplete, progress, visibility]);
 
   useEffect(() => { if (shown) playerRef.current?.show(); }, [shown]);
-  const imageReady = useCallback(() => {
-    imageReadyRef.current = true;
+  const imageDisplayed = useCallback(() => {
+    imageDisplayedRef.current = true;
     playerRef.current?.imageReady();
   }, []);
   const imageFailed = useCallback(() => playerRef.current?.finish(), []);
   const motion = useMemo(() => getBatchCaptureMotion(geometry), [geometry]);
 
-  // The photo is visible from the first render. Only transforms and opacity
-  // animate, so the complete flight runs on the native UI thread.
+  // Decode in place while the entire card, border and shadow stay transparent.
+  // Reveal only after onDisplay and overlay readiness, then animate on the UI thread.
   const translationStyle = useMemo(() => ({
     transform: [
       { translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [0, motion.translateX] }) },
@@ -223,7 +227,7 @@ function CaptureFlight({ capture, shown, onComplete }) {
   return (
     <Animated.View
       collapsable={false}
-      style={[styles.flight, { left: from.x, top: from.y }, cardSize, translationStyle]}>
+      style={[styles.flight, { left: from.x, top: from.y, opacity: visibility }, cardSize, translationStyle]}>
       <Animated.View collapsable={false} style={[styles.flightPhoto, cardSize, photoStyle]}>
         <View collapsable={false} style={[styles.photoClip, cardSize]}>
           <Image
@@ -231,8 +235,7 @@ function CaptureFlight({ capture, shown, onComplete }) {
             recyclingKey={capture.photo.uri}
             contentFit="contain"
             transition={0}
-            onLoad={imageReady}
-            onDisplay={imageReady}
+            onDisplay={imageDisplayed}
             onError={imageFailed}
             style={cardSize}
           />

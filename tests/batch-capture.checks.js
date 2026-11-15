@@ -173,25 +173,46 @@ export async function runBatchCaptureChecks() {
     });
     return { time, state, player };
   };
-  check('image load cannot start motion before the native overlay is shown', () => {
+  check('a rendered image cannot start motion before the native overlay is shown', () => {
     const { player, state } = harness();
     player.imageReady();
     assert(state.starts === 0, 'wait for a visible native overlay');
     player.show();
     assert(state.starts === 1, 'start once shown');
   });
-  check('overlay show followed by image load starts the same flight once', () => {
+  check('overlay show followed by image display starts the same flight once', () => {
     const { player, state } = harness();
     player.show(); player.imageReady(); player.imageReady(); player.show();
     assert(state.starts === 1, 'both event orders and duplicate callbacks are safe');
     state.end(); state.end();
     assert(state.completed === 1, 'single completion');
   });
-  check('missing image display events no longer silently discard motion', () => {
+  check('slow image rendering never starts an empty flight via a timer', () => {
     const { player, state, time } = harness();
     player.show();
     time.advance(350);
-    assert(state.starts === 1 && state.completed === 0, 'visible card starts via bounded readiness fallback');
+    assert(state.starts === 0 && state.completed === 0, 'the old fallback must not reveal a black card');
+    time.advance(3000);
+    assert(state.starts === 0 && state.completed === 0, 'continue waiting for rendered pixels');
+    player.imageReady();
+    assert(state.starts === 1 && state.completed === 0, 'start only after image display');
+    state.end();
+    assert(state.completed === 1, 'complete the rendered flight normally');
+  });
+  check('an image that never renders is cleaned up without an empty animation', () => {
+    const { player, state, time } = harness();
+    player.show();
+    time.advance(7999);
+    assert(state.starts === 0 && state.completed === 0, 'keep waiting invisibly');
+    time.advance(1);
+    assert(state.starts === 0 && state.completed === 1, 'bounded hidden cleanup');
+    player.imageReady();
+    assert(state.starts === 0, 'late display must not resurrect an expired flight');
+  });
+  check('image errors before rendering never reveal or start a flight', () => {
+    const { player, state, time } = harness();
+    player.show(); player.finish(); player.imageReady(); time.advance(10000);
+    assert(state.starts === 0 && state.completed === 1, 'finish hidden and ignore late callbacks');
   });
   check('slow preparation gets a fresh animation budget after show', () => {
     const { player, state, time } = harness();

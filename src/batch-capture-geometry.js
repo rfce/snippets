@@ -118,15 +118,14 @@ export function appendBatchCaptureFlight(flights, capture) {
 
 export function createBatchCapturePlayer({
   startAnimation, onComplete, schedule = setTimeout, unschedule = clearTimeout,
-  prepareTimeout = 8000, animationTimeout = 4000, imageFallbackDelay = 350,
+  prepareTimeout = 8000, animationTimeout = 4000,
 }) {
   let active = true, started = false, shown = false, imageReady = false;
-  let stopAnimation, timeout, imageFallback;
+  let stopAnimation, timeout;
   const finish = () => {
     if (!active) return;
     active = false;
     unschedule(timeout);
-    unschedule(imageFallback);
     stopAnimation?.();
     onComplete();
   };
@@ -134,7 +133,6 @@ export function createBatchCapturePlayer({
     if (!active || started || !shown || !imageReady) return;
     started = true;
     unschedule(timeout);
-    unschedule(imageFallback);
     timeout = schedule(finish, animationTimeout);
     stopAnimation = startAnimation(finish);
     if (!active) stopAnimation?.();
@@ -144,16 +142,15 @@ export function createBatchCapturePlayer({
     show() {
       if (!active || shown) return;
       shown = true;
-      if (imageReady) begin();
-      else imageFallback = schedule(() => { imageReady = true; begin(); }, imageFallbackDelay);
+      begin();
     },
+    // Only a rendered-image signal may enable the flight, never a timer.
     imageReady() { imageReady = true; begin(); },
     finish,
     dispose() {
       if (!active) return;
       active = false;
       unschedule(timeout);
-      unschedule(imageFallback);
       stopAnimation?.();
     },
     isActive: () => active,
