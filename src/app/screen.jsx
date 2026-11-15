@@ -530,6 +530,9 @@ function CameraScreen() {
   const [batchEditorPhotos, setBatchEditorPhotos] = useState(null);
   const [batchEdits, setBatchEdits] = useState({});
   const [batchSelectedIndex, setBatchSelectedIndex] = useState(0);
+  useEffect(() => {
+    setBatchSelectedIndex((index) => Math.min(index, Math.max(0, batchPhotos.length - 1)));
+  }, [batchPhotos.length]);
   const [isPreparingBatch, setIsPreparingBatch] = useState(false);
   const [batchPreparationProgress, setBatchPreparationProgress] = useState(0);
   const [batchSaveProgress, setBatchSaveProgress] = useState({ completed: 0, total: 0 });
@@ -855,6 +858,24 @@ function CameraScreen() {
     setCaptureBlink(null);
     setBatchSelectedIndex(batchPhotos.length - 1);
     setBatchEditorPhotos(batchPhotos);
+    setIsCameraReady(false);
+  };
+
+  const deleteBatchPhoto = (photo) => {
+    if (!photo?.uri || batchPrepareInFlightRef.current || batchSaveInFlightRef.current ||
+      batchSavedAssetsRef.current.size) return;
+    const id = getBatchPhotoId(photo);
+    setBatchPhotos((current) => current.filter((item) => item.uri !== photo.uri));
+    setBatchEditorPhotos((current) => {
+      if (!current) return null;
+      const remaining = current.filter((item) => item.uri !== photo.uri);
+      return remaining.length ? remaining : null;
+    });
+    setBatchEdits((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
     setIsCameraReady(false);
   };
 
@@ -1352,6 +1373,7 @@ function CameraScreen() {
         onSelect={setBatchSelectedIndex}
         onBack={returnToBatchCamera}
         onDone={returnToBatchCamera}
+        onDelete={deleteBatchPhoto}
       />
     );
   }
@@ -1626,8 +1648,8 @@ function CameraScreen() {
         <View style={styles.captureControlsRow}>
           {captureMode === 'batch' ? (
             <Pressable
-              accessibilityLabel={`Edit batch framing. ${batchPhotos.length} ${batchPhotos.length === 1 ? 'image' : 'images'} captured.`}
-              accessibilityHint="Opens Frame your stack to crop or rotate captured images."
+              accessibilityLabel={`Edit batch images. ${batchPhotos.length} ${batchPhotos.length === 1 ? 'image' : 'images'} captured.`}
+              accessibilityHint="Opens Edit image to crop, rotate, or delete captured images."
               accessibilityRole="button"
               accessibilityState={{ disabled: !batchPhotos.length || isCapturing }}
               disabled={!batchPhotos.length || isCapturing}

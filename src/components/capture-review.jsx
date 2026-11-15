@@ -113,7 +113,7 @@ export const CaptureReview = memo(function CaptureReview({
 // Only this canvas re-renders during a drag. The camera controller, review
 // controls, and source image do not receive a state update for every move.
 export const CropEditor = forwardRef(function CropEditor({
-  photo, initialEdits, disabled, showCropHandles = true,
+  photo, initialEdits, disabled, showCropHandles = true, viewportPadding = 28,
 }, ref) {
   const [edits, setEdits] = useState(() => ({
     rotation: initialEdits?.rotation ?? 0,
@@ -211,7 +211,7 @@ export const CropEditor = forwardRef(function CropEditor({
 
   const sourceRatio = photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 4 / 3;
   const aspectRatio = edits.rotation % 180 === 0 ? sourceRatio : 1 / sourceRatio;
-  const viewport = getImageViewport(frame, aspectRatio);
+  const viewport = getImageViewport(frame, aspectRatio, viewportPadding);
   const edges = Object.entries(CROP_EDGES);
   const handles = [
     ...edges.map(([name]) => ({ name, position: getEdgeMidpoint(edits.corners, name), isEdge: true })),
