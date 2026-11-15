@@ -9,6 +9,7 @@ import {
   getCameraPreviewSize,
   getNativeFocusCamera,
 } from '@/camera-focus';
+import { createBatchCaptureSizeController } from '@/camera-capture';
 
 const STATUS_LABELS = {
   focusing: 'Focusing…',
@@ -21,7 +22,7 @@ const STATUS_LABELS = {
 
 // Indicator state never updates camera props or restarts the native preview.
 const CameraPreview = memo(function CameraPreview({
-  CameraComponent, cameraRef, animateShutter, enableTorch, flash, onCameraReady, onMountError,
+  CameraComponent, cameraRef, animateShutter, enableTorch, flash, pictureSize, onCameraReady, onMountError,
 }) {
   return (
     <CameraComponent
@@ -31,6 +32,7 @@ const CameraPreview = memo(function CameraPreview({
       enableTorch={enableTorch}
       facing="back"
       flash={flash}
+      pictureSize={pictureSize}
       ratio={Platform.OS === 'android' ? '4:3' : undefined}
       onCameraReady={onCameraReady}
       onMountError={onMountError}
@@ -44,6 +46,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   cameraRef,
   disabled,
   animateShutter = true,
+  batchMode = false,
   enableTorch,
   flash,
   onReadyChange,
@@ -57,6 +60,9 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   const [indicator, setIndicator] = useState(null);
   const [displayIndicator, setDisplayIndicator] = useState(null);
   const [ready, setReady] = useState(false);
+  const [batchPictureSize, setBatchPictureSize] = useState(undefined);
+  const captureBusyRef = useRef(disabled);
+  captureBusyRef.current = disabled;
   const mountedRef = useRef(true);
   const previewFrameRef = useRef(null);
   const activeRef = useRef(appActive);
@@ -74,6 +80,15 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
     });
   }
   const controller = controllerRef.current;
+  const sizeControllerRef = useRef(null);
+  if (!sizeControllerRef.current) {
+    sizeControllerRef.current = createBatchCaptureSizeController({
+      getCamera: () => cameraRef.current,
+      isBusy: () => captureBusyRef.current,
+      onSize: (size) => { if (mountedRef.current) setBatchPictureSize(size); },
+    });
+  }
+  const sizeController = sizeControllerRef.current;
   const previewSize = getCameraPreviewSize(stageSize.width, stageSize.height);
 
   useImperativeHandle(ref, () => ({
@@ -84,10 +99,12 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
 
   useEffect(() => {
     mountedRef.current = true;
+    sizeController.setActive(activeRef.current);
     const subscription = AppState.addEventListener('change', (state) => {
       const nextActive = state === 'active';
       if (nextActive === activeRef.current) return;
       activeRef.current = nextActive;
+      sizeController.setActive(nextActive);
       controller.setEnabled(false);
       controller.reset();
       setReady(false);
@@ -96,15 +113,18 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
     });
     return () => {
       mountedRef.current = false;
+      sizeController.setActive(false);
       controller.dispose();
       subscription.remove();
     };
-  }, [controller, onReadyChange]);
+  }, [controller, onReadyChange, sizeController]);
 
   useEffect(() => {
     controller.setEnabled(appActive && ready && !disabled);
     if (disabled) controller.hide();
-  }, [appActive, controller, disabled, ready]);
+    // Never reconfigure the camera while a photo is being captured/saved.
+    sizeController.flush();
+  }, [appActive, controller, disabled, ready, sizeController]);
 
   useEffect(() => {
     opacity.stopAnimation();
@@ -147,15 +167,19 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
     if (!mountedRef.current || !activeRef.current) return;
     setReady(true);
     onReadyChange(true);
-  }, [onReadyChange]);
+    sizeController.setActive(true);
+    // Discover supported sizes once while idle; shutter presses never await it.
+    void sizeController.prepare();
+  }, [onReadyChange, sizeController]);
 
   const handleMountError = useCallback((event) => {
+    sizeController.setActive(false);
     controller.setEnabled(false);
     controller.reset();
     setReady(false);
     onReadyChange(false);
     onMountError?.(event);
-  }, [controller, onMountError, onReadyChange]);
+  }, [controller, onMountError, onReadyChange, sizeController]);
 
   const handleTap = ({ nativeEvent }) => {
     const point = getCameraFocusPoint(
@@ -180,6 +204,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
               animateShutter={animateShutter}
               enableTorch={enableTorch}
               flash={flash}
+              pictureSize={batchMode ? batchPictureSize : undefined}
               onCameraReady={handleReady}
               onMountError={handleMountError}
             />

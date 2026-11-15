@@ -791,8 +791,11 @@ function CameraScreen() {
       if (focusResult?.status === 'cancelled' || !cameraRef.current) return;
 
       const photo = await cameraRef.current.takePictureAsync({
-        format: 'jpg',
+        imageType: 'jpg',
         quality: 0.92,
+        base64: false,
+        exif: false,
+        skipProcessing: false,
         shutterSound: false,
       });
 
@@ -1519,6 +1522,7 @@ function CameraScreen() {
           cameraRef={cameraRef}
           disabled={isCapturing}
           animateShutter={captureMode !== 'batch'}
+          batchMode={captureMode === 'batch'}
           enableTorch={flashMode === 'torch'}
           flash={flashMode === 'flash' ? 'on' : 'off'}
           onReadyChange={handleCameraReadiness}
@@ -1651,19 +1655,20 @@ function CameraScreen() {
             <Pressable
               accessibilityLabel="Capture photo"
               accessibilityRole="button"
+              accessibilityState={{ disabled: !isCameraReady || isCapturing, busy: isCapturing }}
               disabled={!isCameraReady || isCapturing}
               onPress={capturePhoto}
               style={({ pressed }) => [
                 styles.captureButton,
                 { borderColor: '#16C7B7' },
                 pressed && styles.pressed,
-                (!isCameraReady || isCapturing) && styles.disabled,
+                !isCameraReady && styles.disabled,
               ]}>
-              {isCapturing ? (
-                <ActivityIndicator color={Colors.light.text} />
-              ) : (
-                <View style={[styles.captureButtonInner, { backgroundColor: Colors.light.background }]} />
-              )}
+              <View style={[
+                styles.captureButtonInner,
+                { backgroundColor: Colors.light.background },
+                isCapturing && styles.captureButtonInnerBusy,
+              ]} />
             </Pressable>
           </View>
 
@@ -2723,6 +2728,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(0, 0, 0, 0.12)',
   },
+  captureButtonInnerBusy: { transform: [{ scale: 0.82 }], opacity: 0.65 },
   pressed: {
     opacity: 0.7,
   },

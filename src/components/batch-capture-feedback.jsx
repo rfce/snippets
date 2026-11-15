@@ -32,15 +32,18 @@ export const BatchCaptureTray = memo(forwardRef(function BatchCaptureTray({ phot
             accessible={false}
             style={StyleSheet.absoluteFill}
           />
-          <View style={[styles.countLayer, CAN_INVERT_COUNT && styles.invertedCount]}>
-            <Text
-              allowFontScaling={false}
-              adjustsFontSizeToFit
-              minimumFontScale={0.5}
-              numberOfLines={1}
-              style={[styles.countText, count > 99 && styles.largeCount]}>
-              {count}
-            </Text>
+          <View style={styles.countLayer}>
+            <View style={CAN_INVERT_COUNT && styles.invertedCount}>
+              <Text
+                allowFontScaling={false}
+                adjustsFontSizeToFit
+                minimumFontScale={0.5}
+                numberOfLines={1}
+                ellipsizeMode="clip"
+                style={[styles.countText, count > 99 && styles.largeCount]}>
+                {String(count)}
+              </Text>
+            </View>
           </View>
         </>
       )}
@@ -188,6 +191,7 @@ const styles = StyleSheet.create({
   countText: {
     color: '#FFFFFF', fontSize: 25, lineHeight: 32, fontWeight: '800',
     fontVariant: ['tabular-nums'], textAlign: 'center', maxWidth: 56, includeFontPadding: false,
+    padding: 0, margin: 0, backgroundColor: 'transparent', textDecorationLine: 'none',
   },
   largeCount: { fontSize: 19, lineHeight: 28 },
   overlay: { flex: 1, backgroundColor: 'transparent' },
