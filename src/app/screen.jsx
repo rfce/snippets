@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { BatchCaptureOverlay, BatchCaptureTray } from '@/components/batch-capture-feedback';
+import { CameraCaptureOverlay, BatchCaptureTray } from '@/components/batch-capture-feedback';
 import { BatchEditor } from '@/components/batch-editor';
 import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeometry } from '@/batch-capture-geometry';
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
@@ -514,6 +514,11 @@ function CameraScreen() {
   const [captureMode, setCaptureMode] = useState('single');
   const [batchPhotos, setBatchPhotos] = useState([]);
   const [batchCaptureFlights, setBatchCaptureFlights] = useState([]);
+  const [captureBlink, setCaptureBlink] = useState(null);
+  const captureBlinkSequenceRef = useRef(0);
+  const completeCaptureBlink = useCallback((id) => {
+    setCaptureBlink((current) => current?.id === id ? null : current);
+  }, []);
   const completeBatchCaptureFlight = useCallback((id) => {
     setBatchCaptureFlights((current) => current.filter((capture) => capture.id !== id));
   }, []);
@@ -740,6 +745,7 @@ function CameraScreen() {
 
     // Retain captures so switching back to Batch resumes the existing batch.
     setBatchCaptureFlights([]);
+    setCaptureBlink(null);
     setCaptureMode(mode);
   }, [captureMode]);
 
@@ -758,6 +764,7 @@ function CameraScreen() {
         setIsFocused(false);
         setIsCameraReady(false);
         setBatchCaptureFlights([]);
+        setCaptureBlink(null);
       };
     }, [])
   );
@@ -786,6 +793,12 @@ function CameraScreen() {
     setIsCapturing(true);
 
     try {
+      if (cameraFeedbackFocusedRef.current && previewMountedRef.current) {
+        const geometry = snapshotBatchCaptureGeometry(
+          {}, cameraViewportRef.current ?? windowSize, insets, captureBoundsRef.current, Spacing.three, windowSize
+        );
+        setCaptureBlink({ id: ++captureBlinkSequenceRef.current, geometry });
+      }
       if (captureMode === 'batch') refreshCaptureBounds();
       const focusResult = await focusControllerRef.current?.prepareCaptureAsync();
       if (focusResult?.status === 'cancelled' || !cameraRef.current) return;
@@ -813,6 +826,7 @@ function CameraScreen() {
           setBatchCaptureFlights((current) => appendBatchCaptureFlight(current, capture));
         }
       } else {
+        setCaptureBlink(null);
         setCapturedPhoto(photo);
         reviewEditsRef.current = null;
       }
@@ -832,6 +846,7 @@ function CameraScreen() {
   const finishBatchCapture = () => {
     if (captureMode !== 'batch' || !batchPhotos.length || isCapturing || captureInFlightRef.current) return;
     setBatchCaptureFlights([]);
+    setCaptureBlink(null);
     setBatchEditorPhotos(batchPhotos);
     setIsCameraReady(false);
   };
@@ -1521,7 +1536,7 @@ function CameraScreen() {
           CameraComponent={CameraView}
           cameraRef={cameraRef}
           disabled={isCapturing}
-          animateShutter={captureMode !== 'batch'}
+          animateShutter={false}
           batchMode={captureMode === 'batch'}
           enableTorch={flashMode === 'torch'}
           flash={flashMode === 'flash' ? 'on' : 'off'}
@@ -1662,12 +1677,11 @@ function CameraScreen() {
                 styles.captureButton,
                 { borderColor: '#16C7B7' },
                 pressed && styles.pressed,
-                !isCameraReady && styles.disabled,
+                (!isCameraReady || isCapturing) && styles.disabled,
               ]}>
               <View style={[
                 styles.captureButtonInner,
                 { backgroundColor: Colors.light.background },
-                isCapturing && styles.captureButtonInnerBusy,
               ]} />
             </Pressable>
           </View>
@@ -1699,9 +1713,11 @@ function CameraScreen() {
         </View>
       </View>
 
-      {isFocused && captureMode === 'batch' && batchCaptureFlights.length > 0 && (
-        <BatchCaptureOverlay
+      {isFocused && (captureBlink || batchCaptureFlights.length > 0) && (
+        <CameraCaptureOverlay
+          blink={captureBlink}
           flights={batchCaptureFlights}
+          onBlinkComplete={completeCaptureBlink}
           onComplete={completeBatchCaptureFlight}
         />
       )}
@@ -2728,7 +2744,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(0, 0, 0, 0.12)',
   },
-  captureButtonInnerBusy: { transform: [{ scale: 0.82 }], opacity: 0.65 },
   pressed: {
     opacity: 0.7,
   },

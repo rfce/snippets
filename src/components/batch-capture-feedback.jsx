@@ -52,17 +52,23 @@ export const BatchCaptureTray = memo(forwardRef(function BatchCaptureTray({ phot
   );
 }));
 
-export function BatchCaptureOverlay({ flights, onComplete }) {
+export function CameraCaptureOverlay({ blink, flights, onBlinkComplete, onComplete }) {
   const [shown, setShown] = useState(false);
-  const markShown = useCallback(() => setShown(true), []);
+  const [presented, setPresented] = useState(false);
+  const markShown = useCallback(() => {
+    setShown(true);
+    setPresented(true);
+  }, []);
+  const markLayout = useCallback(() => setShown(true), []);
   const dismiss = useCallback(() => {
+    if (blink) onBlinkComplete(blink.id);
     flights.forEach((capture) => onComplete(capture.id));
-  }, [flights, onComplete]);
+  }, [blink, flights, onBlinkComplete, onComplete]);
 
   return (
     <Modal
       transparent
-      visible={flights.length > 0}
+      visible={Boolean(blink) || flights.length > 0}
       animationType="none"
       presentationStyle="overFullScreen"
       statusBarTranslucent
@@ -74,13 +80,75 @@ export function BatchCaptureOverlay({ flights, onComplete }) {
         pointerEvents="none"
         accessibilityElementsHidden
         importantForAccessibility="no-hide-descendants"
-        onLayout={markShown}
+        onLayout={markLayout}
         style={styles.overlay}>
+        {blink && (
+          <CaptureBlink key={blink.id} blink={blink} shown={presented} onComplete={onBlinkComplete} />
+        )}
         {flights.map((capture) => (
           <CaptureFlight key={capture.id} capture={capture} shown={shown} onComplete={onComplete} />
         ))}
       </View>
     </Modal>
+  );
+}
+
+function CaptureBlink({ blink, shown, onComplete }) {
+  const { width, height } = useWindowDimensions();
+  const preview = useMemo(() => resolveBatchCaptureCardGeometry(
+    {}, blink.geometry, { width, height }
+  ).preview, [blink.geometry, width, height]);
+  const progress = useRef(new Animated.Value(0)).current;
+  const opacity = useMemo(() => progress.interpolate({
+    inputRange: [0, 0.12, 0.26, 0.36, 0.68, 1],
+    outputRange: [0, 0.6, 0.96, 0.96, 0.2, 0],
+    extrapolate: 'clamp',
+  }), [progress]);
+
+  useEffect(() => {
+    // A failed native presentation must never leave an invisible modal open.
+    const finish = () => onComplete(blink.id);
+    const timeout = setTimeout(finish, 3000);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') finish();
+    });
+    if (['background', 'inactive'].includes(AppState.currentState)) finish();
+    return () => {
+      clearTimeout(timeout);
+      subscription.remove();
+    };
+  }, [blink.id, onComplete]);
+
+  useEffect(() => {
+    if (!shown) return;
+    let cancelled = false;
+    progress.setValue(0);
+    const animation = Animated.timing(progress, {
+      toValue: 1, duration: 460, easing: Easing.linear,
+      useNativeDriver: true, isInteraction: false,
+    });
+    const finish = () => {
+      if (cancelled) return;
+      cancelled = true;
+      onComplete(blink.id);
+    };
+    animation.start(({ finished }) => { if (finished) finish(); });
+    return () => {
+      cancelled = true;
+      animation.stop();
+      progress.setValue(0);
+    };
+  }, [blink.id, shown, onComplete, progress]);
+
+  return (
+    <Animated.View
+      collapsable={false}
+      pointerEvents="none"
+      style={[
+        styles.captureBlink,
+        { left: preview.x, top: preview.y, width: preview.width, height: preview.height, opacity },
+      ]}
+    />
   );
 }
 
@@ -195,6 +263,7 @@ const styles = StyleSheet.create({
   },
   largeCount: { fontSize: 19, lineHeight: 28 },
   overlay: { flex: 1, backgroundColor: 'transparent' },
+  captureBlink: { position: 'absolute', backgroundColor: '#000000', borderRadius: 24 },
   flight: { position: 'absolute' },
   flightPhoto: {
     backgroundColor: '#0B1521', borderRadius: 16,
