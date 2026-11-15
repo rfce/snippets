@@ -514,6 +514,10 @@ function CameraScreen() {
   const [captureMode, setCaptureMode] = useState('single');
   const [batchPhotos, setBatchPhotos] = useState([]);
   const [batchCaptureFlights, setBatchCaptureFlights] = useState([]);
+  // The square advances when a flight is removed at landing, not at capture.
+  const landedBatchPhotos = batchPhotos.filter((photo) =>
+    !batchCaptureFlights.some((capture) => capture.photo.uri === photo.uri)
+  );
   const [captureBlink, setCaptureBlink] = useState(null);
   const captureBlinkSequenceRef = useRef(0);
   const completeCaptureBlink = useCallback((id) => {
@@ -817,7 +821,6 @@ function CameraScreen() {
       }
 
       if (captureMode === 'batch') {
-        setBatchPhotos((current) => [...current, photo]);
         if (cameraFeedbackFocusedRef.current && previewMountedRef.current) {
           const geometry = snapshotBatchCaptureGeometry(
             photo, cameraViewportRef.current ?? windowSize, insets, captureBoundsRef.current, Spacing.three, windowSize
@@ -825,6 +828,7 @@ function CameraScreen() {
           const capture = { id: ++batchCaptureSequenceRef.current, photo, geometry };
           setBatchCaptureFlights((current) => appendBatchCaptureFlight(current, capture));
         }
+        setBatchPhotos((current) => [...current, photo]);
       } else {
         setCaptureBlink(null);
         setCapturedPhoto(photo);
@@ -1605,8 +1609,9 @@ function CameraScreen() {
               <BatchCaptureTray
                 ref={batchTrayRef}
                 onLayout={refreshCaptureBounds}
-                photo={batchPhotos[batchPhotos.length - 1]}
-                count={batchPhotos.length}
+                photo={landedBatchPhotos[landedBatchPhotos.length - 1]}
+                count={landedBatchPhotos.length}
+                pendingPhotos={batchCaptureFlights.map((capture) => capture.photo)}
               />
             </View>
           ) : (

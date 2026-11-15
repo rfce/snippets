@@ -6,8 +6,15 @@ import { createBatchCapturePlayer, getBatchCaptureMotion, resolveBatchCaptureCar
 
 const CAN_INVERT_COUNT = Platform.OS !== 'android' || Number(Platform.Version) >= 29;
 
-export const BatchCaptureTray = memo(forwardRef(function BatchCaptureTray({ photo, count, onLayout }, ref) {
+export const BatchCaptureTray = memo(forwardRef(function BatchCaptureTray({
+  photo, count, pendingPhotos = [], onLayout,
+}, ref) {
   const hasPhoto = Boolean(photo?.uri) && count > 0;
+  // Keep pending thumbnails mounted at zero opacity. The URI key survives the
+  // handoff, so landing reveals a prepared image without reloading its source.
+  const images = [...new Map(
+    [photo, ...pendingPhotos].filter((item) => item?.uri).map((item) => [item.uri, item])
+  ).values()];
   return (
     <View
       ref={ref}
@@ -21,31 +28,31 @@ export const BatchCaptureTray = memo(forwardRef(function BatchCaptureTray({ phot
         ? `${count} ${count === 1 ? 'image' : 'images'} captured in batch. Latest capture shown.`
         : 'No batch captures yet'}
       style={[styles.tray, !hasPhoto && styles.emptyTray]}>
+      {images.map((item) => (
+        <Image
+          key={item.uri}
+          source={item.uri}
+          recyclingKey={item.uri}
+          contentFit="cover"
+          transition={0}
+          accessible={false}
+          style={[StyleSheet.absoluteFill, { opacity: hasPhoto && item.uri === photo.uri ? 1 : 0 }]}
+        />
+      ))}
       {hasPhoto && (
-        <>
-          <Image
-            key={photo.uri}
-            source={photo.uri}
-            recyclingKey={photo.uri}
-            contentFit="cover"
-            transition={0}
-            accessible={false}
-            style={StyleSheet.absoluteFill}
-          />
-          <View style={styles.countLayer}>
-            <View style={CAN_INVERT_COUNT && styles.invertedCount}>
-              <Text
-                allowFontScaling={false}
-                adjustsFontSizeToFit
-                minimumFontScale={0.5}
-                numberOfLines={1}
-                ellipsizeMode="clip"
-                style={[styles.countText, count > 99 && styles.largeCount]}>
-                {String(count)}
-              </Text>
-            </View>
+        <View style={styles.countLayer}>
+          <View style={CAN_INVERT_COUNT && styles.invertedCount}>
+            <Text
+              allowFontScaling={false}
+              adjustsFontSizeToFit
+              minimumFontScale={0.5}
+              numberOfLines={1}
+              ellipsizeMode="clip"
+              style={[styles.countText, count > 99 && styles.largeCount]}>
+              {String(count)}
+            </Text>
           </View>
-        </>
+        </View>
       )}
       <View style={styles.trayBorder} />
     </View>
