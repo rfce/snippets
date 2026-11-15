@@ -18,6 +18,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { CameraCaptureOverlay, BatchCaptureTray } from '@/components/batch-capture-feedback';
 import { BatchEditor } from '@/components/batch-editor';
+import { getBatchEditKey, renderBatchEditAsync } from '@/batch-editing';
 import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeometry } from '@/batch-capture-geometry';
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { CaptureReview } from '@/components/capture-review';
@@ -256,12 +257,13 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving, savePr
           if (cancelled) return;
 
           const photo = photos[index];
-          const source = photo.sourcePhoto ?? photo;
+          const source = photo;
           const enhancedPhoto = await renderPhoto({
             uri: source.uri,
             sourceWidth: source.width,
             sourceHeight: source.height,
-            ...(photo.edits ? { corners: photo.edits.corners, rotation: photo.edits.rotation } : {}),
+            corners: getDefaultCorners(),
+            rotation: 0,
             ...(selectedMode === 'invert' ? { settings: invertSettings } : {}),
           });
           if (cancelled) {
@@ -502,6 +504,10 @@ function CameraScreen() {
   const singleSavePromiseRef = useRef(null);
   const batchSavedAssetsRef = useRef(new Map());
   const batchPrepareInFlightRef = useRef(false);
+  const batchEditPromiseRef = useRef(null);
+  const batchEditImagesRef = useRef(new Map());
+  const batchRenderedPhotosRef = useRef({});
+  const [batchRenderedPhotos, setBatchRenderedPhotos] = useState({});
   const recentImageLoadStartedRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = cameraModule.useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = mediaLibraryModule.usePermissions({
@@ -517,7 +523,7 @@ function CameraScreen() {
   // The square advances when a flight is removed at landing, not at capture.
   const landedBatchPhotos = batchPhotos.filter((photo) =>
     !batchCaptureFlights.some((capture) => capture.photo.uri === photo.uri)
-  );
+  ).map((photo) => batchRenderedPhotos[getBatchPhotoId(photo)] ?? photo);
   const [captureBlink, setCaptureBlink] = useState(null);
   const captureBlinkSequenceRef = useRef(0);
   const completeCaptureBlink = useCallback((id) => {
@@ -533,8 +539,7 @@ function CameraScreen() {
   useEffect(() => {
     setBatchSelectedIndex((index) => Math.min(index, Math.max(0, batchPhotos.length - 1)));
   }, [batchPhotos.length]);
-  const [isPreparingBatch, setIsPreparingBatch] = useState(false);
-  const [batchPreparationProgress, setBatchPreparationProgress] = useState(0);
+  const [isApplyingBatchEdit, setIsApplyingBatchEdit] = useState(false);
   const [batchSaveProgress, setBatchSaveProgress] = useState({ completed: 0, total: 0 });
   const [flashMode, setFlashMode] = useState('off');
   const [capturedPhoto, setCapturedPhoto] = useState(null);
@@ -562,7 +567,7 @@ function CameraScreen() {
   const previewMountedRef = useRef(true);
 
   // Cover stack actions and native back gestures while saved files are in use.
-  usePreventRemove(isSavingBatch || isSavingPreview || isPreparingBatch);
+  usePreventRemove(isSavingBatch || isSavingPreview || isApplyingBatchEdit);
 
   const refreshCaptureBounds = useCallback(() => {
     // Cache idle-camera bounds before the shutter runs; feedback never awaits
@@ -624,6 +629,24 @@ function CameraScreen() {
     }
   }, []);
 
+  const cleanupBatchEdits = useCallback((updateState = true) => {
+    const photos = [...batchEditImagesRef.current.values()];
+    batchEditImagesRef.current.clear();
+    batchRenderedPhotosRef.current = {};
+    if (updateState) setBatchRenderedPhotos({});
+    if (photos.length) {
+      void releaseTemporaryImagesAsync(
+        photos,
+        [batchEditPromiseRef.current, batchSavePromiseRef.current],
+        cleanupProcessedImagesAsync
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!batchPhotos.length) cleanupBatchEdits();
+  }, [batchPhotos.length, cleanupBatchEdits]);
+
   useEffect(() => {
     previewMountedRef.current = true;
     return () => {
@@ -632,8 +655,9 @@ function CameraScreen() {
       previewBusyRef.current = false;
       invertPhotoCacheRef.current.clear();
       cleanupTemporaryPreviewPhotos();
+      cleanupBatchEdits(false);
     };
-  }, [cleanupTemporaryPreviewPhotos]);
+  }, [cleanupBatchEdits, cleanupTemporaryPreviewPhotos]);
 
   const loadRecentGalleryImage = useCallback(async () => {
     if (recentImageLoadStartedRef.current) return;
@@ -865,6 +889,10 @@ function CameraScreen() {
     if (!photo?.uri || batchPrepareInFlightRef.current || batchSaveInFlightRef.current ||
       batchSavedAssetsRef.current.size) return;
     const id = getBatchPhotoId(photo);
+    const nextRendered = { ...batchRenderedPhotosRef.current };
+    delete nextRendered[id];
+    batchRenderedPhotosRef.current = nextRendered;
+    setBatchRenderedPhotos(nextRendered);
     setBatchPhotos((current) => current.filter((item) => item.uri !== photo.uri));
     setBatchEditorPhotos((current) => {
       if (!current) return null;
@@ -885,7 +913,10 @@ function CameraScreen() {
     setBatchCaptureFlights([]);
     setCaptureBlink(null);
     setIsCameraReady(false);
-    void prepareBatchReview(batchEdits);
+    setBatchReviewPhotos(batchPhotos.map((photo) =>
+      batchRenderedPhotosRef.current[getBatchPhotoId(photo)] ?? { ...photo, sourcePhoto: photo }
+    ));
+    setBatchEditorPhotos(null);
   };
 
   const returnToBatchCamera = useCallback(() => {
@@ -897,52 +928,50 @@ function CameraScreen() {
   }, [cleanupTemporaryPreviewPhotos]);
 
   useFocusEffect(useCallback(() => {
-    if (!batchReviewPhotos && !isPreparingBatch) return undefined;
+    if (!batchReviewPhotos && !isApplyingBatchEdit) return undefined;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!isPreparingBatch) returnToBatchCamera();
+      if (!isApplyingBatchEdit) returnToBatchCamera();
       return true;
     });
     return () => subscription.remove();
-  }, [batchReviewPhotos, isPreparingBatch, returnToBatchCamera]));
+  }, [batchReviewPhotos, isApplyingBatchEdit, returnToBatchCamera]));
 
-  const prepareBatchReview = async (editsById) => {
-    if (!batchPhotos.length || batchPrepareInFlightRef.current || batchSaveInFlightRef.current) return;
-    batchPrepareInFlightRef.current = true;
-    setIsPreparingBatch(true);
-    setBatchPreparationProgress(0);
-    setBatchEdits(editsById);
-    const prepared = [];
-    let committed = false;
-    try {
-      for (const photo of batchPhotos) {
-        const edits = editsById[getBatchPhotoId(photo)] ?? { corners: getDefaultCorners(), rotation: 0 };
-        const needsProcessing = hasCustomCrop(edits.corners) || edits.rotation !== 0;
-        const rendered = needsProcessing
-          ? await renderPerspectiveCropAsync({
-              uri: photo.uri,
-              sourceWidth: photo.width,
-              sourceHeight: photo.height,
-              corners: edits.corners,
-              rotation: edits.rotation,
-            })
-          : photo;
-        prepared.push({ ...photo, ...rendered, sourcePhoto: photo, edits });
-        if (!previewMountedRef.current) return;
-        setBatchPreparationProgress(prepared.length);
-      }
-      prepared.forEach(trackTemporaryPreviewPhoto);
-      committed = true;
-      setBatchReviewPhotos(prepared);
-      setBatchEditorPhotos(null);
-    } catch (error) {
-      if (previewMountedRef.current) {
-        Alert.alert('Could not prepare batch', getErrorDetails(error).message);
-      }
-    } finally {
-      if (!committed) await cleanupProcessedImagesAsync(prepared);
-      batchPrepareInFlightRef.current = false;
-      if (previewMountedRef.current) setIsPreparingBatch(false);
+  const commitBatchPhotoEdits = (photo, edits) => {
+    if (batchPrepareInFlightRef.current || batchSaveInFlightRef.current || batchSavedAssetsRef.current.size) {
+      return Promise.resolve(false);
     }
+    const id = getBatchPhotoId(photo);
+    const cached = batchRenderedPhotosRef.current[id];
+    const key = getBatchEditKey(edits);
+    if ((cached && getBatchEditKey(cached.edits) === key) ||
+      (!cached && key === getBatchEditKey())) return Promise.resolve(true);
+
+    batchPrepareInFlightRef.current = true;
+    setIsApplyingBatchEdit(true);
+    // Register file ownership before rendering can start.
+    const job = Promise.resolve().then(async () => {
+      try {
+        const prepared = await renderBatchEditAsync(photo, edits, renderPerspectiveCropAsync);
+        if (!previewMountedRef.current) {
+          if (prepared.temporary) await cleanupProcessedImagesAsync([prepared]);
+          return false;
+        }
+        if (prepared.temporary) batchEditImagesRef.current.set(prepared.uri, prepared);
+        const next = { ...batchRenderedPhotosRef.current, [id]: prepared };
+        batchRenderedPhotosRef.current = next;
+        setBatchRenderedPhotos(next);
+        setBatchEdits((current) => ({ ...current, [id]: prepared.edits }));
+        return true;
+      } catch (error) {
+        if (previewMountedRef.current) Alert.alert('Could not apply edit', getErrorDetails(error).message);
+        return false;
+      } finally {
+        batchPrepareInFlightRef.current = false;
+        if (previewMountedRef.current) setIsApplyingBatchEdit(false);
+      }
+    });
+    batchEditPromiseRef.current = job;
+    return job;
   };
 
   const discardBatch = () => {
@@ -954,6 +983,7 @@ function CameraScreen() {
     setBatchSelectedIndex(0);
     batchSavedAssetsRef.current.clear();
     setBatchSaveProgress({ completed: 0, total: 0 });
+    cleanupBatchEdits();
     cleanupTemporaryPreviewPhotos();
     setCaptureMode('single');
     setIsCameraReady(false);
@@ -990,6 +1020,7 @@ function CameraScreen() {
         setBatchSelectedIndex(0);
         batchSavedAssetsRef.current.clear();
         setBatchSaveProgress({ completed: 0, total: 0 });
+        cleanupBatchEdits();
         cleanupTemporaryPreviewPhotos();
         setCaptureMode('single');
         setIsCameraReady(false);
@@ -1348,27 +1379,14 @@ function CameraScreen() {
     );
   }
 
-  if (isPreparingBatch) {
-    return (
-      <View style={styles.batchPreparingScreen}>
-        <SafeAreaView style={styles.batchPreparingContent} accessibilityLiveRegion="polite">
-          <ActivityIndicator color="#3C78D8" size="large" />
-          <ThemedText style={styles.batchPreparingTitle}>Preparing review</ThemedText>
-          <ThemedText style={styles.batchPreparingText}>Applying your framing</ThemedText>
-          <ThemedText style={styles.batchPreparingText}>
-            {batchPreparationProgress} / {batchPhotos.length}
-          </ThemedText>
-        </SafeAreaView>
-      </View>
-    );
-  }
-
   if (batchEditorPhotos) {
     return (
       <BatchEditor
         photos={batchEditorPhotos}
         editsById={batchEdits}
-        onEditsChange={setBatchEdits}
+        renderedPhotosById={batchRenderedPhotos}
+        onCommitEdits={commitBatchPhotoEdits}
+        isApplying={isApplyingBatchEdit}
         selectedIndex={batchSelectedIndex}
         onSelect={setBatchSelectedIndex}
         onBack={returnToBatchCamera}
@@ -2064,10 +2082,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: REVIEW_BACKGROUND,
   },
-  batchPreparingScreen: { flex: 1, backgroundColor: '#F6F8FC' },
-  batchPreparingContent: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 12 },
-  batchPreparingTitle: { color: '#13243E', fontSize: 22, lineHeight: 28, fontWeight: '700' },
-  batchPreparingText: { color: '#526581', fontSize: 14, lineHeight: 20, textAlign: 'center' },
   batchReviewContainer: {
     flex: 1,
     backgroundColor: REVIEW_BACKGROUND,

@@ -1,7 +1,8 @@
 import { useFocusEffect } from 'expo-router';
+import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useRef, useState } from 'react';
-import { BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
@@ -20,10 +21,11 @@ const ICONS = {
 };
 
 export function BatchEditor({
-  photos, editsById, onEditsChange, selectedIndex, onSelect,
-  onBack, onDone, onDelete,
+  photos, editsById, renderedPhotosById, onCommitEdits, selectedIndex, onSelect,
+  onBack, onDone, onDelete, isApplying,
 }) {
   const editorRef = useRef(null);
+  const actionRef = useRef(false);
   const { height, fontScale } = useWindowDimensions();
   const compact = height < 740 || fontScale > 1.2;
   const [isCropping, setIsCropping] = useState(false);
@@ -32,6 +34,8 @@ export function BatchEditor({
   const photo = photos[activeIndex];
   const id = getBatchPhotoId(photo);
   const edits = editsById[id];
+  const preview = renderedPhotosById[id] ?? photo;
+  const displayPhotos = photos.map((item) => renderedPhotosById[getBatchPhotoId(item)] ?? item);
   const editedCount = photos.filter((item) => {
     const value = editsById[getBatchPhotoId(item)];
     return value?.rotation || hasCustomCrop(value?.corners);
@@ -39,16 +43,23 @@ export function BatchEditor({
 
   const commitEdits = () => {
     const next = editorRef.current?.getEdits();
-    const snapshot = next ? { ...editsById, [id]: next } : editsById;
-    onEditsChange(snapshot);
-    return snapshot;
+    return next ? onCommitEdits(photo, next) : Promise.resolve(true);
+  };
+
+  const runAction = async (action) => {
+    if (actionRef.current || isApplying) return;
+    actionRef.current = true;
+    try { await action(); }
+    finally { actionRef.current = false; }
   };
 
   const selectPhoto = (index) => {
     if (index === activeIndex) return;
-    commitEdits();
-    setIsCropping(false);
-    onSelect(index);
+    void runAction(async () => {
+      if (!await commitEdits()) return;
+      setIsCropping(false);
+      onSelect(index);
+    });
   };
 
   const cancelCrop = useCallback(() => {
@@ -57,9 +68,10 @@ export function BatchEditor({
   }, []);
 
   const goBack = useCallback(() => {
+    if (actionRef.current || isApplying) return;
     if (isCropping) cancelCrop();
     else onBack();
-  }, [cancelCrop, isCropping, onBack]);
+  }, [cancelCrop, isApplying, isCropping, onBack]);
 
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -74,7 +86,7 @@ export function BatchEditor({
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
           <IconButton label={isCropping ? 'Cancel crop changes' : 'Return to batch camera'}
-            icon={ICONS.back} onPress={goBack} />
+            icon={ICONS.back} onPress={goBack} disabled={isApplying} />
           <View style={styles.headerCopy}>
             <ThemedText numberOfLines={1} style={styles.headerTitle}>Edit image</ThemedText>
             <ThemedText numberOfLines={1} style={styles.headerSubtitle}>
@@ -85,28 +97,48 @@ export function BatchEditor({
         </View>
 
         <View style={styles.canvas}>
-          <CropEditor
-            key={`${id}:${editorRevision}`}
-            ref={editorRef}
-            photo={photo}
-            initialEdits={edits}
-            showCropHandles={isCropping}
-            viewportPadding={isCropping ? 28 : 0}
+          <View pointerEvents={isCropping ? 'auto' : 'none'}
+            style={[StyleSheet.absoluteFill, { opacity: isCropping ? 1 : 0 }]}>
+            <CropEditor
+              key={`${id}:${editorRevision}`}
+              ref={editorRef}
+              photo={photo}
+              initialEdits={edits}
+              disabled={isApplying}
+              showCropHandles={isCropping}
+              viewportPadding={isCropping ? 28 : 0}
+            />
+          </View>
+          <Image
+            source={preview.uri}
+            pointerEvents="none"
+            contentFit="contain"
+            cachePolicy="memory-disk"
+            transition={120}
+            accessible={false}
+            style={[StyleSheet.absoluteFill, { opacity: isCropping ? 0 : 1 }]}
           />
+          {isApplying && (
+            <View style={styles.applyingOverlay} accessibilityLiveRegion="polite">
+              <ActivityIndicator color="#3C78D8" />
+              <ThemedText style={styles.applyingText}>Applying edit…</ThemedText>
+            </View>
+          )}
         </View>
 
-        <BatchFilmstrip photos={photos} editsById={editsById}
+        <BatchFilmstrip photos={displayPhotos} editsById={editsById}
           selectedIndex={activeIndex} onSelect={selectPhoto}
-          compact={compact} />
+          disabled={isApplying} compact={compact} />
 
         <View style={styles.footer}>
           {isCropping && (
             <View style={styles.cropActions}>
               <IconButton label="Reset crop to full image" icon={ICONS.reset}
-                onPress={() => editorRef.current?.reset()} />
+                disabled={isApplying} onPress={() => { if (!actionRef.current) editorRef.current?.reset(); }} />
               <Pressable accessibilityRole="button" accessibilityLabel="Apply crop to current image"
-                onPress={() => { commitEdits(); setIsCropping(false); }}
-                style={({ pressed }) => [styles.apply, pressed && styles.pressed]}>
+                disabled={isApplying}
+                onPress={() => { void runAction(async () => { if (await commitEdits()) setIsCropping(false); }); }}
+                style={({ pressed }) => [styles.apply, pressed && styles.pressed, isApplying && styles.disabled]}>
                 <SymbolView name={ICONS.check} size={18} tintColor="#FFFFFF" />
                 <ThemedText style={styles.applyText}>Apply crop</ThemedText>
               </Pressable>
@@ -114,13 +146,21 @@ export function BatchEditor({
           )}
           <View style={styles.dock}>
             <IconButton label={isCropping ? 'Cancel crop changes' : 'Crop current image'}
-              icon={ICONS.crop} active={isCropping}
-              onPress={() => { if (isCropping) cancelCrop(); else setIsCropping(true); }} />
+              icon={ICONS.crop} active={isCropping} disabled={isApplying}
+              onPress={() => { if (actionRef.current) return; if (isCropping) cancelCrop(); else setIsCropping(true); }} />
             <IconButton label="Rotate current image 90 degrees clockwise"
-              icon={ICONS.rotate}
-              onPress={() => { editorRef.current?.rotate(); if (!isCropping) commitEdits(); }} />
-            <IconButton label="Delete current image" icon={ICONS.delete} destructive
+              icon={ICONS.rotate} disabled={isApplying}
               onPress={() => {
+                if (actionRef.current || isApplying) return;
+                if (isCropping) { editorRef.current?.rotate(); return; }
+                void runAction(async () => {
+                  editorRef.current?.rotate();
+                  if (!await commitEdits()) setEditorRevision((value) => value + 1);
+                });
+              }} />
+            <IconButton label="Delete current image" icon={ICONS.delete} destructive disabled={isApplying}
+              onPress={() => {
+                if (actionRef.current) return;
                 setIsCropping(false);
                 setEditorRevision((value) => value + 1);
                 onDelete(photo);
@@ -130,8 +170,9 @@ export function BatchEditor({
             accessibilityRole="button"
             accessibilityLabel="Save edits and return to batch camera"
             accessibilityHint="Keeps the crop and rotation of every image so you can continue scanning."
-            onPress={() => { commitEdits(); onDone(); }}
-            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed]}>
+            disabled={isApplying}
+            onPress={() => { void runAction(async () => { if (await commitEdits()) onDone(); }); }}
+            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed, isApplying && styles.disabled]}>
             <SymbolView name={ICONS.check} size={30} tintColor="#FFFFFF" />
           </Pressable>
         </View>
@@ -140,13 +181,13 @@ export function BatchEditor({
   );
 }
 
-function IconButton({ label, icon, onPress, active = false, destructive = false }) {
+function IconButton({ label, icon, onPress, active = false, destructive = false, disabled = false }) {
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={label}
-      accessibilityState={{ selected: active }}
-      onPress={onPress}
+      accessibilityState={{ selected: active, disabled }}
+      disabled={disabled} onPress={onPress}
       style={({ pressed }) => [styles.iconButton, active && styles.iconActive,
-        destructive && styles.iconDestructive, pressed && styles.pressed]}>
+        destructive && styles.iconDestructive, pressed && styles.pressed, disabled && styles.disabled]}>
       <SymbolView name={icon} size={22}
         tintColor={destructive ? '#C2415A' : active ? '#FFFFFF' : '#31517F'} />
     </Pressable>
@@ -162,6 +203,9 @@ const styles = StyleSheet.create({
   headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
   headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },
   canvas: { flex: 1, minHeight: 1, marginTop: 12 },
+  applyingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.65)',
+    alignItems: 'center', justifyContent: 'center', gap: 8 },
+  applyingText: { color: '#31517F', fontSize: 12, lineHeight: 18, fontWeight: '600' },
   footer: { alignItems: 'center', gap: 12, paddingTop: 8 },
   dock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 16 },
   cropActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
@@ -178,4 +222,5 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 }, elevation: 4,
   },
   pressed: { opacity: 0.7 },
+  disabled: { opacity: 0.5 },
 });
