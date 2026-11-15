@@ -21,12 +21,7 @@ export const BatchCaptureTray = memo(forwardRef(function BatchCaptureTray({
       collapsable={false}
       onLayout={onLayout}
       pointerEvents="none"
-      accessible
-      accessibilityRole="image"
-      accessibilityLiveRegion="polite"
-      accessibilityLabel={hasPhoto
-        ? `${count} ${count === 1 ? 'image' : 'images'} captured in batch. Latest capture shown.`
-        : 'No batch captures yet'}
+      accessible={false}
       style={[styles.tray, !hasPhoto && styles.emptyTray]}>
       {images.map((item) => (
         <Image

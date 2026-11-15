@@ -1,7 +1,7 @@
 import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
@@ -16,12 +16,11 @@ const ICONS = {
   rotate: { ios: 'rotate.right', android: 'rotate_right', web: 'rotate_right' },
   reset: { ios: 'arrow.counterclockwise', android: 'restart_alt', web: 'restart_alt' },
   check: { ios: 'checkmark', android: 'check', web: 'check' },
-  next: { ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' },
 };
 
 export function BatchEditor({
   photos, editsById, onEditsChange, selectedIndex, onSelect,
-  onBack, onNext, isPreparing, preparationProgress,
+  onBack, onDone,
 }) {
   const editorRef = useRef(null);
   const { height, fontScale } = useWindowDimensions();
@@ -51,10 +50,9 @@ export function BatchEditor({
   }, []);
 
   const goBack = useCallback(() => {
-    if (isPreparing) return;
     if (isCropping) cancelCrop();
     else onBack();
-  }, [cancelCrop, isCropping, isPreparing, onBack]);
+  }, [cancelCrop, isCropping, onBack]);
 
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -69,25 +67,15 @@ export function BatchEditor({
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
           <IconButton label={isCropping ? 'Cancel crop changes' : 'Return to batch camera'}
-            icon={ICONS.back} onPress={goBack} disabled={isPreparing} />
-          <View style={styles.steps}>
-            <View style={styles.step}>
-              <View style={styles.stepDot}><ThemedText style={styles.stepNumber}>1</ThemedText></View>
-              <ThemedText style={styles.stepActive}>Frame</ThemedText>
-            </View>
-            <View style={styles.stepLine} />
-            <View style={styles.step}>
-              <View style={styles.stepDotMuted}><ThemedText style={styles.stepNumberMuted}>2</ThemedText></View>
-              <ThemedText style={styles.stepMuted}>Enhance</ThemedText>
-            </View>
+            icon={ICONS.back} onPress={goBack} />
+          <View style={styles.headerCopy}>
+            <ThemedText numberOfLines={1} style={styles.headerTitle}>Frame your stack</ThemedText>
+            <ThemedText numberOfLines={1} style={styles.headerSubtitle}>
+              {photos.length} {photos.length === 1 ? 'image' : 'images'} · {editedCount} framed
+            </ThemedText>
           </View>
           <View style={styles.headerSpacer} />
         </View>
-
-        {!compact && <View style={styles.intro}>
-          <ThemedText style={styles.title}>Frame your stack</ThemedText>
-          <ThemedText style={styles.subtitle}>A perfect fit for every snippet.</ThemedText>
-        </View>}
 
         {!compact && <View style={styles.imageCaption}>
           <ThemedText style={styles.imageTitle}>Image {selectedIndex + 1}</ThemedText>
@@ -105,31 +93,22 @@ export function BatchEditor({
             ref={editorRef}
             photo={photo}
             initialEdits={edits}
-            disabled={isPreparing}
             showCropHandles={isCropping}
           />
-          {isPreparing && (
-            <View style={styles.preparingOverlay} accessibilityLiveRegion="polite">
-              <ActivityIndicator color="#FFFFFF" size="large" />
-              <ThemedText style={styles.preparingText}>Preparing your stack</ThemedText>
-              <ThemedText style={styles.preparingCount}>{preparationProgress} / {photos.length}</ThemedText>
-            </View>
-          )}
         </View>
 
         <View style={styles.dock}>
           <IconButton label={isCropping ? 'Cancel crop changes' : 'Crop current image'}
-            icon={ICONS.crop} active={isCropping} disabled={isPreparing}
+            icon={ICONS.crop} active={isCropping}
             onPress={() => { if (isCropping) cancelCrop(); else setIsCropping(true); }} />
           <IconButton label="Rotate current image 90 degrees clockwise"
-            icon={ICONS.rotate} disabled={isPreparing}
+            icon={ICONS.rotate}
             onPress={() => { editorRef.current?.rotate(); if (!isCropping) commitEdits(); }} />
           {isCropping ? (
             <>
               <IconButton label="Reset crop to full image" icon={ICONS.reset}
-                disabled={isPreparing} onPress={() => editorRef.current?.reset()} />
+                onPress={() => editorRef.current?.reset()} />
               <Pressable accessibilityRole="button" accessibilityLabel="Apply crop to current image"
-                disabled={isPreparing}
                 onPress={() => { commitEdits(); setIsCropping(false); }}
                 style={({ pressed }) => [styles.apply, pressed && styles.pressed]}>
                 <SymbolView name={ICONS.check} size={18} tintColor="#FFFFFF" />
@@ -146,25 +125,19 @@ export function BatchEditor({
         </ThemedText>
 
         <BatchFilmstrip photos={photos} editsById={editsById}
-          selectedIndex={selectedIndex} onSelect={onSelect} disabled={isPreparing || isCropping}
+          selectedIndex={selectedIndex} onSelect={onSelect} disabled={isCropping}
           compact={compact} showCaption={!compact} />
 
-        <Pressable accessibilityRole="button" accessibilityLabel="Next, review and enhance batch"
-          accessibilityState={{ disabled: isPreparing || isCropping }}
-          disabled={isPreparing || isCropping}
-          onPress={() => onNext(commitEdits())}
-          style={({ pressed }) => [styles.next, pressed && styles.pressed,
-            (isPreparing || isCropping) && styles.disabled]}>
-          <View style={styles.nextCopy}>
-            <ThemedText style={styles.nextTitle}>{isPreparing ? 'Preparing…' : 'Next'}</ThemedText>
-            <ThemedText style={styles.nextSubtitle}>
-              {isCropping ? 'Apply your crop to continue' : `${photos.length} ${photos.length === 1 ? 'image' : 'images'} · ${editedCount} framed`}
-            </ThemedText>
-          </View>
-          {isPreparing ? <ActivityIndicator color="#FFFFFF" /> : (
-            <View style={styles.nextArrow}><SymbolView name={ICONS.next} size={22} tintColor="#FFFFFF" /></View>
-          )}
-        </Pressable>
+        <View style={styles.footer}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Save framing and return to batch camera"
+            accessibilityHint="Keeps the crop and rotation of every image so you can continue scanning."
+            onPress={() => { commitEdits(); onDone(); }}
+            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed]}>
+            <SymbolView name={ICONS.check} size={30} tintColor="#FFFFFF" />
+          </Pressable>
+        </View>
       </SafeAreaView>
     </View>
   );
@@ -187,18 +160,9 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 12 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 44 },
   headerSpacer: { width: 44 },
-  steps: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  step: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  stepDot: { width: 21, height: 21, borderRadius: 11, backgroundColor: '#3C78D8', alignItems: 'center', justifyContent: 'center' },
-  stepDotMuted: { width: 21, height: 21, borderRadius: 11, backgroundColor: '#EDF1F7', alignItems: 'center', justifyContent: 'center' },
-  stepNumber: { color: '#FFFFFF', fontSize: 11, lineHeight: 16, fontWeight: '700' },
-  stepNumberMuted: { color: '#8795AA', fontSize: 11, lineHeight: 16, fontWeight: '700' },
-  stepActive: { color: '#31517F', fontSize: 12, lineHeight: 18, fontWeight: '700' },
-  stepMuted: { color: '#8795AA', fontSize: 12, lineHeight: 18 },
-  stepLine: { width: 20, height: 1, backgroundColor: '#DCE4F0' },
-  intro: { paddingTop: 12, paddingBottom: 12, gap: 3 },
-  title: { color: '#13243E', fontSize: 28, lineHeight: 34, fontWeight: '700', letterSpacing: -0.7 },
-  subtitle: { color: '#7B879A', fontSize: 13, lineHeight: 18 },
+  headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2 },
+  headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
+  headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },
   imageCaption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   imageTitle: { color: '#526581', fontSize: 12, lineHeight: 18, fontWeight: '600' },
   status: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: '#F1F5FA' },
@@ -208,10 +172,6 @@ const styles = StyleSheet.create({
   statusText: { color: '#526581', fontSize: 10, lineHeight: 14, fontWeight: '600' },
   canvas: { flex: 1, minHeight: 1, backgroundColor: '#F3F6FB', borderRadius: 24,
     borderWidth: 1, borderColor: '#E4EBF5', overflow: 'hidden' },
-  preparingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(19,36,62,0.84)',
-    alignItems: 'center', justifyContent: 'center', gap: 10, zIndex: 20 },
-  preparingText: { color: '#FFFFFF', fontSize: 17, lineHeight: 24, fontWeight: '600' },
-  preparingCount: { color: '#CFDDF3', fontSize: 13, lineHeight: 18 },
   dock: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
   iconButton: { width: 44, height: 44, borderRadius: 15, backgroundColor: '#EEF3FB', alignItems: 'center', justifyContent: 'center' },
   iconActive: { backgroundColor: '#3C78D8' },
@@ -221,12 +181,13 @@ const styles = StyleSheet.create({
   applyText: { color: '#FFFFFF', fontSize: 12, lineHeight: 17, fontWeight: '700', flexShrink: 1 },
   hint: { color: '#7B879A', fontSize: 11, lineHeight: 16, marginTop: 7, minHeight: 32 },
   compactHint: { minHeight: 16 },
-  next: { minHeight: 62, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20,
-    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#3C78D8' },
-  nextCopy: { flex: 1, gap: 2 },
-  nextTitle: { color: '#FFFFFF', fontSize: 17, lineHeight: 22, fontWeight: '700' },
-  nextSubtitle: { color: '#DCE8FF', fontSize: 11, lineHeight: 16 },
-  nextArrow: { width: 36, height: 36, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center' },
+  footer: { minHeight: 80, paddingTop: 8, alignItems: 'center', justifyContent: 'center' },
+  doneButton: {
+    width: 64, height: 64, borderRadius: 32, backgroundColor: '#3C78D8',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#2A5EB0', shadowOpacity: 0.22, shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 }, elevation: 4,
+  },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.5 },
 });

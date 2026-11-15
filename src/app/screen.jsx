@@ -323,7 +323,7 @@ function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving, savePr
       <SafeAreaView style={styles.batchReviewSafeArea}>
         <View style={styles.batchReviewHeader}>
           <Pressable
-            accessibilityLabel="Edit batch framing"
+            accessibilityLabel="Return to batch camera"
             accessibilityRole="button"
             disabled={changesLocked}
             onPress={onBack}
@@ -791,7 +791,8 @@ function CameraScreen() {
   }, [cameraPermission?.granted, loadRecentGalleryImage]);
 
   const capturePhoto = async () => {
-    if (!cameraRef.current || !isCameraReady || isCapturing || captureInFlightRef.current) return;
+    if (!cameraRef.current || !isCameraReady || isCapturing || captureInFlightRef.current ||
+      batchPrepareInFlightRef.current || batchSaveInFlightRef.current) return;
 
     captureInFlightRef.current = true;
     setIsCapturing(true);
@@ -847,38 +848,44 @@ function CameraScreen() {
     }
   };
 
-  const finishBatchCapture = () => {
-    if (captureMode !== 'batch' || !batchPhotos.length || isCapturing || captureInFlightRef.current) return;
+  const openBatchEditor = () => {
+    if (captureMode !== 'batch' || !batchPhotos.length || isCapturing || captureInFlightRef.current ||
+      batchPrepareInFlightRef.current || batchSaveInFlightRef.current || batchSavedAssetsRef.current.size) return;
     setBatchCaptureFlights([]);
     setCaptureBlink(null);
+    setBatchSelectedIndex(batchPhotos.length - 1);
     setBatchEditorPhotos(batchPhotos);
     setIsCameraReady(false);
   };
 
-  const returnToBatchCamera = useCallback(() => {
-    if (batchSaveInFlightRef.current || batchPrepareInFlightRef.current) return;
-    setBatchEditorPhotos(null);
+  const finishBatchCapture = () => {
+    if (captureMode !== 'batch' || !batchPhotos.length || isCapturing || captureInFlightRef.current ||
+      batchPrepareInFlightRef.current || batchSaveInFlightRef.current || batchSavedAssetsRef.current.size) return;
+    setBatchCaptureFlights([]);
+    setCaptureBlink(null);
     setIsCameraReady(false);
-  }, []);
+    void prepareBatchReview(batchEdits);
+  };
 
-  const returnToBatchEditor = useCallback(() => {
-    if (batchSaveInFlightRef.current || batchSavedAssetsRef.current.size) return;
+  const returnToBatchCamera = useCallback(() => {
+    if (batchSaveInFlightRef.current || batchPrepareInFlightRef.current || batchSavedAssetsRef.current.size) return;
     setBatchReviewPhotos(null);
-    setBatchEditorPhotos(batchPhotos);
+    setBatchEditorPhotos(null);
     cleanupTemporaryPreviewPhotos();
-  }, [batchPhotos, cleanupTemporaryPreviewPhotos]);
+    setIsCameraReady(false);
+  }, [cleanupTemporaryPreviewPhotos]);
 
   useFocusEffect(useCallback(() => {
-    if (!batchReviewPhotos) return undefined;
+    if (!batchReviewPhotos && !isPreparingBatch) return undefined;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      returnToBatchEditor();
+      if (!isPreparingBatch) returnToBatchCamera();
       return true;
     });
     return () => subscription.remove();
-  }, [batchReviewPhotos, returnToBatchEditor]));
+  }, [batchReviewPhotos, isPreparingBatch, returnToBatchCamera]));
 
   const prepareBatchReview = async (editsById) => {
-    if (batchPrepareInFlightRef.current || batchSaveInFlightRef.current) return;
+    if (!batchPhotos.length || batchPrepareInFlightRef.current || batchSaveInFlightRef.current) return;
     batchPrepareInFlightRef.current = true;
     setIsPreparingBatch(true);
     setBatchPreparationProgress(0);
@@ -886,7 +893,7 @@ function CameraScreen() {
     const prepared = [];
     let committed = false;
     try {
-      for (const photo of batchEditorPhotos) {
+      for (const photo of batchPhotos) {
         const edits = editsById[getBatchPhotoId(photo)] ?? { corners: getDefaultCorners(), rotation: 0 };
         const needsProcessing = hasCustomCrop(edits.corners) || edits.rotation !== 0;
         const rendered = needsProcessing
@@ -1320,6 +1327,21 @@ function CameraScreen() {
     );
   }
 
+  if (isPreparingBatch) {
+    return (
+      <View style={styles.batchPreparingScreen}>
+        <SafeAreaView style={styles.batchPreparingContent} accessibilityLiveRegion="polite">
+          <ActivityIndicator color="#3C78D8" size="large" />
+          <ThemedText style={styles.batchPreparingTitle}>Preparing review</ThemedText>
+          <ThemedText style={styles.batchPreparingText}>Applying your framing</ThemedText>
+          <ThemedText style={styles.batchPreparingText}>
+            {batchPreparationProgress} / {batchPhotos.length}
+          </ThemedText>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
   if (batchEditorPhotos) {
     return (
       <BatchEditor
@@ -1329,9 +1351,7 @@ function CameraScreen() {
         selectedIndex={batchSelectedIndex}
         onSelect={setBatchSelectedIndex}
         onBack={returnToBatchCamera}
-        onNext={prepareBatchReview}
-        isPreparing={isPreparingBatch}
-        preparationProgress={batchPreparationProgress}
+        onDone={returnToBatchCamera}
       />
     );
   }
@@ -1342,7 +1362,7 @@ function CameraScreen() {
         photos={batchReviewPhotos}
         isSaving={isSavingBatch}
         saveProgress={batchSaveProgress}
-        onBack={returnToBatchEditor}
+        onBack={returnToBatchCamera}
         onDiscard={discardBatch}
         onSave={saveBatch}
       />
@@ -1605,7 +1625,18 @@ function CameraScreen() {
         style={[styles.controls, { paddingBottom: insets.bottom + Spacing.three }]}> 
         <View style={styles.captureControlsRow}>
           {captureMode === 'batch' ? (
-            <View style={styles.importButtonSpacer}>
+            <Pressable
+              accessibilityLabel={`Edit batch framing. ${batchPhotos.length} ${batchPhotos.length === 1 ? 'image' : 'images'} captured.`}
+              accessibilityHint="Opens Frame your stack to crop or rotate captured images."
+              accessibilityRole="button"
+              accessibilityState={{ disabled: !batchPhotos.length || isCapturing }}
+              disabled={!batchPhotos.length || isCapturing}
+              onPress={openBatchEditor}
+              style={({ pressed }) => [
+                styles.importButtonSpacer,
+                pressed && styles.pressed,
+                isCapturing && styles.disabled,
+              ]}>
               <BatchCaptureTray
                 ref={batchTrayRef}
                 onLayout={refreshCaptureBounds}
@@ -1613,7 +1644,7 @@ function CameraScreen() {
                 count={landedBatchPhotos.length}
                 pendingPhotos={batchCaptureFlights.map((capture) => capture.photo)}
               />
-            </View>
+            </Pressable>
           ) : (
             <Pressable
               accessibilityLabel="Import images. Shows the most recent image."
@@ -1693,7 +1724,7 @@ function CameraScreen() {
 
           {captureMode === 'batch' ? (
             <Pressable
-              accessibilityLabel="Finish batch capture"
+              accessibilityLabel="Review captured batch"
               accessibilityRole="button"
               disabled={!batchPhotos.length || isCapturing}
               onPress={finishBatchCapture}
@@ -2011,6 +2042,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: REVIEW_BACKGROUND,
   },
+  batchPreparingScreen: { flex: 1, backgroundColor: '#F6F8FC' },
+  batchPreparingContent: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 12 },
+  batchPreparingTitle: { color: '#13243E', fontSize: 22, lineHeight: 28, fontWeight: '700' },
+  batchPreparingText: { color: '#526581', fontSize: 14, lineHeight: 20, textAlign: 'center' },
   batchReviewContainer: {
     flex: 1,
     backgroundColor: REVIEW_BACKGROUND,
