@@ -160,6 +160,7 @@ function CaptureFlight({ capture, shown, onComplete }) {
   const { from } = geometry;
   const cardSize = useMemo(() => ({ width: from.width, height: from.height }), [from.width, from.height]);
   const progress = useRef(new Animated.Value(0)).current;
+  const entrance = useRef(new Animated.Value(0)).current;
   const visibility = useRef(new Animated.Value(0)).current;
   const playerRef = useRef(null);
   const imageDisplayedRef = useRef(false);
@@ -169,13 +170,18 @@ function CaptureFlight({ capture, shown, onComplete }) {
   useEffect(() => {
     let cancelled = false;
     progress.setValue(0);
+    entrance.setValue(0);
     visibility.setValue(0);
     const player = createBatchCapturePlayer({
       onComplete: () => { if (!cancelled) onComplete(capture.id); },
       startAnimation: (done) => {
         visibility.setValue(1);
         const animation = Animated.sequence([
-          Animated.delay(180),
+          Animated.timing(entrance, {
+            toValue: 1, duration: 280, easing: Easing.out(Easing.cubic),
+            useNativeDriver: true, isInteraction: false,
+          }),
+          Animated.delay(80),
           Animated.timing(progress, {
             toValue: 1, duration: 680, easing: Easing.inOut(Easing.cubic),
             useNativeDriver: true, isInteraction: false,
@@ -201,7 +207,7 @@ function CaptureFlight({ capture, shown, onComplete }) {
       visibility.setValue(0);
       if (playerRef.current === player) playerRef.current = null;
     };
-  }, [capture.id, onComplete, progress, visibility]);
+  }, [capture.id, entrance, onComplete, progress, visibility]);
 
   useEffect(() => { if (shown) playerRef.current?.show(); }, [shown]);
   const imageDisplayed = useCallback(() => {
@@ -212,7 +218,8 @@ function CaptureFlight({ capture, shown, onComplete }) {
   const motion = useMemo(() => getBatchCaptureMotion(geometry), [geometry]);
 
   // Decode in place while the entire card, border and shadow stay transparent.
-  // Reveal only after onDisplay and overlay readiness, then animate on the UI thread.
+  // After onDisplay, grow from a point to the 80% frame with a gentle fade,
+  // then carry that same photo into the thumbnail.
   const translationStyle = useMemo(() => ({
     transform: [
       { translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [0, motion.translateX] }) },
@@ -220,9 +227,17 @@ function CaptureFlight({ capture, shown, onComplete }) {
     ],
   }), [motion, progress]);
   const photoStyle = useMemo(() => ({
-    transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [1, motion.scale] }) }],
-    opacity: progress.interpolate({ inputRange: [0, 0.93, 1], outputRange: [1, 1, 0] }),
-  }), [motion, progress]);
+    transform: [{
+      scale: Animated.multiply(
+        entrance,
+        progress.interpolate({ inputRange: [0, 1], outputRange: [1, motion.scale] })
+      ),
+    }],
+    opacity: Animated.multiply(
+      entrance.interpolate({ inputRange: [0, 1], outputRange: [1, 0.88] }),
+      progress.interpolate({ inputRange: [0, 0.93, 1], outputRange: [1, 1, 0] })
+    ),
+  }), [entrance, motion, progress]);
 
   return (
     <Animated.View
