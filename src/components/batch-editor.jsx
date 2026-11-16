@@ -1,8 +1,11 @@
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator, Alert, Animated, BackHandler, Easing, PanResponder, Pressable, StyleSheet, View,
+  useWindowDimensions,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
@@ -67,6 +70,24 @@ export function BatchEditor({
   const previewRotation = (pendingEdits?.rotation ?? edits?.rotation ?? 0) -
     (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
   const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, frame, CROP_PADDING);
+
+  // Build the neighbouring slides from their rendered previews (when they
+  // exist) so a swipe reveals exactly what the filmstrip shows, including any
+  // applied rotation or crop.
+  const buildSlide = (item) => {
+    const itemId = getBatchPhotoId(item);
+    const rendered = renderedPhotosById[itemId] ?? item;
+    const value = editsById[itemId] ?? item.edits;
+    const storedRotation = value?.rotation ?? 0;
+    const bakedRotation = rendered.sourcePhoto ? rendered.edits?.rotation ?? 0 : 0;
+    return {
+      item: rendered,
+      style: getBatchRotationPreviewStyle(rendered, storedRotation - bakedRotation, frame, CROP_PADDING),
+    };
+  };
+  const previousSlide = frame.width > 0 && activeIndex > 0 ? buildSlide(photos[activeIndex - 1]) : null;
+  const nextSlide = frame.width > 0 && activeIndex < photos.length - 1
+    ? buildSlide(photos[activeIndex + 1]) : null;
 
   const photoRef = useRef(photo);
   photoRef.current = photo;
@@ -156,13 +177,13 @@ export function BatchEditor({
   };
 
   const selectPhoto = (index) => {
-    if (index === activeIndex || actionRef.current || isApplying) return;
+    if (index === activeIndex || actionRef.current || isApplying) return Promise.resolve(false);
     // Switching must never raise `busy`: that dims the dock, swaps button
     // states and shows the applying overlay, which reads as a screen flash.
     actionRef.current = true;
-    flushRotations()
+    return flushRotations()
       .then((saved) => {
-        if (!saved) return;
+        if (!saved) return false;
         // Persist the outgoing photo in the background and navigate right away
         // so the newly selected preview is never blocked by a render pass.
         commitEdits({ background: true }).catch(() => {});
@@ -170,10 +191,106 @@ export function BatchEditor({
         setFrozenPreview(null);
         setOptimisticEdits(null);
         onSelect(index);
+        return true;
       })
-      .catch(() => {})
+      .catch(() => false)
       .finally(() => { actionRef.current = false; });
   };
+
+  // Horizontal swipes move a three-slide track: the previous image slides in
+  // from the left and the next one from the right. The neighbour is already
+  // decoded, so the drag shows real pixels instead of a placeholder.
+  const swipeX = useRef(new Animated.Value(0)).current;
+  const swipeStateRef = useRef(null);
+  const swipeAnimatingRef = useRef(false);
+  const swipeResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) => {
+      const state = swipeStateRef.current;
+      return Boolean(state) && !state.disabled && !swipeAnimatingRef.current && !actionRef.current &&
+        state.count > 1 && Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.2;
+    },
+    onPanResponderGrant: () => {
+      swipeX.stopAnimation();
+      // Start any pending rotation save now so the commit at the end of the
+      // swipe does not have to wait for the queue's debounce window.
+      void flushRotations();
+    },
+    onPanResponderMove: (_, gesture) => {
+      const state = swipeStateRef.current;
+      if (!state) return;
+      let dx = gesture.dx;
+      // Rubber-band at the first and last image so the edges feel intentional.
+      if ((state.activeIndex <= 0 && dx > 0) || (state.activeIndex >= state.count - 1 && dx < 0)) {
+        dx *= 0.35;
+      }
+      swipeX.setValue(dx);
+    },
+    onPanResponderRelease: (_, gesture) => {
+      const state = swipeStateRef.current;
+      if (!state) return;
+      const width = Math.max(1, state.frameWidth);
+      const threshold = Math.max(48, width * 0.22);
+      const toNext = gesture.dx < -threshold || (gesture.dx < -12 && gesture.vx < -0.5);
+      const toPrevious = gesture.dx > threshold || (gesture.dx > 12 && gesture.vx > 0.5);
+      const target = toNext ? state.activeIndex + 1
+        : toPrevious ? state.activeIndex - 1 : state.activeIndex;
+      if (target === state.activeIndex || target < 0 || target >= state.count) {
+        Animated.spring(swipeX, {
+          toValue: 0, bounciness: 0, speed: 18, useNativeDriver: true,
+        }).start();
+        return;
+      }
+      const direction = target > state.activeIndex ? -1 : 1;
+      swipeAnimatingRef.current = true;
+      Animated.timing(swipeX, {
+        toValue: direction * width,
+        duration: 180,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (!finished) {
+          swipeAnimatingRef.current = false;
+          return;
+        }
+        state.select(target).then((selected) => {
+          swipeAnimatingRef.current = false;
+          if (!selected) {
+            Animated.spring(swipeX, {
+              toValue: 0, bounciness: 0, speed: 18, useNativeDriver: true,
+            }).start();
+          }
+        });
+      });
+    },
+    onPanResponderTerminate: () => {
+      swipeAnimatingRef.current = false;
+      Animated.spring(swipeX, {
+        toValue: 0, bounciness: 0, speed: 18, useNativeDriver: true,
+      }).start();
+    },
+    onPanResponderTerminationRequest: () => false,
+  }), [swipeX]);
+  swipeStateRef.current = {
+    count: photos.length,
+    activeIndex,
+    frameWidth: frame.width,
+    disabled: busy || isCropping,
+    select: selectPhoto,
+  };
+  // Once a swipe commits, the new active image sits at offset 0 again while
+  // the track is still translated off-screen. Snap it back before paint so the
+  // handoff from the incoming slide is seamless.
+  useLayoutEffect(() => {
+    swipeAnimatingRef.current = false;
+    swipeX.stopAnimation();
+    swipeX.setValue(0);
+  }, [activeIndex, swipeX]);
+  useEffect(() => {
+    if (!isCropping) return;
+    swipeAnimatingRef.current = false;
+    swipeX.stopAnimation();
+    swipeX.setValue(0);
+  }, [isCropping, swipeX]);
 
   const cancelCrop = useCallback(() => {
     setIsCropping(false);
@@ -248,7 +365,7 @@ export function BatchEditor({
         <View style={styles.canvas} onLayout={({ nativeEvent: { layout } }) => {
           setFrame((current) => current.width === layout.width && current.height === layout.height
             ? current : { width: layout.width, height: layout.height });
-        }}>
+        }} {...swipeResponder.panHandlers}>
           <View pointerEvents={isCropping ? 'auto' : 'none'}
             style={[StyleSheet.absoluteFill, { opacity: isCropping ? 1 : 0 }]}>
             <CropEditor
@@ -261,30 +378,60 @@ export function BatchEditor({
               viewportPadding={CROP_PADDING}
             />
           </View>
-          {retainedPreview && retainedStyle && retainedPreview.uri !== displayPreview.uri ? (
-            <Image
-              key={`retained:${retainedPreview.uri}`}
-              source={retainedPreview.uri}
-              pointerEvents="none"
-              contentFit="contain"
-              cachePolicy="memory-disk"
-              transition={0}
-              accessible={false}
-              style={[retainedStyle, { opacity: isCropping ? 0 : 1 }]}
-            />
-          ) : null}
-          <Image
-            key={`preview:${displayPreview.uri}`}
-            source={displayPreview.uri}
-            pointerEvents="none"
-            contentFit="contain"
-            cachePolicy="memory-disk"
-            transition={0}
-            accessible={false}
-            onDisplay={() => setRetainedPreview(null)}
-            onError={() => setRetainedPreview(null)}
-            style={[previewStyle, { opacity: isCropping ? 0 : 1 }]}
-          />
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateX: swipeX }] }]}>
+              {previousSlide && (
+                <View style={[StyleSheet.absoluteFill, { transform: [{ translateX: -frame.width }] }]}>
+                  <Image
+                    key={`previous:${previousSlide.item.uri}`}
+                    source={previousSlide.item.uri}
+                    contentFit="contain"
+                    cachePolicy="memory-disk"
+                    transition={0}
+                    accessible={false}
+                    style={[previousSlide.style, isCropping && styles.hiddenSlide]}
+                  />
+                </View>
+              )}
+              <View style={StyleSheet.absoluteFill}>
+                {retainedPreview && retainedStyle && retainedPreview.uri !== displayPreview.uri ? (
+                  <Image
+                    key={`retained:${retainedPreview.uri}`}
+                    source={retainedPreview.uri}
+                    contentFit="contain"
+                    cachePolicy="memory-disk"
+                    transition={0}
+                    accessible={false}
+                    style={[retainedStyle, isCropping && styles.hiddenSlide]}
+                  />
+                ) : null}
+                <Image
+                  key={`preview:${displayPreview.uri}`}
+                  source={displayPreview.uri}
+                  contentFit="contain"
+                  cachePolicy="memory-disk"
+                  transition={0}
+                  accessible={false}
+                  onDisplay={() => setRetainedPreview(null)}
+                  onError={() => setRetainedPreview(null)}
+                  style={[previewStyle, isCropping && styles.hiddenSlide]}
+                />
+              </View>
+              {nextSlide && (
+                <View style={[StyleSheet.absoluteFill, { transform: [{ translateX: frame.width }] }]}>
+                  <Image
+                    key={`next:${nextSlide.item.uri}`}
+                    source={nextSlide.item.uri}
+                    contentFit="contain"
+                    cachePolicy="memory-disk"
+                    transition={0}
+                    accessible={false}
+                    style={[nextSlide.style, isCropping && styles.hiddenSlide]}
+                  />
+                </View>
+              )}
+            </Animated.View>
+          </View>
           {isApplying && (
             <View style={styles.applyingOverlay} accessibilityLiveRegion="polite">
               <ActivityIndicator color="#3C78D8" />
@@ -363,7 +510,8 @@ const styles = StyleSheet.create({
   headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2 },
   headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
   headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },
-  canvas: { flex: 1, minHeight: 1, marginTop: 8 },
+  canvas: { flex: 1, minHeight: 1, marginTop: 8, overflow: 'hidden' },
+  hiddenSlide: { opacity: 0 },
   applyingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.65)',
     alignItems: 'center', justifyContent: 'center', gap: 8 },
   applyingText: { color: '#31517F', fontSize: 12, lineHeight: 18, fontWeight: '600' },
