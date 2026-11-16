@@ -1,7 +1,7 @@
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -32,6 +32,7 @@ export function BatchEditor({
   const editorRef = useRef(null);
   const actionRef = useRef(false);
   const rotationQueueRef = useRef(null);
+  const queuePhotoRef = useRef(null);
   const commitRef = useRef(onCommitEdits);
   const mountedRef = useRef(true);
   commitRef.current = onCommitEdits;
@@ -50,18 +51,58 @@ export function BatchEditor({
   const preview = renderedPhotosById[id] ?? photo;
   // Keep the decoded bitmap stable while its final pixels are saved. Swapping
   // sources mid-rotation can briefly show the old orientation or a blank frame.
-  const displayPreview = frozenPreview ?? preview;
-  const effectiveEdits = optimisticEdits ? { ...editsById, [id]: optimisticEdits } : editsById;
-  const displayPhotos = photos.map((item, index) => index === activeIndex
-    ? displayPreview : renderedPhotosById[getBatchPhotoId(item)] ?? item);
+  // Both are tagged with the photo id so switching images never shows another
+  // image's frozen frame or a stale optimistic rotation.
+  const displayPreview = frozenPreview?.id === id ? frozenPreview.photo : preview;
+  const pendingEdits = optimisticEdits?.id === id ? optimisticEdits.edits : null;
+  const effectiveEdits = pendingEdits ? { ...editsById, [id]: pendingEdits } : editsById;
+  const displayPhotos = useMemo(() => photos.map((item, index) => index === activeIndex
+    ? displayPreview : renderedPhotosById[getBatchPhotoId(item)] ?? item),
+  [photos, activeIndex, displayPreview, renderedPhotosById]);
   const editedCount = photos.filter((item) => {
     const value = effectiveEdits[getBatchPhotoId(item)];
     return value?.rotation || hasCustomCrop(value?.corners);
   }).length;
   const busy = isApplying || isFinishing;
-  const previewRotation = (optimisticEdits?.rotation ?? edits?.rotation ?? 0) -
+  const previewRotation = (pendingEdits?.rotation ?? edits?.rotation ?? 0) -
     (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
   const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, frame, CROP_PADDING);
+
+  const photoRef = useRef(photo);
+  photoRef.current = photo;
+  // Keep the previously decoded bitmap painted underneath until the newly
+  // selected photo reports that it is decoded. Without this, swapping the
+  // source leaves a blank frame that reads as a full-screen flash. The update
+  // happens during render so both images are committed in the same frame.
+  const [retainedPreview, setRetainedPreview] = useState(null);
+  const shownPreviewRef = useRef(null);
+  if (shownPreviewRef.current?.uri !== displayPreview.uri) {
+    const previous = shownPreviewRef.current;
+    shownPreviewRef.current = { uri: displayPreview.uri, photo: displayPreview, rotation: previewRotation };
+    if (previous?.uri) setRetainedPreview(previous);
+  }
+  const retainedStyle = retainedPreview
+    ? getBatchRotationPreviewStyle(retainedPreview.photo, retainedPreview.rotation, frame, CROP_PADDING)
+    : null;
+  // Drop the retained frame if the new source never reports onDisplay.
+  useEffect(() => {
+    if (!retainedPreview) return undefined;
+    const timer = setTimeout(() => {
+      if (mountedRef.current) setRetainedPreview(null);
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [retainedPreview]);
+
+  // Selection can change from outside (delete, parent clamping), so reset the
+  // per-image editor state whenever the displayed photo really changes.
+  const previousIdRef = useRef(id);
+  useEffect(() => {
+    if (previousIdRef.current === id) return;
+    previousIdRef.current = id;
+    setIsCropping(false);
+    setFrozenPreview(null);
+    setOptimisticEdits(null);
+  }, [id]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -73,17 +114,24 @@ export function BatchEditor({
   }, []);
 
   const getRotationQueue = () => {
-    if (!rotationQueueRef.current) {
+    // A staged rotation must always be written for the photo it was made on,
+    // even if the user switches images while the 450 ms timer is pending.
+    if (!rotationQueueRef.current ||
+      queuePhotoRef.current !== getBatchPhotoId(photoRef.current)) {
+      rotationQueueRef.current?.dispose();
+      queuePhotoRef.current = getBatchPhotoId(photoRef.current);
+      const queuedPhoto = photoRef.current;
       rotationQueueRef.current = createRotationSaveQueue({
-        save: (next, { isCurrent }) => commitRef.current(photo, next, { background: true, isCurrent }),
+        save: (next, { isCurrent }) =>
+          commitRef.current(queuedPhoto, next, { background: true, isCurrent }),
       });
     }
     return rotationQueueRef.current;
   };
 
-  const commitEdits = () => {
+  const commitEdits = (options) => {
     const next = editorRef.current?.getEdits();
-    return next ? onCommitEdits(photo, next) : Promise.resolve(true);
+    return next ? onCommitEdits(photoRef.current, next, options) : Promise.resolve(true);
   };
 
   const flushRotations = async () => {
@@ -108,12 +156,23 @@ export function BatchEditor({
   };
 
   const selectPhoto = (index) => {
-    if (index === activeIndex) return;
-    return runAction(async () => {
-      if (!await saveBeforeLeaving()) return;
-      setIsCropping(false);
-      onSelect(index);
-    });
+    if (index === activeIndex || actionRef.current || isApplying) return;
+    // Switching must never raise `busy`: that dims the dock, swaps button
+    // states and shows the applying overlay, which reads as a screen flash.
+    actionRef.current = true;
+    flushRotations()
+      .then((saved) => {
+        if (!saved) return;
+        // Persist the outgoing photo in the background and navigate right away
+        // so the newly selected preview is never blocked by a render pass.
+        commitEdits({ background: true }).catch(() => {});
+        setIsCropping(false);
+        setFrozenPreview(null);
+        setOptimisticEdits(null);
+        onSelect(index);
+      })
+      .catch(() => {})
+      .finally(() => { actionRef.current = false; });
   };
 
   const cancelCrop = useCallback(() => {
@@ -152,8 +211,8 @@ export function BatchEditor({
     if (isCropping) return;
     const next = editorRef.current?.getEdits();
     if (!next) return;
-    setFrozenPreview((current) => current ?? preview);
-    setOptimisticEdits(next);
+    setFrozenPreview((current) => (current?.id === id ? current : { id, photo: preview }));
+    setOptimisticEdits({ id, edits: next });
     getRotationQueue().stage(next);
   };
 
@@ -202,13 +261,28 @@ export function BatchEditor({
               viewportPadding={CROP_PADDING}
             />
           </View>
+          {retainedPreview && retainedStyle && retainedPreview.uri !== displayPreview.uri ? (
+            <Image
+              key={`retained:${retainedPreview.uri}`}
+              source={retainedPreview.uri}
+              pointerEvents="none"
+              contentFit="contain"
+              cachePolicy="memory-disk"
+              transition={0}
+              accessible={false}
+              style={[retainedStyle, { opacity: isCropping ? 0 : 1 }]}
+            />
+          ) : null}
           <Image
+            key={`preview:${displayPreview.uri}`}
             source={displayPreview.uri}
             pointerEvents="none"
             contentFit="contain"
             cachePolicy="memory-disk"
             transition={0}
             accessible={false}
+            onDisplay={() => setRetainedPreview(null)}
+            onError={() => setRetainedPreview(null)}
             style={[previewStyle, { opacity: isCropping ? 0 : 1 }]}
           />
           {isApplying && (
@@ -284,8 +358,8 @@ function IconButton({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#FFFFFF' },
   safeArea: { flex: 1, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 12 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 44 },
-  headerSpacer: { width: 44 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 46 },
+  headerSpacer: { width: 46 },
   headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2 },
   headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
   headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },

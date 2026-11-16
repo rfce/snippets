@@ -1398,7 +1398,6 @@ function CameraScreen() {
   if (batchEditorPhotos) {
     return (
       <BatchEditor
-        key={getBatchPhotoId(batchEditorPhotos[Math.max(0, Math.min(batchSelectedIndex, batchEditorPhotos.length - 1))])}
         photos={batchEditorPhotos}
         editsById={batchEdits}
         renderedPhotosById={batchRenderedPhotos}

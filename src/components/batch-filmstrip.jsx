@@ -22,6 +22,16 @@ export function BatchFilmstrip({
   const viewportWidthRef = useRef(0);
   const size = sizeProp ?? (compact ? 56 : 66);
   const activeIndex = Math.max(0, Math.min(selectedIndex, photos.length - 1));
+  // A primitive signature keeps FlatList from re-rendering every tile when an
+  // unrelated parent state changes; only real selection/edit changes refresh.
+  const extraData = [
+    activeIndex,
+    disabled ? 1 : 0,
+    ...photos.map((item) => {
+      const value = editsById[getBatchPhotoId(item)] ?? item.edits;
+      return `${value?.rotation ?? 0}:${hasCustomCrop(value?.corners) ? 1 : 0}`;
+    }),
+  ].join('|');
   const revealSelected = useCallback((animated = false) => {
     if (!viewportWidthRef.current) return;
     listRef.current?.scrollToOffset({
@@ -51,7 +61,7 @@ export function BatchFilmstrip({
         removeClippedSubviews={false}
         showsHorizontalScrollIndicator
         data={photos}
-        extraData={{ selectedIndex, editsById, disabled }}
+        extraData={extraData}
         keyExtractor={(item, index) => `${getBatchPhotoId(item)}:${index}`}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={ThumbnailSeparator}
