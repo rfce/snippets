@@ -1,5 +1,4 @@
 import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef } from 'react';
 import { FlatList, Pressable, StyleSheet, View } from 'react-native';
 
@@ -17,10 +16,11 @@ function getFilmstripOffset(index, count, size, viewportWidth) {
 
 export function BatchFilmstrip({
   photos, selectedIndex, onSelect, disabled = false, editsById = {}, compact = false, showCaption = true,
+  showCount = true, size: sizeProp,
 }) {
   const listRef = useRef(null);
   const viewportWidthRef = useRef(0);
-  const size = compact ? 56 : 66;
+  const size = sizeProp ?? (compact ? 56 : 66);
   const activeIndex = Math.max(0, Math.min(selectedIndex, photos.length - 1));
   const revealSelected = useCallback((animated = false) => {
     if (!viewportWidthRef.current) return;
@@ -34,7 +34,9 @@ export function BatchFilmstrip({
     <View style={styles.container}>
       {showCaption && <View style={styles.caption}>
         <ThemedText style={styles.eyebrow}>YOUR STACK</ThemedText>
-        <ThemedText style={styles.count}>{photos.length ? activeIndex + 1 : 0} / {photos.length}</ThemedText>
+        {showCount && (
+          <ThemedText style={styles.count}>{photos.length ? activeIndex + 1 : 0} / {photos.length}</ThemedText>
+        )}
       </View>}
       <FlatList
         ref={listRef}
@@ -83,15 +85,7 @@ export function BatchFilmstrip({
               <View style={[styles.number, selected && styles.selectedNumber]}>
                 <ThemedText style={styles.numberText}>{String(index + 1).padStart(2, '0')}</ThemedText>
               </View>
-              {edited && (
-                <View style={styles.edited}>
-                  <SymbolView
-                    name={{ ios: 'checkmark', android: 'check', web: 'check' }}
-                    size={11}
-                    tintColor="#FFFFFF"
-                  />
-                </View>
-              )}
+              {edited && <View style={styles.edited} />}
             </Pressable>
           );
         }}
@@ -118,8 +112,8 @@ const styles = StyleSheet.create({
   number: { position: 'absolute', bottom: 7, left: 7, borderRadius: 5, paddingHorizontal: 4, backgroundColor: 'rgba(15,23,42,0.72)' },
   selectedNumber: { backgroundColor: '#3C78D8' },
   numberText: { color: '#FFFFFF', fontSize: 10, lineHeight: 15, fontWeight: '700' },
-  edited: { position: 'absolute', top: 0, right: -2, width: 18, height: 18, borderRadius: 9,
-    backgroundColor: '#2F9E72', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#FFFFFF' },
+  edited: { position: 'absolute', top: 6, right: 6, width: 12, height: 12, borderRadius: 6,
+    backgroundColor: '#3C78D8' },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.6 },
 });

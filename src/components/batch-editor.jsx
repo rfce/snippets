@@ -16,7 +16,7 @@ const ICONS = {
   back: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
   crop: { ios: 'crop', android: 'crop', web: 'crop' },
   rotate: { ios: 'rotate.right', android: 'rotate_right', web: 'rotate_right' },
-  reset: { ios: 'arrow.counterclockwise', android: 'restart_alt', web: 'restart_alt' },
+  reset: { ios: 'arrow.up.left.and.arrow.down.right', android: 'open_in_full', web: 'open_in_full' },
   check: { ios: 'checkmark', android: 'check', web: 'check' },
   delete: { ios: 'trash', android: 'delete', web: 'delete' },
 };
@@ -215,57 +215,64 @@ export function BatchEditor({
           )}
         </View>
 
+        <ThemedText style={styles.stackCount}>
+          {photos.length ? activeIndex + 1 : 0} / {photos.length}
+        </ThemedText>
+
         <BatchFilmstrip photos={displayPhotos} editsById={effectiveEdits}
           selectedIndex={activeIndex} onSelect={selectPhoto}
-          disabled={busy} compact={compact} />
+          disabled={busy} compact={compact} showCaption={false}
+          size={compact ? 64 : 76} />
 
         <View style={styles.footer}>
-          {isCropping && (
-            <View style={styles.cropActions}>
-              <IconButton label="Reset crop to full image" icon={ICONS.reset}
-                disabled={busy} onPress={() => { if (!actionRef.current) editorRef.current?.reset(); }} />
-              <Pressable accessibilityRole="button" accessibilityLabel="Apply crop to current image"
-                disabled={busy}
-                onPress={applyCrop}
-                style={({ pressed }) => [styles.apply, pressed && styles.pressed, busy && styles.disabled]}>
-                <SymbolView name={ICONS.check} size={18} tintColor="#FFFFFF" />
-                <ThemedText style={styles.applyText}>Apply crop</ThemedText>
-              </Pressable>
-            </View>
-          )}
           <View style={styles.dock}>
             <IconButton label={isCropping ? 'Cancel crop changes' : 'Crop current image'}
-              icon={ICONS.crop} active={isCropping} disabled={busy} onPress={openCrop} />
-            <IconButton label="Rotate current image 90 degrees clockwise"
-              icon={ICONS.rotate} disabled={busy} onPress={rotate} />
-            <IconButton label="Delete current image" icon={ICONS.delete} destructive disabled={busy}
-              onPress={deletePhoto} />
+              icon={ICONS.crop} active={isCropping} disabled={busy}
+              onPress={isCropping ? cancelCrop : openCrop} />
+            {isCropping ? (
+              <>
+                <IconButton label="Reset crop to full image" icon={ICONS.reset}
+                  disabled={busy}
+                  onPress={() => { if (!actionRef.current) editorRef.current?.reset(); }} />
+                <IconButton label="Apply crop to current image" icon={ICONS.check}
+                  success disabled={busy} onPress={applyCrop} />
+              </>
+            ) : (
+              <>
+                <IconButton label="Rotate current image 90 degrees clockwise"
+                  icon={ICONS.rotate} disabled={busy} onPress={rotate} />
+                <IconButton label="Delete current image" icon={ICONS.delete} destructive disabled={busy}
+                  onPress={deletePhoto} />
+                <IconButton label="Save edits and return to batch camera" icon={ICONS.check}
+                  primary disabled={busy} busy={isFinishing} onPress={finish} />
+              </>
+            )}
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Save edits and return to batch camera"
-            accessibilityHint="Keeps the crop and rotation of every image so you can continue scanning."
-            disabled={busy}
-            onPress={finish}
-            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed, busy && styles.disabled]}>
-            {isFinishing ? <ActivityIndicator color="#FFFFFF" /> :
-              <SymbolView name={ICONS.check} size={30} tintColor="#FFFFFF" />}
-          </Pressable>
         </View>
       </SafeAreaView>
     </View>
   );
 }
 
-function IconButton({ label, icon, onPress, active = false, destructive = false, disabled = false }) {
+function IconButton({
+  label, icon, onPress, active = false, destructive = false, disabled = false, primary = false,
+  success = false, busy = false,
+}) {
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={label}
-      accessibilityState={{ selected: active, disabled }}
+      accessibilityState={{ selected: active, disabled, busy }}
       disabled={disabled} onPress={onPress}
       style={({ pressed }) => [styles.iconButton, active && styles.iconActive,
-        destructive && styles.iconDestructive, pressed && styles.pressed, disabled && styles.disabled]}>
-      <SymbolView name={icon} size={22}
-        tintColor={destructive ? '#C2415A' : active ? '#FFFFFF' : '#31517F'} />
+        destructive && styles.iconDestructive, primary && styles.iconPrimary,
+        success && styles.iconSuccess,
+        pressed && styles.pressed, disabled && styles.disabled]}>
+      {busy ? (
+        <ActivityIndicator color="#FFFFFF" />
+      ) : (
+        <SymbolView name={icon} size={22}
+          tintColor={primary || success ? '#FFFFFF'
+            : destructive ? '#C2415A' : active ? '#FFFFFF' : '#31517F'} />
+      )}
     </Pressable>
   );
 }
@@ -278,24 +285,29 @@ const styles = StyleSheet.create({
   headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2 },
   headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
   headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },
-  canvas: { flex: 1, minHeight: 1, marginTop: 12 },
+  canvas: { flex: 1, minHeight: 1, marginTop: 8 },
   applyingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.65)',
     alignItems: 'center', justifyContent: 'center', gap: 8 },
   applyingText: { color: '#31517F', fontSize: 12, lineHeight: 18, fontWeight: '600' },
-  footer: { alignItems: 'center', gap: 12, paddingTop: 8 },
-  dock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 16 },
-  cropActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  iconButton: { width: 44, height: 44, borderRadius: 15, backgroundColor: '#EEF3FB', alignItems: 'center', justifyContent: 'center' },
+  stackCount: { color: '#526581', fontSize: 12, lineHeight: 16, fontWeight: '600',
+    textAlign: 'center', marginTop: 10, fontVariant: ['tabular-nums'] },
+  footer: { alignItems: 'center', gap: 12, paddingTop: 4 },
+  dock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
+  iconButton: {
+    width: 46, height: 46, borderRadius: 23, backgroundColor: '#EEF3FB',
+    alignItems: 'center', justifyContent: 'center',
+  },
   iconActive: { backgroundColor: '#3C78D8' },
   iconDestructive: { backgroundColor: '#FFF1F3' },
-  apply: { minHeight: 44, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'center', gap: 6, borderRadius: 15, backgroundColor: '#3C78D8' },
-  applyText: { color: '#FFFFFF', fontSize: 12, lineHeight: 17, fontWeight: '700' },
-  doneButton: {
-    width: 64, height: 64, borderRadius: 32, backgroundColor: '#3C78D8',
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#2A5EB0', shadowOpacity: 0.22, shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 }, elevation: 4,
+  iconSuccess: {
+    backgroundColor: '#2F9E72',
+    shadowColor: '#1F7A56', shadowOpacity: 0.22, shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 }, elevation: 3,
+  },
+  iconPrimary: {
+    backgroundColor: '#3C78D8',
+    shadowColor: '#2A5EB0', shadowOpacity: 0.22, shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 }, elevation: 3,
   },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.5 },
