@@ -21,6 +21,10 @@ const ICONS = {
   delete: { ios: 'trash', android: 'delete', web: 'delete' },
 };
 
+// Shared by the plain preview and the crop canvas so entering crop mode never
+// changes the displayed image size.
+const CROP_PADDING = 12;
+
 export function BatchEditor({
   photos, editsById, renderedPhotosById, onCommitEdits, selectedIndex, onSelect,
   onBack, onDone, onDelete, isApplying,
@@ -57,7 +61,7 @@ export function BatchEditor({
   const busy = isApplying || isFinishing;
   const previewRotation = (optimisticEdits?.rotation ?? edits?.rotation ?? 0) -
     (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
-  const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, frame);
+  const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, frame, CROP_PADDING);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -195,7 +199,7 @@ export function BatchEditor({
               initialEdits={edits}
               disabled={busy}
               showCropHandles={isCropping}
-              viewportPadding={isCropping ? 28 : 0}
+              viewportPadding={CROP_PADDING}
             />
           </View>
           <Image

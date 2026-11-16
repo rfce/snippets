@@ -35,10 +35,10 @@ export async function renderBatchEditAsync(photo, edits, renderPhoto) {
  
 // Rotate already-decoded pixels immediately; fitting both axes keeps portrait
 // and landscape photos inside the canvas without another native image export.
-export function getBatchRotationPreviewStyle(photo, rotation, frame) {
+export function getBatchRotationPreviewStyle(photo, rotation, frame, padding = 0) {
   const sideways = Math.abs(rotation % 180) === 90;
   const ratio = photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 4 / 3;
-  const viewport = getImageViewport(frame, sideways ? 1 / ratio : ratio, 0);
+  const viewport = getImageViewport(frame, sideways ? 1 / ratio : ratio, padding);
   return {
     position: 'absolute',
     width: sideways ? viewport.height : viewport.width,
