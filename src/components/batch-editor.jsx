@@ -305,23 +305,23 @@ export function BatchEditor({
         <View style={styles.footer}>
           <View style={styles.dock}>
             <IconButton label={isCropping ? 'Cancel crop changes' : 'Crop current image'}
-              icon={ICONS.crop} active={isCropping} disabled={busy}
+              icon={ICONS.crop} iconSize={28} large active={isCropping} disabled={busy}
               onPress={isCropping ? cancelCrop : openCrop} />
             {isCropping ? (
               <>
-                <IconButton label="Reset crop to full image" icon={ICONS.reset}
+                <IconButton label="Reset crop to full image" icon={ICONS.reset} iconSize={28} large
                   disabled={busy}
                   onPress={() => { if (!actionRef.current) editorRef.current?.reset(); }} />
-                <IconButton label="Apply crop to current image" icon={ICONS.check}
+                <IconButton label="Apply crop to current image" icon={ICONS.check} iconSize={28} large
                   success disabled={busy} onPress={applyCrop} />
               </>
             ) : (
               <>
                 <IconButton label="Rotate current image 90 degrees clockwise"
-                  icon={ICONS.rotate} disabled={busy} onPress={rotate} />
-                <IconButton label="Delete current image" icon={ICONS.delete} destructive disabled={busy}
+                  icon={ICONS.rotate} iconSize={28} large disabled={busy} onPress={rotate} />
+                <IconButton label="Delete current image" icon={ICONS.delete} iconSize={28} large destructive disabled={busy}
                   onPress={deletePhoto} />
-                <IconButton label="Save edits and return to batch camera" icon={ICONS.check}
+                <IconButton label="Save edits and return to batch camera" icon={ICONS.check} iconSize={28} large
                   primary disabled={busy} busy={isFinishing} onPress={finish} />
               </>
             )}
@@ -333,21 +333,21 @@ export function BatchEditor({
 }
 
 function IconButton({
-  label, icon, onPress, active = false, destructive = false, disabled = false, primary = false,
-  success = false, busy = false,
+  label, icon, iconSize = 22, large = false, onPress, active = false, destructive = false,
+  disabled = false, primary = false, success = false, busy = false,
 }) {
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={label}
       accessibilityState={{ selected: active, disabled, busy }}
       disabled={disabled} onPress={onPress}
-      style={({ pressed }) => [styles.iconButton, active && styles.iconActive,
-        destructive && styles.iconDestructive, primary && styles.iconPrimary,
-        success && styles.iconSuccess,
+      style={({ pressed }) => [styles.iconButton, large && styles.iconButtonLarge,
+        active && styles.iconActive, destructive && styles.iconDestructive,
+        primary && styles.iconPrimary, success && styles.iconSuccess,
         pressed && styles.pressed, disabled && styles.disabled]}>
       {busy ? (
         <ActivityIndicator color="#FFFFFF" />
       ) : (
-        <SymbolView name={icon} size={22}
+        <SymbolView name={icon} size={iconSize}
           tintColor={primary || success ? '#FFFFFF'
             : destructive ? '#C2415A' : active ? '#FFFFFF' : '#31517F'} />
       )}
@@ -375,6 +375,7 @@ const styles = StyleSheet.create({
     width: 46, height: 46, borderRadius: 23, backgroundColor: '#EEF3FB',
     alignItems: 'center', justifyContent: 'center',
   },
+  iconButtonLarge: { width: 56, height: 56, borderRadius: 28 },
   iconActive: { backgroundColor: '#3C78D8' },
   iconDestructive: { backgroundColor: '#FFF1F3' },
   iconSuccess: {
