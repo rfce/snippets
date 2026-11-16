@@ -1,13 +1,14 @@
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, BackHandler, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { CropEditor } from '@/components/capture-review';
 import { ThemedText } from '@/components/themed-text';
+import { createRotationSaveQueue, getBatchRotationPreviewStyle } from '@/batch-editing';
 import { getBatchPhotoId } from '@/batch-workflow';
 import { hasCustomCrop } from '@/crop-geometry';
 
@@ -26,37 +27,86 @@ export function BatchEditor({
 }) {
   const editorRef = useRef(null);
   const actionRef = useRef(false);
+  const rotationQueueRef = useRef(null);
+  const commitRef = useRef(onCommitEdits);
+  const mountedRef = useRef(true);
+  commitRef.current = onCommitEdits;
   const { height, fontScale } = useWindowDimensions();
   const compact = height < 740 || fontScale > 1.2;
   const [isCropping, setIsCropping] = useState(false);
+  const [isFinishing, setIsFinishing] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
+  const [optimisticEdits, setOptimisticEdits] = useState(null);
+  const [frozenPreview, setFrozenPreview] = useState(null);
+  const [frame, setFrame] = useState({ width: 0, height: 0 });
   const activeIndex = Math.min(Math.max(0, selectedIndex), photos.length - 1);
   const photo = photos[activeIndex];
   const id = getBatchPhotoId(photo);
   const edits = editsById[id];
   const preview = renderedPhotosById[id] ?? photo;
-  const displayPhotos = photos.map((item) => renderedPhotosById[getBatchPhotoId(item)] ?? item);
+  // Keep the decoded bitmap stable while its final pixels are saved. Swapping
+  // sources mid-rotation can briefly show the old orientation or a blank frame.
+  const displayPreview = frozenPreview ?? preview;
+  const effectiveEdits = optimisticEdits ? { ...editsById, [id]: optimisticEdits } : editsById;
+  const displayPhotos = photos.map((item, index) => index === activeIndex
+    ? displayPreview : renderedPhotosById[getBatchPhotoId(item)] ?? item);
   const editedCount = photos.filter((item) => {
-    const value = editsById[getBatchPhotoId(item)];
+    const value = effectiveEdits[getBatchPhotoId(item)];
     return value?.rotation || hasCustomCrop(value?.corners);
   }).length;
+  const busy = isApplying || isFinishing;
+  const previewRotation = (optimisticEdits?.rotation ?? edits?.rotation ?? 0) -
+    (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
+  const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, frame);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      rotationQueueRef.current?.dispose();
+      rotationQueueRef.current = null;
+    };
+  }, []);
+
+  const getRotationQueue = () => {
+    if (!rotationQueueRef.current) {
+      rotationQueueRef.current = createRotationSaveQueue({
+        save: (next, { isCurrent }) => commitRef.current(photo, next, { background: true, isCurrent }),
+      });
+    }
+    return rotationQueueRef.current;
+  };
 
   const commitEdits = () => {
     const next = editorRef.current?.getEdits();
     return next ? onCommitEdits(photo, next) : Promise.resolve(true);
   };
 
+  const flushRotations = async () => {
+    const saved = await (rotationQueueRef.current?.flush() ?? Promise.resolve(true));
+    if (!saved && mountedRef.current) {
+      Alert.alert('Could not save rotation', 'Your changes are still visible. Please try again before leaving this image.');
+    }
+    return saved;
+  };
+
+  const saveBeforeLeaving = async () => await flushRotations() && await commitEdits();
+
   const runAction = async (action) => {
     if (actionRef.current || isApplying) return;
     actionRef.current = true;
+    setIsFinishing(true);
     try { await action(); }
-    finally { actionRef.current = false; }
+    finally {
+      actionRef.current = false;
+      if (mountedRef.current) setIsFinishing(false);
+    }
   };
 
   const selectPhoto = (index) => {
     if (index === activeIndex) return;
-    void runAction(async () => {
-      if (!await commitEdits()) return;
+    return runAction(async () => {
+      if (!await saveBeforeLeaving()) return;
       setIsCropping(false);
       onSelect(index);
     });
@@ -67,11 +117,11 @@ export function BatchEditor({
     setEditorRevision((value) => value + 1);
   }, []);
 
-  const goBack = useCallback(() => {
+  const goBack = () => {
     if (actionRef.current || isApplying) return;
     if (isCropping) cancelCrop();
-    else onBack();
-  }, [cancelCrop, isApplying, isCropping, onBack]);
+    else return runAction(async () => { if (await saveBeforeLeaving()) onBack(); });
+  };
 
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -81,12 +131,48 @@ export function BatchEditor({
     return () => subscription.remove();
   }, [goBack]));
 
+  const openCrop = () => {
+    if (actionRef.current || isApplying) return;
+    if (isCropping) { cancelCrop(); return; }
+    return runAction(async () => {
+      if (!await saveBeforeLeaving()) return;
+      setFrozenPreview(null);
+      setOptimisticEdits(null);
+      setIsCropping(true);
+    });
+  };
+
+  const rotate = () => {
+    if (actionRef.current || isApplying) return;
+    editorRef.current?.rotate();
+    if (isCropping) return;
+    const next = editorRef.current?.getEdits();
+    if (!next) return;
+    setFrozenPreview((current) => current ?? preview);
+    setOptimisticEdits(next);
+    getRotationQueue().stage(next);
+  };
+
+  const applyCrop = () => runAction(async () => {
+    if (!await saveBeforeLeaving()) return;
+    setFrozenPreview(null);
+    setOptimisticEdits(null);
+    setIsCropping(false);
+  });
+
+  const deletePhoto = () => runAction(async () => {
+    await rotationQueueRef.current?.cancel();
+    onDelete(photo);
+  });
+
+  const finish = () => runAction(async () => { if (await saveBeforeLeaving()) onDone(); });
+
   return (
     <View style={styles.screen}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
           <IconButton label={isCropping ? 'Cancel crop changes' : 'Return to batch camera'}
-            icon={ICONS.back} onPress={goBack} disabled={isApplying} />
+            icon={ICONS.back} onPress={goBack} disabled={busy} />
           <View style={styles.headerCopy}>
             <ThemedText numberOfLines={1} style={styles.headerTitle}>Edit image</ThemedText>
             <ThemedText numberOfLines={1} style={styles.headerSubtitle}>
@@ -96,7 +182,10 @@ export function BatchEditor({
           <View style={styles.headerSpacer} />
         </View>
 
-        <View style={styles.canvas}>
+        <View style={styles.canvas} onLayout={({ nativeEvent: { layout } }) => {
+          setFrame((current) => current.width === layout.width && current.height === layout.height
+            ? current : { width: layout.width, height: layout.height });
+        }}>
           <View pointerEvents={isCropping ? 'auto' : 'none'}
             style={[StyleSheet.absoluteFill, { opacity: isCropping ? 1 : 0 }]}>
             <CropEditor
@@ -104,19 +193,19 @@ export function BatchEditor({
               ref={editorRef}
               photo={photo}
               initialEdits={edits}
-              disabled={isApplying}
+              disabled={busy}
               showCropHandles={isCropping}
               viewportPadding={isCropping ? 28 : 0}
             />
           </View>
           <Image
-            source={preview.uri}
+            source={displayPreview.uri}
             pointerEvents="none"
             contentFit="contain"
             cachePolicy="memory-disk"
-            transition={120}
+            transition={0}
             accessible={false}
-            style={[StyleSheet.absoluteFill, { opacity: isCropping ? 0 : 1 }]}
+            style={[previewStyle, { opacity: isCropping ? 0 : 1 }]}
           />
           {isApplying && (
             <View style={styles.applyingOverlay} accessibilityLiveRegion="polite">
@@ -126,19 +215,19 @@ export function BatchEditor({
           )}
         </View>
 
-        <BatchFilmstrip photos={displayPhotos} editsById={editsById}
+        <BatchFilmstrip photos={displayPhotos} editsById={effectiveEdits}
           selectedIndex={activeIndex} onSelect={selectPhoto}
-          disabled={isApplying} compact={compact} />
+          disabled={busy} compact={compact} />
 
         <View style={styles.footer}>
           {isCropping && (
             <View style={styles.cropActions}>
               <IconButton label="Reset crop to full image" icon={ICONS.reset}
-                disabled={isApplying} onPress={() => { if (!actionRef.current) editorRef.current?.reset(); }} />
+                disabled={busy} onPress={() => { if (!actionRef.current) editorRef.current?.reset(); }} />
               <Pressable accessibilityRole="button" accessibilityLabel="Apply crop to current image"
-                disabled={isApplying}
-                onPress={() => { void runAction(async () => { if (await commitEdits()) setIsCropping(false); }); }}
-                style={({ pressed }) => [styles.apply, pressed && styles.pressed, isApplying && styles.disabled]}>
+                disabled={busy}
+                onPress={applyCrop}
+                style={({ pressed }) => [styles.apply, pressed && styles.pressed, busy && styles.disabled]}>
                 <SymbolView name={ICONS.check} size={18} tintColor="#FFFFFF" />
                 <ThemedText style={styles.applyText}>Apply crop</ThemedText>
               </Pressable>
@@ -146,34 +235,21 @@ export function BatchEditor({
           )}
           <View style={styles.dock}>
             <IconButton label={isCropping ? 'Cancel crop changes' : 'Crop current image'}
-              icon={ICONS.crop} active={isCropping} disabled={isApplying}
-              onPress={() => { if (actionRef.current) return; if (isCropping) cancelCrop(); else setIsCropping(true); }} />
+              icon={ICONS.crop} active={isCropping} disabled={busy} onPress={openCrop} />
             <IconButton label="Rotate current image 90 degrees clockwise"
-              icon={ICONS.rotate} disabled={isApplying}
-              onPress={() => {
-                if (actionRef.current || isApplying) return;
-                if (isCropping) { editorRef.current?.rotate(); return; }
-                void runAction(async () => {
-                  editorRef.current?.rotate();
-                  if (!await commitEdits()) setEditorRevision((value) => value + 1);
-                });
-              }} />
-            <IconButton label="Delete current image" icon={ICONS.delete} destructive disabled={isApplying}
-              onPress={() => {
-                if (actionRef.current) return;
-                setIsCropping(false);
-                setEditorRevision((value) => value + 1);
-                onDelete(photo);
-              }} />
+              icon={ICONS.rotate} disabled={busy} onPress={rotate} />
+            <IconButton label="Delete current image" icon={ICONS.delete} destructive disabled={busy}
+              onPress={deletePhoto} />
           </View>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Save edits and return to batch camera"
             accessibilityHint="Keeps the crop and rotation of every image so you can continue scanning."
-            disabled={isApplying}
-            onPress={() => { void runAction(async () => { if (await commitEdits()) onDone(); }); }}
-            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed, isApplying && styles.disabled]}>
-            <SymbolView name={ICONS.check} size={30} tintColor="#FFFFFF" />
+            disabled={busy}
+            onPress={finish}
+            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed, busy && styles.disabled]}>
+            {isFinishing ? <ActivityIndicator color="#FFFFFF" /> :
+              <SymbolView name={ICONS.check} size={30} tintColor="#FFFFFF" />}
           </Pressable>
         </View>
       </SafeAreaView>

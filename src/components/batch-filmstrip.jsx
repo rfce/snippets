@@ -58,6 +58,7 @@ export function BatchFilmstrip({
           const id = getBatchPhotoId(item);
           const edits = editsById[id] ?? item.edits;
           const edited = Boolean(edits?.rotation || hasCustomCrop(edits?.corners));
+          const rotation = (edits?.rotation ?? 0) - (item.sourcePhoto ? item.edits?.rotation ?? 0 : 0);
           const selected = index === activeIndex;
           return (
             <Pressable
@@ -76,7 +77,7 @@ export function BatchFilmstrip({
                   contentFit="cover"
                   recyclingKey={item.uri}
                   transition={0}
-                  style={[styles.image, !item.sourcePhoto && { transform: [{ rotate: `${edits?.rotation ?? 0}deg` }] }]}
+                  style={[styles.image, { transform: [{ rotate: `${rotation}deg` }] }]}
                 />
               </View>
               <View style={[styles.number, selected && styles.selectedNumber]}>

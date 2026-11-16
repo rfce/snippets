@@ -507,6 +507,7 @@ function CameraScreen() {
   const batchEditPromiseRef = useRef(null);
   const batchEditImagesRef = useRef(new Map());
   const batchRenderedPhotosRef = useRef({});
+  const batchRenderedVariantsRef = useRef(new Map());
   const [batchRenderedPhotos, setBatchRenderedPhotos] = useState({});
   const recentImageLoadStartedRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = cameraModule.useCameraPermissions();
@@ -632,6 +633,7 @@ function CameraScreen() {
   const cleanupBatchEdits = useCallback((updateState = true) => {
     const photos = [...batchEditImagesRef.current.values()];
     batchEditImagesRef.current.clear();
+    batchRenderedVariantsRef.current.clear();
     batchRenderedPhotosRef.current = {};
     if (updateState) setBatchRenderedPhotos({});
     if (photos.length) {
@@ -891,6 +893,9 @@ function CameraScreen() {
     const id = getBatchPhotoId(photo);
     const nextRendered = { ...batchRenderedPhotosRef.current };
     delete nextRendered[id];
+    for (const [key, variant] of batchRenderedVariantsRef.current) {
+      if (getBatchPhotoId(variant) === id) batchRenderedVariantsRef.current.delete(key);
+    }
     batchRenderedPhotosRef.current = nextRendered;
     setBatchRenderedPhotos(nextRendered);
     setBatchPhotos((current) => current.filter((item) => item.uri !== photo.uri));
@@ -936,19 +941,31 @@ function CameraScreen() {
     return () => subscription.remove();
   }, [batchReviewPhotos, isApplyingBatchEdit, returnToBatchCamera]));
 
-  const commitBatchPhotoEdits = (photo, edits) => {
-    if (batchPrepareInFlightRef.current || batchSaveInFlightRef.current || batchSavedAssetsRef.current.size) {
-      return Promise.resolve(false);
-    }
+  const commitBatchPhotoEdits = (photo, edits, { background = false, isCurrent = () => true } = {}) => {
+    if (!isCurrent() || batchPrepareInFlightRef.current || batchSaveInFlightRef.current ||
+      batchSavedAssetsRef.current.size) return Promise.resolve(false);
     const id = getBatchPhotoId(photo);
     const cached = batchRenderedPhotosRef.current[id];
     const key = getBatchEditKey(edits);
     if ((cached && getBatchEditKey(cached.edits) === key) ||
       (!cached && key === getBatchEditKey())) return Promise.resolve(true);
 
+    const variantKey = JSON.stringify([photo.uri, key]);
+    const publish = (prepared) => {
+      if (!previewMountedRef.current || !isCurrent()) return false;
+      const next = { ...batchRenderedPhotosRef.current, [id]: prepared };
+      batchRenderedPhotosRef.current = next;
+      setBatchRenderedPhotos(next);
+      setBatchEdits((current) => ({ ...current, [id]: prepared.edits }));
+      return true;
+    };
+    const variant = batchRenderedVariantsRef.current.get(variantKey);
+    if (variant) return Promise.resolve(publish(variant));
+
     batchPrepareInFlightRef.current = true;
-    setIsApplyingBatchEdit(true);
-    // Register file ownership before rendering can start.
+    if (!background) setIsApplyingBatchEdit(true);
+    // Own every generated file, including superseded orientations, until the
+    // batch ends. Cached orientations can then be reused without another export.
     const job = Promise.resolve().then(async () => {
       try {
         const prepared = await renderBatchEditAsync(photo, edits, renderPerspectiveCropAsync);
@@ -957,17 +974,16 @@ function CameraScreen() {
           return false;
         }
         if (prepared.temporary) batchEditImagesRef.current.set(prepared.uri, prepared);
-        const next = { ...batchRenderedPhotosRef.current, [id]: prepared };
-        batchRenderedPhotosRef.current = next;
-        setBatchRenderedPhotos(next);
-        setBatchEdits((current) => ({ ...current, [id]: prepared.edits }));
-        return true;
+        batchRenderedVariantsRef.current.set(variantKey, prepared);
+        return publish(prepared);
       } catch (error) {
-        if (previewMountedRef.current) Alert.alert('Could not apply edit', getErrorDetails(error).message);
+        if (!background && previewMountedRef.current) {
+          Alert.alert('Could not apply edit', getErrorDetails(error).message);
+        }
         return false;
       } finally {
         batchPrepareInFlightRef.current = false;
-        if (previewMountedRef.current) setIsApplyingBatchEdit(false);
+        if (!background && previewMountedRef.current) setIsApplyingBatchEdit(false);
       }
     });
     batchEditPromiseRef.current = job;
@@ -1382,6 +1398,7 @@ function CameraScreen() {
   if (batchEditorPhotos) {
     return (
       <BatchEditor
+        key={getBatchPhotoId(batchEditorPhotos[Math.max(0, Math.min(batchSelectedIndex, batchEditorPhotos.length - 1))])}
         photos={batchEditorPhotos}
         editsById={batchEdits}
         renderedPhotosById={batchRenderedPhotos}
