@@ -194,12 +194,16 @@ export default function ExploreScreen() {
     setSelectedImageIds(new Set());
   }, [dragSelection, setSelectedImageIds]);
 
-  const loadSavedImages = useCallback(async (reset = false) => {
+  const loadSavedImages = useCallback(async (reset = false, { background = false } = {}) => {
     if (loadingRef.current || (!reset && !hasMoreRef.current)) return false;
+    // A background refresh (returning to the library) keeps the current grid
+    // on screen with no spinner and actions enabled, then swaps in the result.
+    // The first load, pull-to-refresh and retries keep their visible states.
+    const silent = background && reset && assetsRef.current.length > 0;
     if (reset) dragSelection.cancel();
 
     loadingRef.current = true;
-    setIsLoading(true);
+    if (!silent) setIsLoading(true);
 
     try {
       if (
@@ -234,8 +238,18 @@ export default function ExploreScreen() {
       }
 
       const offset = reset ? 0 : paginationOffsetRef.current;
-      const assets = await querySavedImagePage(snippetsAlbum, offset, GALLERY_PAGE_SIZE);
-      const normalizedAssets = await Promise.all(assets.map(normalizeMediaLibraryImage));
+      // A silent refresh re-reads everything already loaded, so the grid keeps
+      // its length and scroll position instead of shrinking to one page.
+      const limit = silent
+        ? Math.max(GALLERY_PAGE_SIZE, paginationOffsetRef.current)
+        : GALLERY_PAGE_SIZE;
+      const assets = await querySavedImagePage(snippetsAlbum, offset, limit);
+      // Saved images never change, so reuse the details already loaded and
+      // only ask the native side about images that are new to this grid.
+      const knownImages = new Map(assetsRef.current.map((image) => [image.id, image]));
+      const normalizedAssets = await Promise.all(assets.map((asset) =>
+        (asset?.id && knownImages.get(asset.id)) || normalizeMediaLibraryImage(asset)
+      ));
       const usableAssets = normalizedAssets.filter((asset) => asset?.uri);
       const nextImages = sortSnippetsNewestFirst(appendUniqueMediaLibraryImages(
         reset ? [] : assetsRef.current,
@@ -243,7 +257,7 @@ export default function ExploreScreen() {
       ));
       // Advance by the native page size, including duplicates or unusable
       // records, so pagination cannot skip or repeatedly fetch the same page.
-      const nextHasMore = assets.length === GALLERY_PAGE_SIZE;
+      const nextHasMore = assets.length === limit;
 
       // A full refresh replaces the loaded pages. Clear selection at commit
       // so selections made while the request was pending cannot become stale.
@@ -256,17 +270,21 @@ export default function ExploreScreen() {
       setLoadError(null);
       return true;
     } catch (error) {
-      setLoadError(getErrorMessage(error));
+      // A failed background refresh leaves the current grid as it was.
+      if (silent) console.warn('[explore] Background refresh failed', error);
+      else setLoadError(getErrorMessage(error));
       return false;
     } finally {
       loadingRef.current = false;
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [clearSelection, dragSelection]);
 
   useFocusEffect(
     useCallback(() => {
-      loadSavedImages(true);
+      // Silent when the grid already has images (for example after saving
+      // from the camera); the very first load still shows its loading state.
+      loadSavedImages(true, { background: true });
 
       return () => {
         dragSelection.cancel();

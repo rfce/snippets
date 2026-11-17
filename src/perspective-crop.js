@@ -3,7 +3,10 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { getInvertPalette } from '@/invert-settings';
 
 // Enhancement exports keep their existing JPEG settings. Crop/rotation
-// snapshots are lossless so an extra render does not discard document detail.
+// snapshots use high-quality JPEG: PNG encoding of a full-size image was the
+// slowest step of a crop (often seconds on mid-range Android), and the next
+// pass decodes JPEG much faster too. At 0.95 a document shows no visible loss,
+// and an image is re-encoded at most once more (by the chosen finish).
 const MAX_OUTPUT_EDGE = 4096;
 // Used only when the device limits cannot be read. Matches the edge the
 // pipeline has always rendered at, so a failed probe never lowers quality.
@@ -20,8 +23,8 @@ const SNAPSHOT_OPTIONS = {
   flip: false,
 };
 const CROP_SNAPSHOT_OPTIONS = {
-  format: 'png',
-  compress: 1,
+  format: 'jpeg',
+  compress: 0.95,
   flip: false,
 };
 

@@ -60,7 +60,8 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
   const [indicator, setIndicator] = useState(null);
   const [displayIndicator, setDisplayIndicator] = useState(null);
   const [ready, setReady] = useState(false);
-  const [batchPictureSize, setBatchPictureSize] = useState(undefined);
+  // Supported sizes chosen per mode: ~5 MP for batch, ~12 MP for single.
+  const [captureSizes, setCaptureSizes] = useState({ batch: undefined, single: undefined });
   const captureBusyRef = useRef(disabled);
   captureBusyRef.current = disabled;
   const mountedRef = useRef(true);
@@ -85,7 +86,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
     sizeControllerRef.current = createBatchCaptureSizeController({
       getCamera: () => cameraRef.current,
       isBusy: () => captureBusyRef.current,
-      onSize: (size) => { if (mountedRef.current) setBatchPictureSize(size); },
+      onSize: (_, sizes) => { if (mountedRef.current && sizes) setCaptureSizes(sizes); },
     });
   }
   const sizeController = sizeControllerRef.current;
@@ -204,7 +205,7 @@ export const FocusableCamera = memo(forwardRef(function FocusableCamera({
               animateShutter={animateShutter}
               enableTorch={enableTorch}
               flash={flash}
-              pictureSize={batchMode ? batchPictureSize : undefined}
+              pictureSize={batchMode ? captureSizes.batch : captureSizes.single}
               onCameraReady={handleReady}
               onMountError={handleMountError}
             />

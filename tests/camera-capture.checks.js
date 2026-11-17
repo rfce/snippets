@@ -1,4 +1,6 @@
-import { createBatchCaptureSizeController, selectBatchCaptureSize } from '../src/camera-capture.js';
+import {
+  createBatchCaptureSizeController, selectBatchCaptureSize, selectSingleCaptureSize,
+} from '../src/camera-capture.js';
 
 export async function runCameraCaptureChecks() {
   const passed = [];
@@ -22,6 +24,16 @@ export async function runCameraCaptureChecks() {
       undefined, [], ['photo', 'high', 'medium'], ['1920x1080', '1280x720'],
       ['640x480', '1280x960'], ['0x0', 'oops', null, 'Infinityx1920'],
     ]) assert(selectBatchCaptureSize(list) === undefined, 'do not force an unsupported or tiny size');
+  });
+  await check('single requests ~12 MP instead of a 50 MP sensor default', () => {
+    const highMegapixel = ['8160x6120', '4080x3060', '4000x3000', '2560x1920', '1920x1440'];
+    assert(selectSingleCaptureSize(highMegapixel) === '4080x3060', 'largest size the pipeline can use');
+    assert(selectSingleCaptureSize(catalog) === '4032x3024', 'keep a 12 MP sensor at full resolution');
+  });
+  await check('single never drops to a low size when only full resolution is larger', () => {
+    assert(selectSingleCaptureSize(['8160x6120', '1920x1440']) === '8160x6120', 'quality before speed');
+    assert(selectSingleCaptureSize(['2560x1920']) === '2560x1920', 'use the best available size');
+    assert(selectSingleCaptureSize(['photo', 'high']) === undefined, 'iOS presets keep the native default');
   });
 
   const deferred = () => {
@@ -48,6 +60,18 @@ export async function runCameraCaptureChecks() {
     await Promise.all([controller.prepare(), controller.prepare()]);
     await controller.prepare();
     assert(lookups === 1 && state.sizes.join() === '2560x1920', 'deduplicate native queries');
+  });
+  await check('one query provides the size for both capture modes', async () => {
+    let received;
+    const controller = createBatchCaptureSizeController({
+      getCamera: () => camera,
+      isBusy: () => false,
+      onSize: (_, sizes) => { received = sizes; },
+    });
+    const camera = { async getAvailablePictureSizesAsync() { return catalog; } };
+    controller.setActive(true);
+    await controller.prepare();
+    assert(received?.batch === '2560x1920' && received?.single === '4032x3024', 'batch and single sizes');
   });
   await check('size discovery never reconfigures an in-flight capture', async () => {
     const lookup = deferred();
