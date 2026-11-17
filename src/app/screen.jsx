@@ -1,10 +1,11 @@
 import { useFocusEffect, usePreventRemove, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   BackHandler,
   FlatList,
   Platform,
@@ -23,6 +24,7 @@ import { getBatchEditKey, renderBatchEditAsync } from '@/batch-editing';
 import { getFinishRenderKey } from '@/batch-finishes';
 import { backgroundSaves } from '@/background-saves';
 import { isKnownFinish, renderFinishAsync } from '@/finish-render';
+import { loadFinishPreferenceAsync, saveFinishPreferenceAsync } from '@/finish-preference';
 import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeometry } from '@/batch-capture-geometry';
 import { CaptureReview } from '@/components/capture-review';
 import { getBatchPhotoId, releaseTemporaryImagesAsync } from '@/batch-workflow';
@@ -49,6 +51,7 @@ import {
   createPreviewSourceAsync,
   prepareImportedImageAsync,
   renderPerspectiveCropAsync,
+  warmUpGlAsync,
 } from '@/perspective-crop';
 import {
   appendUniqueMediaLibraryImages,
@@ -175,6 +178,8 @@ function CameraModuleUnavailable() {
   );
 }
 
+const CAPTURE_QUALITY = 0.92;
+
 // Edit image shows crops and rotations at preview size. Saving renders full
 // size from the original capture, so these images are for display only.
 const renderBatchEditPreviewAsync = (options) =>
@@ -247,12 +252,51 @@ function CameraScreen() {
   const [batchFinishMode, setBatchFinishMode] = useState('original');
   const [batchInvertSettings, setBatchInvertSettings] = useState(DEFAULT_INVERT_SETTINGS);
   const [batchReviewIndex, setBatchReviewIndex] = useState(0);
+
+  // Speculative finishes: the finish used for the last saved batch is
+  // prepared for each new capture between shots (and in Review while it shows
+  // Original), so choosing it in Review is instant.
+  const [rememberedFinish, setRememberedFinish] = useState(null);
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  useEffect(() => {
+    let mounted = true;
+    void loadFinishPreferenceAsync().then((preference) => {
+      if (mounted && preference) setRememberedFinish(preference);
+    });
+    const subscription = AppState.addEventListener('change', (state) => setAppActive(state === 'active'));
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+  const speculativePhotos = useMemo(() => batchPhotos.map((photo) =>
+    batchRenderedPhotos[getBatchPhotoId(photo)] ?? { ...photo, sourcePhoto: photo }
+  ), [batchPhotos, batchRenderedPhotos]);
+  // Never compete with anything the person is watching: a capture, its
+  // flight animation, Edit image, the single flow, or a backgrounded app.
+  const speculationBlocked = !appActive || isCapturing || batchCaptureFlights.length > 0 ||
+    Boolean(batchEditorPhotos) || isApplyingBatchEdit || (!batchReviewPhotos && captureMode !== 'batch');
+  const [speculationIdle, setSpeculationIdle] = useState(false);
+  useEffect(() => {
+    if (speculationBlocked) {
+      setSpeculationIdle(false);
+      return undefined;
+    }
+    // A short quiet period, so work does not start just as the next shot does.
+    const timer = setTimeout(() => setSpeculationIdle(true), 400);
+    return () => clearTimeout(timer);
+  }, [speculationBlocked]);
+
   const batchFinishes = useBatchFinishes({
     photos: batchReviewPhotos,
     mode: batchFinishMode,
     invertSettings: batchInvertSettings,
     priorityIndex: batchReviewIndex,
     active: Boolean(batchReviewPhotos),
+    speculativePhotos: batchReviewPhotos ?? speculativePhotos,
+    speculativeMode: rememberedFinish?.mode ?? null,
+    speculativeInvertSettings: rememberedFinish?.invertSettings,
+    paused: !speculationIdle,
     getPendingJobs: () => [batchSavePromiseRef.current],
     onError: (mode, error) => {
       const label = PREVIEW_FILTER_OPTIONS.find((option) => option.value === mode)?.label ?? 'Image enhancement';
@@ -288,6 +332,13 @@ function CameraScreen() {
   const previewRequestRef = useRef(0);
   const previewBusyRef = useRef(false);
   const previewMountedRef = useRef(true);
+
+  // Create the shared GL context and compile the document shaders after the
+  // camera has opened, so the first crop or finish does not pay for it.
+  useEffect(() => {
+    const timer = setTimeout(() => { void warmUpGlAsync(); }, 800);
+    return () => clearTimeout(timer);
+  }, []);
 
   // The library is already underneath this route (`/` renders it). Replacing
   // the camera with `/explore` would stack a second library screen, so leave
@@ -655,7 +706,7 @@ function CameraScreen() {
 
       const photo = await cameraRef.current.takePictureAsync({
         imageType: 'jpg',
-        quality: 0.92,
+        quality: CAPTURE_QUALITY,
         base64: false,
         exif: false,
         skipProcessing: false,
@@ -889,6 +940,10 @@ function CameraScreen() {
         },
       });
       console.log('[screen] Batch handed to background save', { count: photos.length, mode });
+      // Predicts the next batch's finish for speculative preparation.
+      const remembered = { mode, invertSettings: settings };
+      setRememberedFinish(remembered);
+      void saveFinishPreferenceAsync(remembered);
 
       setBatchPhotos([]);
       setBatchReviewPhotos(null);

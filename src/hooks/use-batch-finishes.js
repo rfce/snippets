@@ -12,6 +12,34 @@ import { releaseTemporaryImagesAsync } from '@/batch-workflow';
 import { isKnownFinish, renderFinishAsync } from '@/finish-render';
 import { cleanupProcessedImagesAsync } from '@/perspective-crop';
 
+// What the worker should process next, if anything. `paused` only holds back
+// speculation; the finish on screen in Review is always processed.
+function getWorkTarget(input) {
+  if (input.active && input.mode !== 'original' && isKnownFinish(input.mode)) {
+    return {
+      photos: input.photos,
+      mode: input.mode,
+      invertSettings: input.invertSettings,
+      renderKey: input.renderKey,
+      priorityIndex: input.priorityIndex,
+      priority: 'high',
+      speculative: false,
+    };
+  }
+  const mode = input.speculativeMode;
+  if (input.paused || !mode || mode === 'original' || !isKnownFinish(mode) || !input.speculativePhotos?.length) return null;
+  return {
+    photos: input.speculativePhotos,
+    mode,
+    invertSettings: input.speculativeInvertSettings,
+    renderKey: getFinishRenderKey(mode, input.speculativeInvertSettings),
+    // In Review, start where the person is looking; while capturing, in order.
+    priorityIndex: input.active ? input.priorityIndex : 0,
+    priority: 'low',
+    speculative: true,
+  };
+}
+
 /**
  * Owns batch finish results for the whole batch session, not just one visit to
  * Review. Results are preview-size and for display only: saving renders each
@@ -23,9 +51,18 @@ import { cleanupProcessedImagesAsync } from '@/perspective-crop';
  * Every processed file stays owned here until `prune`, `reset`, or unmount,
  * and is deleted only after `getPendingJobs()` (for example an active save)
  * has settled.
+ *
+ * Speculation: when nothing on screen needs processing, the worker prepares
+ * `speculativeMode` (the finish most likely to be chosen) for
+ * `speculativePhotos` at low priority, for example between shots while
+ * capturing a batch. The results share the cache, so choosing that finish
+ * in Review is instant. `paused` stops new speculative work (an image
+ * already in progress finishes) so captures and animations never compete
+ * with it; it never delays the finish on screen in Review.
  */
 export function useBatchFinishes({
   photos, mode, invertSettings, priorityIndex = 0, active, getPendingJobs, onError,
+  speculativePhotos = null, speculativeMode = null, speculativeInvertSettings, paused = false,
 }) {
   const renderKey = getFinishRenderKey(mode, invertSettings);
   const cacheRef = useRef(new Map());
@@ -41,7 +78,10 @@ export function useBatchFinishes({
   const [retryToken, setRetryToken] = useState(0);
 
   const inputsRef = useRef(null);
-  inputsRef.current = { photos, mode, invertSettings, renderKey, priorityIndex, active };
+  inputsRef.current = {
+    photos, mode, invertSettings, renderKey, priorityIndex, active,
+    speculativePhotos, speculativeMode, speculativeInvertSettings, paused,
+  };
   const getPendingJobsRef = useRef(getPendingJobs);
   getPendingJobsRef.current = getPendingJobs;
   const onErrorRef = useRef(onError);
@@ -57,16 +97,14 @@ export function useBatchFinishes({
     void releaseTemporaryImagesAsync(files, pending, cleanupProcessedImagesAsync);
   }, []);
 
+  const isSettled = useCallback(
+    (key) => cacheRef.current.has(key) || failuresRef.current.has(key), []
+  );
+
   const hasPendingWork = useCallback(() => {
-    const input = inputsRef.current;
-    if (!input.active || input.mode === 'original' || !isKnownFinish(input.mode)) return false;
-    return Boolean(pickNextFinishJob({
-      photos: input.photos,
-      renderKey: input.renderKey,
-      priorityIndex: input.priorityIndex,
-      isSettled: (key) => cacheRef.current.has(key) || failuresRef.current.has(key),
-    }));
-  }, []);
+    const target = getWorkTarget(inputsRef.current);
+    return Boolean(target && pickNextFinishJob({ ...target, isSettled }));
+  }, [isSettled]);
 
   const run = useCallback(() => {
     if (runningRef.current || !mountedRef.current) return;
@@ -77,14 +115,9 @@ export function useBatchFinishes({
       while (isCurrentGeneration()) {
         // Re-read inputs for every image, so a swipe re-prioritizes the queue
         // and a new finish applies after at most one in-flight image.
-        const input = inputsRef.current;
-        if (!input.active || input.mode === 'original' || !isKnownFinish(input.mode)) break;
-        const next = pickNextFinishJob({
-          photos: input.photos,
-          renderKey: input.renderKey,
-          priorityIndex: input.priorityIndex,
-          isSettled: (key) => cacheRef.current.has(key) || failuresRef.current.has(key),
-        });
+        const target = getWorkTarget(inputsRef.current);
+        if (!target) break;
+        const next = pickNextFinishJob({ ...target, isSettled });
         if (!next) break;
 
         setActiveKey(next.key);
@@ -94,9 +127,10 @@ export function useBatchFinishes({
           const rendered = await renderFinishAsync({
             source: next.photo.sourcePhoto ?? next.photo,
             edits: next.photo.edits,
-            mode: input.mode,
-            invertSettings: input.invertSettings,
+            mode: target.mode,
+            invertSettings: target.invertSettings,
             size: 'preview',
+            priority: target.priority,
           });
           if (!isCurrentGeneration()) {
             await cleanupProcessedImagesAsync([rendered]);
@@ -107,10 +141,11 @@ export function useBatchFinishes({
         } catch (error) {
           if (!isCurrentGeneration()) break;
           failuresRef.current.set(next.key, error);
-          // One alert per finish; the remaining failures show on the thumbnails.
-          if (!alertedRenderKeysRef.current.has(input.renderKey)) {
-            alertedRenderKeysRef.current.add(input.renderKey);
-            onErrorRef.current?.(input.mode, error);
+          // One alert per finish the person chose; speculative failures stay
+          // silent and are retried when that finish is selected.
+          if (!target.speculative && !alertedRenderKeysRef.current.has(target.renderKey)) {
+            alertedRenderKeysRef.current.add(target.renderKey);
+            onErrorRef.current?.(target.mode, error);
           }
         }
         publish();
@@ -122,11 +157,14 @@ export function useBatchFinishes({
       if (isCurrentGeneration() && hasPendingWork()) run();
     });
     runningRef.current = job;
-  }, [hasPendingWork, publish]);
+  }, [hasPendingWork, isSettled, publish]);
 
+  const speculativeRenderKey = speculativeMode
+    ? getFinishRenderKey(speculativeMode, speculativeInvertSettings) : null;
   useEffect(() => {
-    if (active && mode !== 'original') run();
-  }, [active, mode, renderKey, photos, priorityIndex, retryToken, run]);
+    run();
+  }, [active, mode, renderKey, photos, priorityIndex, retryToken, run,
+    speculativePhotos, speculativeRenderKey, paused]);
 
   useEffect(() => {
     mountedRef.current = true;

@@ -34,13 +34,15 @@ export function getGeometryEdits(edits) {
  *   reference size for resolution-dependent filters.
  * - `size: 'preview'` caps the output at PREVIEW_OUTPUT_EDGE and reads from
  *   `previewSource` (a downscaled copy) when one is available.
+ * - Full-size renders (saves) and `priority: 'low'` work wait behind
+ *   on-screen renders on the shared GL context.
  *
  * Returns the rendered image (`temporary: true`, owned by the caller), or a
  * plain reference to an existing file (no `temporary`, never delete it) when
  * nothing needs rendering (Original with no edits).
  */
 export async function renderFinishAsync({
-  source, previewSource = null, edits, mode = 'original', invertSettings, size = 'full',
+  source, previewSource = null, edits, mode = 'original', invertSettings, size = 'full', priority,
 }) {
   if (!source?.uri) throw new Error('A captured image is required to render a finish.');
   if (!isKnownFinish(mode)) throw new Error(`Unknown finish: ${mode}`);
@@ -61,6 +63,7 @@ export async function renderFinishAsync({
     ...(preview ? { maxOutputEdge: PREVIEW_OUTPUT_EDGE } : {}),
     referenceWidth: source.width,
     referenceHeight: source.height,
+    priority: priority ?? (preview ? 'high' : 'low'),
   };
 
   if (mode === 'original') return renderPerspectiveCropAsync(options);

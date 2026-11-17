@@ -53,40 +53,160 @@ export function renderMagicColorAsync(options) {
 
 async function renderWithGlSourceAsync(options, render) {
   const limits = await getGlLimitsAsync();
+  // Source preparation uses the image manipulator, not GL, so it runs before
+  // taking a turn on the shared context.
   const prepared = await prepareGlSourceAsync(options, limits);
   try {
-    return await render(prepared ? {
+    const input = prepared ? {
       ...options,
       uri: prepared.uri,
       sourceWidth: prepared.width,
       sourceHeight: prepared.height,
-    } : options);
+    } : options;
+    return await runOnGlSession((session) => render(input, session), options.priority);
   } finally {
     if (prepared?.temporary) await cleanupProcessedImagesAsync([prepared]);
   }
 }
 
+// --- One persistent GL context ------------------------------------------
+// Creating a context and compiling the document shaders used to happen on
+// every render. A single context now lives for the app session, with each
+// program compiled once. Renders take turns on it (GL state must not
+// interleave across the awaits in a render); on-screen renders ('high') go
+// before background saves and speculative work ('low').
+
+let glSession = null;
+let glSessionPromise = null;
+let glBusy = false;
+const glWaiting = { high: [], low: [] };
+
+function runOnGlSession(task, priority = 'high') {
+  return new Promise((resolve, reject) => {
+    glWaiting[priority === 'low' ? 'low' : 'high'].push({ task, resolve, reject });
+    pumpGlQueue();
+  });
+}
+
+function pumpGlQueue() {
+  if (glBusy) return;
+  const next = glWaiting.high.shift() ?? glWaiting.low.shift();
+  if (!next) return;
+  glBusy = true;
+  (async () => {
+    try {
+      const session = await getGlSessionAsync();
+      next.resolve(await next.task(session));
+    } catch (error) {
+      // A failed render may leave the context in an unknown state; start the
+      // next render on a fresh one.
+      invalidateGlSession();
+      next.reject(error);
+    } finally {
+      glBusy = false;
+      pumpGlQueue();
+    }
+  })();
+}
+
+async function getGlSessionAsync() {
+  if (glSession) return glSession;
+  if (!glSessionPromise) {
+    glSessionPromise = (async () => {
+      const GLView = getGLView();
+      const gl = await GLView.createContextAsync();
+      const limits = readGlLimits(gl);
+      if (limits.probed) outputEdgeLimit = Math.min(MAX_OUTPUT_EDGE, limits.maxTextureEdge);
+      glSession = { gl, limits, programs: new Map() };
+      return glSession;
+    })().finally(() => { glSessionPromise = null; });
+  }
+  return glSessionPromise;
+}
+
+function invalidateGlSession() {
+  const session = glSession;
+  glSession = null;
+  if (!session) return;
+  try {
+    session.programs.forEach((program) => session.gl.deleteProgram(program));
+  } catch {
+    // The context is being discarded anyway.
+  }
+  try {
+    void getGLView().destroyContextAsync(session.gl).catch(() => {});
+  } catch {
+    // expo-gl unavailable; nothing to destroy.
+  }
+}
+
+// Every program uses the shared vertex shader, so the fragment shader
+// identifies it.
+function getCachedProgram(session, vertexSource, fragmentSource) {
+  let program = session.programs.get(fragmentSource);
+  if (!program) {
+    program = createProgram(session.gl, vertexSource, fragmentSource);
+    session.programs.set(fragmentSource, program);
+  }
+  return program;
+}
+
+// Leaves no bindings behind for the next render on the shared context.
+function resetGlState(gl) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.useProgram(null);
+  for (let index = 0; index < 4; index += 1) gl.disableVertexAttribArray(index);
+}
+
 /**
- * Reads the GL limits once per app session. A failed probe is not cached, so
- * the next render tries again instead of keeping the fallback forever.
+ * Creates the shared context and compiles every document shader ahead of the
+ * first render, so the first crop or finish does not pay for it. Safe to call
+ * repeatedly; runs at low priority so it never delays a visible render.
+ */
+export function warmUpGlAsync() {
+  return runOnGlSession((session) => {
+    for (const fragment of [
+      FRAGMENT_SHADER,
+      BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER,
+      ADAPTIVE_THRESHOLD_FRAGMENT_SHADER,
+      INVERT_FRAGMENT_SHADER,
+      MAGIC_COLOR_FRAGMENT_SHADER,
+    ]) getCachedProgram(session, VERTEX_SHADER, fragment);
+    return session.limits;
+  }, 'low').catch((error) => {
+    console.warn('[perspective-crop] GL warm-up failed; renders will retry', error);
+    return null;
+  });
+}
+
+/**
+ * Reads the GL limits once per app session, from the shared context. A failed
+ * read is not cached, so the next render tries again instead of keeping the
+ * fallback forever.
  */
 export function getGlLimitsAsync() {
+  if (glSession?.limits?.probed) return Promise.resolve(glSession.limits);
   if (!glLimitsPromise) {
-    glLimitsPromise = probeGlLimitsAsync().then((limits) => {
-      if (limits.probed) outputEdgeLimit = Math.min(MAX_OUTPUT_EDGE, limits.maxTextureEdge);
-      else glLimitsPromise = null;
-      return limits;
-    });
+    glLimitsPromise = runOnGlSession((session) => session.limits)
+      .then((limits) => {
+        if (!limits.probed) glLimitsPromise = null;
+        return limits;
+      }, (error) => {
+        console.warn('[perspective-crop] Could not read GL limits; using safe defaults', error);
+        glLimitsPromise = null;
+        return { maxTextureEdge: FALLBACK_GL_TEXTURE_EDGE, probed: false };
+      });
   }
   return glLimitsPromise;
 }
 
-async function probeGlLimitsAsync() {
-  let GLView;
-  let gl;
+function readGlLimits(gl) {
   try {
-    GLView = getGLView();
-    gl = await GLView.createContextAsync();
     const readEdge = (name) => {
       const value = gl.getParameter(gl[name]);
       const edge = Array.isArray(value) || ArrayBuffer.isView(value)
@@ -101,17 +221,8 @@ async function probeGlLimitsAsync() {
     ].filter(Boolean);
     if (!edges.length) return { maxTextureEdge: FALLBACK_GL_TEXTURE_EDGE, probed: false };
     return { maxTextureEdge: Math.min(...edges), probed: true };
-  } catch (error) {
-    console.warn('[perspective-crop] Could not read GL limits; using safe defaults', error);
+  } catch {
     return { maxTextureEdge: FALLBACK_GL_TEXTURE_EDGE, probed: false };
-  } finally {
-    if (gl) {
-      try {
-        await GLView.destroyContextAsync(gl);
-      } catch {
-        // The probe context is disposable; a failed destroy must not block rendering.
-      }
-    }
   }
 }
 
@@ -264,7 +375,7 @@ async function renderPerspectiveCropOnce({
   sourceHeight,
   rotation = 0,
   maxOutputEdge,
-}) {
+}, session) {
   if (!uri) {
     throw new Error('A source image is required for perspective cropping.');
   }
@@ -278,7 +389,7 @@ async function renderPerspectiveCropOnce({
   }
   const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
   const GLView = getGLView();
-  const gl = await GLView.createContextAsync();
+  const { gl } = session;
   let sourceTexture;
   let outputTexture;
   let framebuffer;
@@ -286,7 +397,7 @@ async function renderPerspectiveCropOnce({
   let positionBuffer;
 
   try {
-    program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
+    program = getCachedProgram(session, VERTEX_SHADER, FRAGMENT_SHADER);
     sourceTexture = createSourceTexture(gl, uri);
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
     framebuffer = createFramebuffer(gl, outputTexture);
@@ -341,8 +452,7 @@ async function renderPerspectiveCropOnce({
       if (framebuffer) gl.deleteFramebuffer(framebuffer);
       if (outputTexture) gl.deleteTexture(outputTexture);
       if (sourceTexture) gl.deleteTexture(sourceTexture);
-      if (program) gl.deleteProgram(program);
-      await GLView.destroyContextAsync(gl);
+      resetGlState(gl);
     } catch (cleanupError) {
       console.warn('[perspective-crop] GL cleanup failed after render', cleanupError);
     }
@@ -356,7 +466,7 @@ async function renderAdaptiveThresholdOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
-}) {
+}, session) {
   if (!uri) {
     throw new Error('A source image is required for black-and-white enhancement.');
   }
@@ -371,7 +481,7 @@ async function renderAdaptiveThresholdOnce({
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
   const analysisHeight = Math.max(1, Math.round(height * analysisScale));
   const GLView = getGLView();
-  const gl = await GLView.createContextAsync();
+  const { gl } = session;
   let sourceTexture;
   let paperTexture;
   let outputTexture;
@@ -384,7 +494,7 @@ async function renderAdaptiveThresholdOnce({
     sourceTexture = createSourceTexture(gl, uri);
     outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
     framebuffer = createFramebuffer(gl, outputTexture);
-    analysisProgram = createProgram(gl, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
+    analysisProgram = getCachedProgram(session, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     gl.viewport(0, 0, analysisWidth, analysisHeight);
@@ -425,7 +535,7 @@ async function renderAdaptiveThresholdOnce({
     );
     checkGlError(gl, 'preparing the document paper map');
 
-    program = createProgram(gl, VERTEX_SHADER, ADAPTIVE_THRESHOLD_FRAGMENT_SHADER);
+    program = getCachedProgram(session, VERTEX_SHADER, ADAPTIVE_THRESHOLD_FRAGMENT_SHADER);
     gl.useProgram(program);
     setHomographyUniforms(gl, program, destinationToSource);
     gl.viewport(0, 0, outputSize.width, outputSize.height);
@@ -479,9 +589,7 @@ async function renderAdaptiveThresholdOnce({
       if (outputTexture) gl.deleteTexture(outputTexture);
       if (paperTexture) gl.deleteTexture(paperTexture);
       if (sourceTexture) gl.deleteTexture(sourceTexture);
-      if (program) gl.deleteProgram(program);
-      if (analysisProgram) gl.deleteProgram(analysisProgram);
-      await GLView.destroyContextAsync(gl);
+      resetGlState(gl);
     } catch (cleanupError) {
       console.warn('[perspective-crop] Adaptive threshold cleanup failed', cleanupError);
     }
@@ -497,7 +605,7 @@ async function renderInvertOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
-}) {
+}, session) {
   if (!uri) {
     throw new Error('A source image is required for Invert enhancement.');
   }
@@ -513,7 +621,7 @@ async function renderInvertOnce({
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
   const analysisHeight = Math.max(1, Math.round(height * analysisScale));
   const GLView = getGLView();
-  const gl = await GLView.createContextAsync();
+  const { gl } = session;
   let sourceTexture;
   let paperTexture;
   let outputTexture;
@@ -526,7 +634,7 @@ async function renderInvertOnce({
     sourceTexture = createSourceTexture(gl, uri);
     outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
     framebuffer = createFramebuffer(gl, outputTexture);
-    analysisProgram = createProgram(gl, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
+    analysisProgram = getCachedProgram(session, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     gl.viewport(0, 0, analysisWidth, analysisHeight);
@@ -567,7 +675,7 @@ async function renderInvertOnce({
     );
     checkGlError(gl, 'preparing the document paper map');
 
-    program = createProgram(gl, VERTEX_SHADER, INVERT_FRAGMENT_SHADER);
+    program = getCachedProgram(session, VERTEX_SHADER, INVERT_FRAGMENT_SHADER);
     gl.useProgram(program);
     setHomographyUniforms(gl, program, destinationToSource);
     gl.viewport(0, 0, outputSize.width, outputSize.height);
@@ -627,9 +735,7 @@ async function renderInvertOnce({
       if (outputTexture) gl.deleteTexture(outputTexture);
       if (paperTexture) gl.deleteTexture(paperTexture);
       if (sourceTexture) gl.deleteTexture(sourceTexture);
-      if (program) gl.deleteProgram(program);
-      if (analysisProgram) gl.deleteProgram(analysisProgram);
-      await GLView.destroyContextAsync(gl);
+      resetGlState(gl);
     } catch (cleanupError) {
       console.warn('[perspective-crop] Invert cleanup failed', cleanupError);
     }
@@ -1032,7 +1138,7 @@ async function renderMagicColorOnce({
   maxOutputEdge,
   referenceWidth,
   referenceHeight,
-}) {
+}, session) {
   if (!uri) {
     throw new Error('A source image is required for magic-color enhancement.');
   }
@@ -1041,7 +1147,7 @@ async function renderMagicColorOnce({
   const height = sourceHeight || 1;
   const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
   const GLView = getGLView();
-  const gl = await GLView.createContextAsync();
+  const { gl } = session;
   let sourceTexture;
   let outputTexture;
   let framebuffer;
@@ -1049,7 +1155,7 @@ async function renderMagicColorOnce({
   let positionBuffer;
 
   try {
-    program = createProgram(gl, VERTEX_SHADER, MAGIC_COLOR_FRAGMENT_SHADER);
+    program = getCachedProgram(session, VERTEX_SHADER, MAGIC_COLOR_FRAGMENT_SHADER);
     sourceTexture = createSourceTexture(gl, uri);
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
     framebuffer = createFramebuffer(gl, outputTexture);
@@ -1126,8 +1232,7 @@ async function renderMagicColorOnce({
       if (framebuffer) gl.deleteFramebuffer(framebuffer);
       if (outputTexture) gl.deleteTexture(outputTexture);
       if (sourceTexture) gl.deleteTexture(sourceTexture);
-      if (program) gl.deleteProgram(program);
-      await GLView.destroyContextAsync(gl);
+      resetGlState(gl);
     } catch (cleanupError) {
       console.warn('[perspective-crop] Magic color cleanup failed', cleanupError);
     }
