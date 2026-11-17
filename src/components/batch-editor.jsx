@@ -1,10 +1,9 @@
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Animated, BackHandler, Easing, PanResponder, Pressable, StyleSheet, View,
-  useWindowDimensions,
+  ActivityIndicator, Alert, Animated, BackHandler, Pressable, StyleSheet, View, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -14,6 +13,7 @@ import { ThemedText } from '@/components/themed-text';
 import { createRotationSaveQueue, getBatchRotationPreviewStyle } from '@/batch-editing';
 import { getBatchPhotoId } from '@/batch-workflow';
 import { hasCustomCrop } from '@/crop-geometry';
+import { useSwipeTrack } from '@/hooks/use-swipe-track';
 
 const ICONS = {
   crop: { ios: 'crop', android: 'crop', web: 'crop' },
@@ -249,19 +249,15 @@ export function BatchEditor({
   };
 
   // Horizontal swipes translate a track of slides laid out at absolute page
-  // positions. A committed swipe ends with the track already resting on the
-  // incoming slide, so nothing is re-based or snapped afterwards.
-  const trackX = useRef(new Animated.Value(0)).current;
-  const swipeStateRef = useRef(null);
-  const swipeAnimatingRef = useRef(false);
-  const swipeResponder = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_, gesture) => {
-      const state = swipeStateRef.current;
-      return Boolean(state) && !state.disabled && !swipeAnimatingRef.current && !actionRef.current &&
-        state.count > 1 && Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.2;
-    },
-    onPanResponderGrant: () => {
-      trackX.stopAnimation();
+  // positions (shared with batch Review through useSwipeTrack).
+  const { trackX, panHandlers: swipeHandlers, resetTrack } = useSwipeTrack({
+    count: photos.length,
+    activeIndex,
+    frameWidth: frame.width,
+    disabled: busy || isCropping,
+    isBlocked: () => actionRef.current,
+    onSelect: selectPhoto,
+    onSwipeStart: () => {
       // Drop any frame retained from an earlier image switch so it can never
       // cover the photo that slides in.
       setRetainedPreview(null);
@@ -269,86 +265,10 @@ export function BatchEditor({
       // swipe does not have to wait for the queue's debounce window.
       void flushRotationsRef.current();
     },
-    onPanResponderMove: (_, gesture) => {
-      const state = swipeStateRef.current;
-      if (!state) return;
-      let dx = gesture.dx;
-      const width = Math.max(1, state.frameWidth);
-      // Rubber-band at the first and last image so the edges feel intentional.
-      if ((state.activeIndex <= 0 && dx > 0) || (state.activeIndex >= state.count - 1 && dx < 0)) {
-        dx *= 0.35;
-      }
-      trackX.setValue(-state.activeIndex * width + dx);
-    },
-    onPanResponderRelease: (_, gesture) => {
-      const state = swipeStateRef.current;
-      if (!state) return;
-      const width = Math.max(1, state.frameWidth);
-      const rest = -state.activeIndex * width;
-      const threshold = Math.max(48, width * 0.22);
-      const toNext = gesture.dx < -threshold || (gesture.dx < -12 && gesture.vx < -0.5);
-      const toPrevious = gesture.dx > threshold || (gesture.dx > 12 && gesture.vx > 0.5);
-      const target = toNext ? state.activeIndex + 1
-        : toPrevious ? state.activeIndex - 1 : state.activeIndex;
-      if (target === state.activeIndex || target < 0 || target >= state.count) {
-        swipeAnimatingRef.current = true;
-        Animated.spring(trackX, {
-          toValue: rest, bounciness: 0, speed: 18, useNativeDriver: false,
-        }).start(() => { swipeAnimatingRef.current = false; });
-        return;
-      }
-      swipeAnimatingRef.current = true;
-      Animated.timing(trackX, {
-        toValue: -target * width,
-        duration: 180,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: false,
-      }).start(({ finished }) => {
-        if (!finished) {
-          swipeAnimatingRef.current = false;
-          return;
-        }
-        state.select(target, true).then((selected) => {
-          if (selected) {
-            swipeAnimatingRef.current = false;
-            return;
-          }
-          Animated.spring(trackX, {
-            toValue: rest, bounciness: 0, speed: 18, useNativeDriver: false,
-          }).start(() => { swipeAnimatingRef.current = false; });
-        });
-      });
-    },
-    onPanResponderTerminate: () => {
-      const state = swipeStateRef.current;
-      const rest = state ? -state.activeIndex * Math.max(1, state.frameWidth) : 0;
-      Animated.spring(trackX, {
-        toValue: rest, bounciness: 0, speed: 18, useNativeDriver: false,
-      }).start(() => { swipeAnimatingRef.current = false; });
-    },
-    onPanResponderTerminationRequest: () => false,
-  }), [trackX]);
-  swipeStateRef.current = {
-    count: photos.length,
-    activeIndex,
-    frameWidth: frame.width,
-    disabled: busy || isCropping,
-    select: selectPhoto,
-  };
-  // External selection changes and layout changes reposition the track. A
-  // committed swipe has already animated to exactly this value, so the effect
-  // is a no-op for that hand-off and cannot repaint the outgoing slide.
-  useLayoutEffect(() => {
-    swipeAnimatingRef.current = false;
-    trackX.stopAnimation();
-    trackX.setValue(-activeIndex * frame.width);
-  }, [activeIndex, frame.width, trackX]);
+  });
   useEffect(() => {
-    if (!isCropping) return;
-    swipeAnimatingRef.current = false;
-    trackX.stopAnimation();
-    trackX.setValue(-activeIndex * frame.width);
-  }, [isCropping, activeIndex, frame.width, trackX]);
+    if (isCropping) resetTrack();
+  }, [isCropping, activeIndex, frame.width]);
 
   const cancelCrop = useCallback(() => {
     setIsCropping(false);
@@ -426,7 +346,7 @@ export function BatchEditor({
               setFrame((current) => current.width === layout.width && current.height === layout.height
                 ? current : { width: layout.width, height: layout.height });
             }}>
-            <View style={styles.canvas} {...swipeResponder.panHandlers}>
+            <View style={styles.canvas} {...swipeHandlers}>
               <View pointerEvents={isCropping ? 'auto' : 'none'}
                 style={[StyleSheet.absoluteFill, { opacity: isCropping ? 1 : 0 }]}>
                 <CropEditor

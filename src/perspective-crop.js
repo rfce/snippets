@@ -5,6 +5,13 @@ import { getInvertPalette } from '@/invert-settings';
 // Enhancement exports keep their existing JPEG settings. Crop/rotation
 // snapshots are lossless so an extra render does not discard document detail.
 const MAX_OUTPUT_EDGE = 4096;
+// Used only when the device limits cannot be read. Matches the edge the
+// pipeline has always rendered at, so a failed probe never lowers quality.
+const FALLBACK_GL_TEXTURE_EDGE = 4096;
+// Lowered to the device's texture/renderbuffer/viewport limits once known.
+let outputEdgeLimit = MAX_OUTPUT_EDGE;
+let glLimitsPromise = null;
+const NORMALIZED_SOURCE_COMPRESS = 0.95;
 const BLACK_AND_WHITE_ANALYSIS_EDGE = 256;
 const BLACK_AND_WHITE_PAPER_GRID = 32;
 const SNAPSHOT_OPTIONS = {
@@ -18,7 +25,214 @@ const CROP_SNAPSHOT_OPTIONS = {
   flip: false,
 };
 
-export async function renderPerspectiveCropAsync({
+// Every exported renderer first resolves a GL-safe source: a local file whose
+// pixels fit in one texture on this device. Most camera captures pass through
+// untouched; oversized or non-file sources are normalized once per render.
+export function renderPerspectiveCropAsync(options) {
+  return renderWithGlSourceAsync(options, renderPerspectiveCropOnce);
+}
+
+export function renderAdaptiveThresholdAsync(options) {
+  return renderWithGlSourceAsync(options, renderAdaptiveThresholdOnce);
+}
+
+export function renderInvertAsync(options) {
+  return renderWithGlSourceAsync(options, renderInvertOnce);
+}
+
+export function renderMagicColorAsync(options) {
+  return renderWithGlSourceAsync(options, renderMagicColorOnce);
+}
+
+async function renderWithGlSourceAsync(options, render) {
+  const limits = await getGlLimitsAsync();
+  const prepared = await prepareGlSourceAsync(options, limits);
+  try {
+    return await render(prepared ? {
+      ...options,
+      uri: prepared.uri,
+      sourceWidth: prepared.width,
+      sourceHeight: prepared.height,
+    } : options);
+  } finally {
+    if (prepared?.temporary) await cleanupProcessedImagesAsync([prepared]);
+  }
+}
+
+/**
+ * Reads the GL limits once per app session. A failed probe is not cached, so
+ * the next render tries again instead of keeping the fallback forever.
+ */
+export function getGlLimitsAsync() {
+  if (!glLimitsPromise) {
+    glLimitsPromise = probeGlLimitsAsync().then((limits) => {
+      if (limits.probed) outputEdgeLimit = Math.min(MAX_OUTPUT_EDGE, limits.maxTextureEdge);
+      else glLimitsPromise = null;
+      return limits;
+    });
+  }
+  return glLimitsPromise;
+}
+
+async function probeGlLimitsAsync() {
+  let GLView;
+  let gl;
+  try {
+    GLView = getGLView();
+    gl = await GLView.createContextAsync();
+    const readEdge = (name) => {
+      const value = gl.getParameter(gl[name]);
+      const edge = Array.isArray(value) || ArrayBuffer.isView(value)
+        ? Math.min(...Array.from(value))
+        : Number(value);
+      return Number.isFinite(edge) && edge > 0 ? edge : null;
+    };
+    const edges = [
+      readEdge('MAX_TEXTURE_SIZE'),
+      readEdge('MAX_RENDERBUFFER_SIZE'),
+      readEdge('MAX_VIEWPORT_DIMS'),
+    ].filter(Boolean);
+    if (!edges.length) return { maxTextureEdge: FALLBACK_GL_TEXTURE_EDGE, probed: false };
+    return { maxTextureEdge: Math.min(...edges), probed: true };
+  } catch (error) {
+    console.warn('[perspective-crop] Could not read GL limits; using safe defaults', error);
+    return { maxTextureEdge: FALLBACK_GL_TEXTURE_EDGE, probed: false };
+  } finally {
+    if (gl) {
+      try {
+        await GLView.destroyContextAsync(gl);
+      } catch {
+        // The probe context is disposable; a failed destroy must not block rendering.
+      }
+    }
+  }
+}
+
+function isLocalFileUri(uri) {
+  return typeof uri === 'string' && uri.startsWith('file://');
+}
+
+// Returns null when the source can be uploaded as-is, otherwise a temporary
+// local copy that fits in a single texture.
+async function prepareGlSourceAsync({ uri, sourceWidth, sourceHeight }, limits) {
+  if (!uri) return null;
+  const knownSize = Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) &&
+    sourceWidth > 0 && sourceHeight > 0;
+  const oversized = knownSize && Math.max(sourceWidth, sourceHeight) > limits.maxTextureEdge;
+  if (isLocalFileUri(uri) && !oversized) return null;
+
+  return normalizeImageForGlAsync(uri, {
+    maxEdge: limits.maxTextureEdge,
+    width: knownSize ? sourceWidth : null,
+    height: knownSize ? sourceHeight : null,
+  });
+}
+
+/**
+ * Prepares a gallery image for editing. Re-encoding through the image loader
+ * bakes EXIF orientation into the pixels, yields a local file:// URI for
+ * content:// or asset-library sources, and reports the true decoded size, so
+ * crops, filters, and the on-screen preview all agree on orientation.
+ * Falls back to the original asset when it is already a local file and the
+ * copy cannot be made (for example, expo-image-manipulator is not installed).
+ */
+export async function prepareImportedImageAsync(image) {
+  if (!image?.uri) throw new Error('The selected gallery image has no URI.');
+  const limits = await getGlLimitsAsync();
+  try {
+    const normalized = await normalizeImageForGlAsync(image.uri, {
+      maxEdge: limits.maxTextureEdge,
+      width: image.width,
+      height: image.height,
+    });
+    return { ...image, ...normalized, fileName: image.fileName ?? null, sourceUri: image.uri };
+  } catch (error) {
+    // A local file is still usable: the renderers re-check its size on every
+    // pass. Only non-file sources (content://, ph://) truly need the copy.
+    if (isLocalFileUri(image.uri)) {
+      console.warn('[perspective-crop] Importing without normalization', error);
+      return image;
+    }
+    throw error;
+  }
+}
+
+function getImageManipulatorModule() {
+  try {
+    const module = require('expo-image-manipulator');
+    return module?.ImageManipulator?.manipulate ? module : null;
+  } catch {
+    return null;
+  }
+}
+
+function getFittedSize(width, height, maxEdge) {
+  const scale = Math.min(1, maxEdge / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.floor(width * scale)),
+    height: Math.max(1, Math.floor(height * scale)),
+  };
+}
+
+async function normalizeImageForGlAsync(uri, { maxEdge, width, height }) {
+  const module = getImageManipulatorModule();
+  if (!module) {
+    throw new Error(
+      'This image needs to be resized or copied before editing, which requires expo-image-manipulator. ' +
+      'Install it with "npx expo install expo-image-manipulator" and rebuild the development client.'
+    );
+  }
+
+  const { ImageManipulator, SaveFormat } = module;
+  const refs = [];
+  const track = (ref) => {
+    if (ref) refs.push(ref);
+    return ref;
+  };
+
+  try {
+    // Downscale while decoding when the reported size is already too large so
+    // a very high-resolution photo is never fully decoded at its native size.
+    const firstContext = track(ImageManipulator.manipulate(uri));
+    if (width && height && Math.max(width, height) > maxEdge) {
+      firstContext.resize(width >= height ? { width: maxEdge, height: null } : { width: null, height: maxEdge });
+    }
+    let image = track(await firstContext.renderAsync());
+
+    // Reported metadata can describe the stored (pre-EXIF) orientation, so
+    // verify the decoded size and correct it with an exact second pass.
+    if (Math.max(image.width, image.height) > maxEdge) {
+      const fitted = getFittedSize(image.width, image.height, maxEdge);
+      const fitContext = track(ImageManipulator.manipulate(image));
+      fitContext.resize(fitted);
+      image = track(await fitContext.renderAsync());
+    }
+
+    const saved = await image.saveAsync({
+      format: SaveFormat?.JPEG ?? 'jpeg',
+      compress: NORMALIZED_SOURCE_COMPRESS,
+    });
+    if (!isLocalFileUri(saved?.uri)) {
+      throw new Error('Preparing the image did not produce a local file.');
+    }
+    return {
+      uri: saved.uri,
+      width: saved.width ?? image.width,
+      height: saved.height ?? image.height,
+      temporary: true,
+    };
+  } finally {
+    refs.forEach((ref) => {
+      try {
+        ref.release?.();
+      } catch {
+        // Releasing native references is best effort.
+      }
+    });
+  }
+}
+
+async function renderPerspectiveCropOnce({
   uri,
   corners,
   sourceWidth,
@@ -109,7 +323,7 @@ export async function renderPerspectiveCropAsync({
   }
 }
 
-export async function renderAdaptiveThresholdAsync({
+async function renderAdaptiveThresholdOnce({
   uri,
   sourceWidth,
   sourceHeight,
@@ -248,7 +462,7 @@ export async function renderAdaptiveThresholdAsync({
 }
 
 
-export async function renderInvertAsync({
+async function renderInvertOnce({
   uri,
   sourceWidth,
   sourceHeight,
@@ -781,7 +995,7 @@ function paperQuantile(sortedValues, fraction) {
   return sortedValues[Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * fraction))] ?? 0;
 }
 
-export async function renderMagicColorAsync({
+async function renderMagicColorOnce({
   uri,
   sourceWidth,
   sourceHeight,
@@ -1045,7 +1259,7 @@ function getAxisAlignedTransform(crop) {
 }
 
 function getScaledOutputSize(width, height) {
-  const scale = Math.min(1, MAX_OUTPUT_EDGE / Math.max(width, height));
+  const scale = Math.min(1, outputEdgeLimit / Math.max(width, height));
 
   return {
     width: Math.max(1, Math.round(width * scale)),
@@ -1062,7 +1276,7 @@ function getOutputSize(corners, sourceWidth, sourceHeight) {
   const right = distanceInPixels(corners.topRight, corners.bottomRight, width, height);
   const rawWidth = Math.max(1, Math.round((top + bottom) / 2));
   const rawHeight = Math.max(1, Math.round((left + right) / 2));
-  const scale = Math.min(1, MAX_OUTPUT_EDGE / Math.max(rawWidth, rawHeight));
+  const scale = Math.min(1, outputEdgeLimit / Math.max(rawWidth, rawHeight));
 
   return {
     width: Math.max(1, Math.round(rawWidth * scale)),

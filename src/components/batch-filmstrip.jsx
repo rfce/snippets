@@ -1,6 +1,7 @@
 import { Image } from 'expo-image';
+import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef } from 'react';
-import { Animated, Easing, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Animated, Easing, FlatList, Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { hasCustomCrop } from '@/crop-geometry';
@@ -18,7 +19,7 @@ function getFilmstripOffset(index, count, size, viewportWidth) {
 
 export function BatchFilmstrip({
   photos, selectedIndex, onSelect, disabled = false, editsById = {}, compact = false, showCaption = true,
-  showCount = true, size: sizeProp, style,
+  showCount = true, size: sizeProp, style, statuses,
 }) {
   const listRef = useRef(null);
   const viewportWidthRef = useRef(0);
@@ -29,6 +30,7 @@ export function BatchFilmstrip({
   const extraData = [
     activeIndex,
     disabled ? 1 : 0,
+    statuses ? statuses.map((status) => status ?? '-').join(',') : '',
     ...photos.map((item) => {
       const value = editsById[getBatchPhotoId(item)] ?? item.edits;
       return `${value?.rotation ?? 0}:${hasCustomCrop(value?.corners) ? 1 : 0}`;
@@ -74,11 +76,18 @@ export function BatchFilmstrip({
           const edited = Boolean(edits?.rotation || hasCustomCrop(edits?.corners));
           const rotation = (edits?.rotation ?? 0) - (item.sourcePhoto ? item.edits?.rotation ?? 0 : 0);
           const selected = index === activeIndex;
+          // Per-image processing state (batch Review): queued tiles are veiled,
+          // the image being processed shows a spinner, and finished tiles show
+          // their result because `photos` already holds the processed image.
+          const status = statuses?.[index] ?? null;
+          const statusLabel = status === 'processing' ? ', enhancing'
+            : status === 'queued' ? ', waiting to enhance'
+              : status === 'error' ? ', enhancement failed' : '';
           return (
             <Pressable
-              accessibilityLabel={`Image ${index + 1}${edited ? ', edited' : ''}`}
+              accessibilityLabel={`Image ${index + 1}${edited ? ', edited' : ''}${statusLabel}`}
               accessibilityRole="button"
-              accessibilityState={{ selected, disabled }}
+              accessibilityState={{ selected, disabled, busy: status === 'processing' }}
               disabled={disabled}
               onPress={() => onSelect(index)}
               style={({ pressed }) => [
@@ -93,7 +102,21 @@ export function BatchFilmstrip({
                   transition={0}
                   style={[styles.image, { transform: [{ rotate: `${rotation}deg` }] }]}
                 />
+                {status === 'queued' || status === 'processing' ? (
+                  <View pointerEvents="none" style={styles.statusVeil}>
+                    {status === 'processing' ? <ActivityIndicator size="small" color="#3C78D8" /> : null}
+                  </View>
+                ) : null}
               </View>
+              {status === 'error' ? (
+                <View pointerEvents="none" style={styles.errorBadge}>
+                  <SymbolView
+                    name={{ ios: 'exclamationmark', android: 'priority_high', web: 'priority_high' }}
+                    size={11}
+                    tintColor="#FFFFFF"
+                  />
+                </View>
+              ) : null}
               <AnimatedCount
                 label={String(index + 1).padStart(2, '0')}
                 delay={(index % COUNT_TINTS.length) * 650}
@@ -165,6 +188,11 @@ const styles = StyleSheet.create({
   number: { position: 'absolute', bottom: 8, left: 8, borderRadius: 7, paddingHorizontal: 6,
     paddingVertical: 1, overflow: 'hidden', color: '#FFFFFF', fontSize: 11, lineHeight: 16,
     fontWeight: '700', fontVariant: ['tabular-nums'] },
+  statusVeil: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.55)' },
+  errorBadge: { position: 'absolute', top: 6, right: 6, width: 18, height: 18, borderRadius: 9,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: '#C2415A',
+    borderWidth: 1.5, borderColor: '#FFFFFF' },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.6 },
 });

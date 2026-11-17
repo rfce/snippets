@@ -18,16 +18,18 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { CameraCaptureOverlay, BatchCaptureTray } from '@/components/batch-capture-feedback';
 import { BatchEditor } from '@/components/batch-editor';
+import { BatchReviewScreen } from '@/components/batch-review';
 import { getBatchEditKey, renderBatchEditAsync } from '@/batch-editing';
+import { getFinishRenderKey } from '@/batch-finishes';
 import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeometry } from '@/batch-capture-geometry';
-import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { CaptureReview } from '@/components/capture-review';
 import { getBatchPhotoId, releaseTemporaryImagesAsync, savePendingBatchAsync } from '@/batch-workflow';
 import { FocusableCamera } from '@/components/focusable-camera';
-import { InvertAdjustments, PreviewFilters } from '@/components/preview-filters';
+import { PreviewFilters } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing } from '@/constants/theme';
+import { useBatchFinishes } from '@/hooks/use-batch-finishes';
 import { useTheme } from '@/hooks/use-theme';
 import { getDefaultCorners, hasCustomCrop } from '@/crop-geometry';
 import {
@@ -38,6 +40,7 @@ import {
 } from '@/invert-settings';
 import {
   cleanupProcessedImagesAsync,
+  prepareImportedImageAsync,
   renderMagicColorAsync,
   renderAdaptiveThresholdAsync,
   renderInvertAsync,
@@ -169,318 +172,6 @@ function CameraModuleUnavailable() {
   );
 }
 
-function BatchReviewScreen({ photos, onBack, onDiscard, onSave, isSaving, saveProgress }) {
-  const { height } = useWindowDimensions();
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [selectedMode, setSelectedMode] = useState('original');
-  const [invertSettings, setInvertSettings] = useState(DEFAULT_INVERT_SETTINGS);
-  const [processedPhotosByMode, setProcessedPhotosByMode] = useState({});
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processingProgress, setProcessingProgress] = useState(0);
-  const temporaryPhotosRef = useRef(new Map());
-  const savingPromiseRef = useRef(null);
-  const processingQueueRef = useRef(Promise.resolve());
-  const renderKey = selectedMode === 'invert'
-    ? `invert:${getInvertSettingsKey(invertSettings)}`
-    : selectedMode;
-  const batchImageOptions = PREVIEW_FILTER_OPTIONS;
-  const hasSavedImages = saveProgress.completed > 0;
-  const changesLocked = isSaving || hasSavedImages;
-  const activePhotos = selectedMode === 'original'
-    ? photos
-    : processedPhotosByMode[renderKey] ?? photos;
-  const currentPhoto = activePhotos[currentIndex] ?? activePhotos[0];
-  const selectedPhotos = selectedMode === 'original'
-    ? photos
-    : processedPhotosByMode[renderKey] ?? null;
-
-  const changeInvertSettings = useCallback((settings) => {
-    const normalized = normalizeInvertSettings(settings);
-    setInvertSettings((current) =>
-      getInvertSettingsKey(current) === getInvertSettingsKey(normalized) ? current : normalized
-    );
-  }, []);
-
-  const trackTemporaryPhoto = useCallback((photo) => {
-    if (photo?.temporary && photo.uri) {
-      temporaryPhotosRef.current.set(photo.uri, photo);
-    }
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      const temporaryPhotos = [...temporaryPhotosRef.current.values()];
-      temporaryPhotosRef.current.clear();
-      const cleanup = () => cleanupProcessedImagesAsync(temporaryPhotos);
-      // A save owns these files until every native save operation has settled.
-      if (savingPromiseRef.current) {
-        void savingPromiseRef.current.then(cleanup, cleanup);
-      } else {
-        void cleanup();
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (selectedMode === 'original') {
-      setIsProcessing(false);
-      setProcessingProgress(0);
-      return undefined;
-    }
-
-    if (processedPhotosByMode[renderKey]) {
-      setIsProcessing(false);
-      setProcessingProgress(photos.length);
-      return undefined;
-    }
-
-    let cancelled = false;
-    const renderers = {
-      blackAndWhite: renderAdaptiveThresholdAsync,
-      magicColor: renderMagicColorAsync,
-      invert: renderInvertAsync,
-    };
-    const renderPhoto = renderers[selectedMode];
-    const enhancementLabel = PREVIEW_FILTER_OPTIONS.find((option) => option.value === selectedMode)?.label
-      ?? 'Image enhancement';
-
-    setIsProcessing(true);
-    setProcessingProgress(0);
-
-    const processBatch = async () => {
-      if (cancelled) return;
-      const processedPhotos = [];
-      let cached = false;
-
-      try {
-        for (let index = 0; index < photos.length; index += 1) {
-          if (cancelled) return;
-
-          const photo = photos[index];
-          const source = photo;
-          const enhancedPhoto = await renderPhoto({
-            uri: source.uri,
-            sourceWidth: source.width,
-            sourceHeight: source.height,
-            corners: getDefaultCorners(),
-            rotation: 0,
-            ...(selectedMode === 'invert' ? { settings: invertSettings } : {}),
-          });
-          if (cancelled) {
-            await cleanupProcessedImagesAsync([enhancedPhoto]);
-            return;
-          }
-          trackTemporaryPhoto(enhancedPhoto);
-          processedPhotos.push({ ...photo, ...enhancedPhoto });
-          setProcessingProgress(index + 1);
-        }
-
-        if (!cancelled) {
-          cached = true;
-          setProcessedPhotosByMode((current) => ({
-            ...current,
-            [renderKey]: processedPhotos,
-          }));
-          setIsProcessing(false);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setIsProcessing(false);
-          Alert.alert(
-            `${enhancementLabel} failed`,
-            getErrorDetails(error).message
-          );
-        }
-      } finally {
-        if (!cached) {
-          const unusedPhotos = processedPhotos.filter((photo) => temporaryPhotosRef.current.has(photo.uri));
-          unusedPhotos.forEach((photo) => temporaryPhotosRef.current.delete(photo.uri));
-          await cleanupProcessedImagesAsync(unusedPhotos);
-        }
-      }
-    };
-
-    // Finish at most one in-flight image before applying the latest settings.
-    // Cancelled queued requests exit before allocating another GL context.
-    processingQueueRef.current = processingQueueRef.current.catch(() => {}).then(processBatch);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [photos, processedPhotosByMode, renderKey, selectedMode, invertSettings, trackTemporaryPhoto]);
-
-  const saveSelectedPhotos = () => {
-    if (savingPromiseRef.current || isSaving || isProcessing || !selectedPhotos) return;
-
-    const save = Promise.resolve().then(() => onSave(selectedPhotos));
-    savingPromiseRef.current = save;
-    const finish = () => {
-      if (savingPromiseRef.current === save) savingPromiseRef.current = null;
-    };
-    void save.then(finish, finish);
-  };
-
-  return (
-    <View style={styles.batchReviewContainer}>
-      <SafeAreaView style={styles.batchReviewSafeArea}>
-        <View style={styles.batchReviewHeader}>
-          <Pressable
-            accessibilityLabel="Return to batch camera"
-            accessibilityRole="button"
-            disabled={changesLocked}
-            onPress={onBack}
-            style={({ pressed }) => [
-              styles.batchReviewBackButton,
-              pressed && styles.pressed,
-              changesLocked && styles.disabled,
-            ]}>
-            <SymbolView
-              name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
-              size={22}
-              tintColor={REVIEW_TEXT}
-            />
-          </Pressable>
-          <View style={styles.batchReviewHeading}>
-            <ThemedText type="title" style={styles.batchReviewTitle}>
-              Review
-            </ThemedText>
-            <ThemedText style={styles.batchReviewSubtitle}>
-              {photos.length} {photos.length === 1 ? 'image' : 'images'} · Choose your finish
-            </ThemedText>
-          </View>
-          <View style={styles.batchReviewHeaderSpacer} />
-        </View>
-
-        <View style={styles.batchReviewImageFrame}>
-          {currentPhoto ? (
-            <Image
-              key={currentPhoto.uri}
-              contentFit="contain"
-              recyclingKey={currentPhoto.uri}
-              source={currentPhoto.uri}
-              style={styles.batchReviewImage}
-              transition={0}
-            />
-          ) : null}
-          {isProcessing ? (
-            <View style={styles.batchReviewProcessingOverlay} pointerEvents="none">
-              <ActivityIndicator color={REVIEW_BACKGROUND} />
-              <ThemedText style={styles.batchReviewProcessingText}>
-                {processingProgress} / {photos.length}
-              </ThemedText>
-            </View>
-          ) : null}
-
-        </View>
-
-        <BatchFilmstrip
-          photos={activePhotos}
-          selectedIndex={currentIndex}
-          onSelect={setCurrentIndex}
-          disabled={isSaving}
-          compact
-          showCaption={height >= 740}
-        />
-
-        {hasSavedImages && (
-          <View style={styles.batchSaveNotice} accessibilityLiveRegion="polite">
-            <ThemedText style={styles.batchSaveNoticeText}>
-              {saveProgress.completed} of {photos.length} saved. Retry saves only the remaining images.
-            </ThemedText>
-          </View>
-        )}
-
-        <View style={styles.batchReviewToggleRow}>
-          {batchImageOptions.map((option) => {
-            const isActive = selectedMode === option.value;
-
-            return (
-              <Pressable
-                key={option.value}
-                accessibilityLabel={`Show ${option.label.toLowerCase()} image`}
-                accessibilityRole="button"
-                disabled={changesLocked}
-                onPress={() => setSelectedMode(option.value)}
-                style={({ pressed }) => [
-                  styles.batchReviewToggle,
-                  changesLocked && styles.disabled,
-                  isActive && styles.batchReviewToggleActive,
-                  pressed && styles.pressed,
-                ]}>
-                <ThemedText
-                  type="smallBold"
-                  allowFontScaling={false}
-                  style={[
-                    styles.batchReviewToggleText,
-                    isActive && styles.batchReviewToggleTextActive,
-                  ]}>
-                  {option.label}
-                </ThemedText>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        <InvertAdjustments
-          visible={selectedMode === 'invert'}
-          invertSettings={invertSettings}
-          onInvertSettingsChange={changeInvertSettings}
-          disabled={changesLocked}
-        />
-
-        <View style={styles.batchReviewActions}>
-          <Pressable
-            accessibilityLabel={hasSavedImages ? "Discard unsaved images" : "Discard batch"}
-            accessibilityRole="button"
-            disabled={isSaving}
-            onPress={onDiscard}
-            style={({ pressed }) => [
-              styles.batchReviewAction,
-              styles.batchReviewDiscardAction,
-              pressed && styles.pressed,
-              isSaving && styles.disabled,
-            ]}>
-            <SymbolView
-              name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
-              size={25}
-              tintColor={REVIEW_DISCARD_ACCENT}
-            />
-            <ThemedText type="smallBold" style={styles.batchReviewDiscardText}>
-              {hasSavedImages ? 'Discard remaining' : 'Discard'}
-            </ThemedText>
-          </Pressable>
-
-          <Pressable
-            accessibilityLabel={hasSavedImages ? "Save remaining batch images" : "Save batch"}
-            accessibilityRole="button"
-            disabled={isSaving || isProcessing || !selectedPhotos}
-            onPress={saveSelectedPhotos}
-            style={({ pressed }) => [
-              styles.batchReviewAction,
-              styles.batchReviewSaveAction,
-              pressed && styles.pressed,
-              (isSaving || isProcessing || !selectedPhotos) && styles.disabled,
-            ]}>
-            {isSaving ? (
-              <ActivityIndicator color={REVIEW_BACKGROUND} />
-            ) : (
-              <SymbolView
-                name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
-                size={25}
-                tintColor={REVIEW_BACKGROUND}
-              />
-            )}
-            <ThemedText type="smallBold" style={styles.batchReviewSaveText}>
-              {isSaving ? `${saveProgress.completed} / ${photos.length}`
-                : hasSavedImages ? `Retry (${photos.length - saveProgress.completed})` : 'Save batch'}
-            </ThemedText>
-          </Pressable>
-        </View>
-      </SafeAreaView>
-    </View>
-  );
-}
-
 function CameraScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -542,6 +233,25 @@ function CameraScreen() {
   }, [batchPhotos.length]);
   const [isApplyingBatchEdit, setIsApplyingBatchEdit] = useState(false);
   const [batchSaveProgress, setBatchSaveProgress] = useState({ completed: 0, total: 0 });
+  // Review state lives with the batch, not with the Review screen, so leaving
+  // Review to add a page keeps the chosen finish, its settings, the image being
+  // viewed, and every result processed so far.
+  const [batchFinishMode, setBatchFinishMode] = useState('original');
+  const [batchInvertSettings, setBatchInvertSettings] = useState(DEFAULT_INVERT_SETTINGS);
+  const [batchReviewIndex, setBatchReviewIndex] = useState(0);
+  const batchFinishes = useBatchFinishes({
+    photos: batchReviewPhotos,
+    mode: batchFinishMode,
+    invertSettings: batchInvertSettings,
+    priorityIndex: batchReviewIndex,
+    active: Boolean(batchReviewPhotos),
+    getPendingJobs: () => [batchSavePromiseRef.current],
+    onError: (mode, error) => {
+      const label = PREVIEW_FILTER_OPTIONS.find((option) => option.value === mode)?.label ?? 'Image enhancement';
+      Alert.alert(`${label} failed`, getErrorDetails(error).message);
+    },
+  });
+  const { prune: pruneBatchFinishes, reset: resetBatchFinishes, whenIdle: whenBatchFinishesIdle } = batchFinishes;
   const [flashMode, setFlashMode] = useState('off');
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [savedPhoto, setSavedPhoto] = useState(null);
@@ -561,14 +271,21 @@ function CameraScreen() {
   const [galleryAssets, setGalleryAssets] = useState([]);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [recentGalleryImage, setRecentGalleryImage] = useState(null);
+  const [preparingImportKey, setPreparingImportKey] = useState(null);
+  const importPrepareRequestRef = useRef(0);
   const temporaryPreviewPhotosRef = useRef(new Map());
   const invertPhotoCacheRef = useRef(new Map());
   const previewRequestRef = useRef(0);
   const previewBusyRef = useRef(false);
   const previewMountedRef = useRef(true);
 
-  // Cover stack actions and native back gestures while saved files are in use.
-  usePreventRemove(isSavingBatch || isSavingPreview || isApplyingBatchEdit);
+  // The library is already underneath this route (`/` renders it). Replacing
+  // the camera with `/explore` would stack a second library screen, so leave
+  // by going back, and only fall back to the root for a deep-linked camera.
+  const leaveCamera = useCallback(() => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
+  }, [router]);
 
   const refreshCaptureBounds = useCallback(() => {
     // Cache idle-camera bounds before the shutter runs; feedback never awaits
@@ -639,15 +356,21 @@ function CameraScreen() {
     if (photos.length) {
       void releaseTemporaryImagesAsync(
         photos,
-        [batchEditPromiseRef.current, batchSavePromiseRef.current],
+        [batchEditPromiseRef.current, batchSavePromiseRef.current, whenBatchFinishesIdle()],
         cleanupProcessedImagesAsync
       );
     }
-  }, []);
+  }, [whenBatchFinishesIdle]);
 
   useEffect(() => {
-    if (!batchPhotos.length) cleanupBatchEdits();
-  }, [batchPhotos.length, cleanupBatchEdits]);
+    if (batchPhotos.length) return;
+    // The batch ended (saved, discarded, or its last image deleted).
+    cleanupBatchEdits();
+    resetBatchFinishes();
+    setBatchFinishMode('original');
+    setBatchInvertSettings(DEFAULT_INVERT_SETTINGS);
+    setBatchReviewIndex(0);
+  }, [batchPhotos.length, cleanupBatchEdits, resetBatchFinishes]);
 
   useEffect(() => {
     previewMountedRef.current = true;
@@ -756,22 +479,71 @@ function CameraScreen() {
 
   const closeImportImage = () => {
     invalidateGalleryLoad();
+    // Any image still being prepared belongs to a gallery that is now closed.
+    importPrepareRequestRef.current += 1;
+    setPreparingImportKey(null);
     setIsImporting(false);
     setIsCameraReady(false);
   };
 
-  const selectGalleryImage = useCallback((asset) => {
-    invalidateGalleryLoad();
-    setCapturedPhoto({
-      uri: asset.uri,
-      width: asset.width,
-      height: asset.height,
-      fileName: asset.fileName ?? null,
-    });
-    reviewEditsRef.current = null;
-    setIsImporting(false);
-    setIsCameraReady(false);
-  }, [invalidateGalleryLoad]);
+  const selectGalleryImage = useCallback(async (asset) => {
+    if (preparingImportKey) return;
+    const request = ++importPrepareRequestRef.current;
+    const isCurrent = () => previewMountedRef.current && importPrepareRequestRef.current === request;
+    setPreparingImportKey(asset.id || asset.uri);
+
+    try {
+      // Bake EXIF orientation into the pixels and copy non-file sources to a
+      // local file before the crop editor and GL filters ever see the image.
+      const prepared = await prepareImportedImageAsync({
+        uri: asset.uri,
+        width: asset.width,
+        height: asset.height,
+        fileName: asset.fileName ?? null,
+      });
+      if (!isCurrent()) {
+        if (prepared.temporary) await cleanupProcessedImagesAsync([prepared]);
+        return;
+      }
+      invalidateGalleryLoad();
+      setCapturedPhoto({
+        uri: prepared.uri,
+        width: prepared.width,
+        height: prepared.height,
+        fileName: prepared.fileName ?? null,
+        temporary: Boolean(prepared.temporary),
+        // Already in the photo library, so leaving with it is not data loss.
+        imported: true,
+      });
+      reviewEditsRef.current = null;
+      setIsImporting(false);
+      setIsCameraReady(false);
+    } catch (error) {
+      if (isCurrent()) {
+        reportDiagnostic('Prepare imported image', error, {
+          sourceUri: asset.uri,
+          sourceWidth: asset.width ?? null,
+          sourceHeight: asset.height ?? null,
+        });
+      }
+    } finally {
+      if (isCurrent()) setPreparingImportKey(null);
+    }
+  }, [invalidateGalleryLoad, preparingImportKey, reportDiagnostic]);
+
+  // A prepared import is a temporary copy. Release it once the capture is
+  // gone, after any save that may still be reading it.
+  useEffect(() => {
+    const photo = capturedPhoto;
+    if (!photo?.temporary) return undefined;
+    return () => {
+      void releaseTemporaryImagesAsync(
+        [photo],
+        [singleSavePromiseRef.current],
+        cleanupProcessedImagesAsync
+      );
+    };
+  }, [capturedPhoto]);
 
   const selectCaptureMode = useCallback((mode) => {
     if (mode === captureMode || captureInFlightRef.current || batchSaveInFlightRef.current) return;
@@ -783,8 +555,15 @@ function CameraScreen() {
   }, [captureMode]);
 
   const renderGalleryItem = useCallback(
-    ({ item }) => <GalleryImportTile item={item} onSelect={selectGalleryImage} />,
-    [selectGalleryImage]
+    ({ item }) => (
+      <GalleryImportTile
+        item={item}
+        onSelect={selectGalleryImage}
+        preparing={preparingImportKey === (item.id || item.uri)}
+        disabled={Boolean(preparingImportKey)}
+      />
+    ),
+    [preparingImportKey, selectGalleryImage]
   );
 
   useFocusEffect(
@@ -807,11 +586,9 @@ function CameraScreen() {
 
     cameraRequestStarted.current = true;
     requestCameraPermission().then((permission) => {
-      if (!permission.granted) {
-        router.replace('/explore');
-      }
-    }).catch(() => router.replace('/explore'));
-  }, [cameraPermission, requestCameraPermission, router]);
+      if (!permission.granted) leaveCamera();
+    }).catch(leaveCamera);
+  }, [cameraPermission, requestCameraPermission, leaveCamera]);
 
   useEffect(() => {
     if (cameraPermission?.granted) {
@@ -918,11 +695,37 @@ function CameraScreen() {
     setBatchCaptureFlights([]);
     setCaptureBlink(null);
     setIsCameraReady(false);
-    setBatchReviewPhotos(batchPhotos.map((photo) =>
+    const reviewPhotos = batchPhotos.map((photo) =>
       batchRenderedPhotosRef.current[getBatchPhotoId(photo)] ?? { ...photo, sourcePhoto: photo }
-    ));
+    );
+    // Finished results for unchanged images are reused; only new or re-edited
+    // images are processed again.
+    pruneBatchFinishes(reviewPhotos);
+    setBatchReviewIndex((index) => Math.min(index, reviewPhotos.length - 1));
+    setBatchReviewPhotos(reviewPhotos);
     setBatchEditorPhotos(null);
   };
+
+  const selectBatchFinishMode = useCallback((mode) => {
+    // Re-selecting a finish also retries any images that failed with it.
+    batchFinishes.retryFailed(getFinishRenderKey(mode, batchInvertSettings));
+    setBatchFinishMode(mode);
+  }, [batchFinishes, batchInvertSettings]);
+
+  const changeBatchInvertSettings = useCallback((settings) => {
+    const normalized = normalizeInvertSettings(settings);
+    setBatchInvertSettings((current) =>
+      getInvertSettingsKey(current) === getInvertSettingsKey(normalized) ? current : normalized
+    );
+  }, []);
+
+  // The batch session ends (saved or discarded): release every finish result.
+  const resetBatchReviewState = useCallback(() => {
+    resetBatchFinishes();
+    setBatchFinishMode('original');
+    setBatchInvertSettings(DEFAULT_INVERT_SETTINGS);
+    setBatchReviewIndex(0);
+  }, [resetBatchFinishes]);
 
   const returnToBatchCamera = useCallback(() => {
     if (batchSaveInFlightRef.current || batchPrepareInFlightRef.current || batchSavedAssetsRef.current.size) return;
@@ -999,6 +802,7 @@ function CameraScreen() {
     setBatchSelectedIndex(0);
     batchSavedAssetsRef.current.clear();
     setBatchSaveProgress({ completed: 0, total: 0 });
+    resetBatchReviewState();
     cleanupBatchEdits();
     cleanupTemporaryPreviewPhotos();
     setCaptureMode('single');
@@ -1036,6 +840,8 @@ function CameraScreen() {
         setBatchSelectedIndex(0);
         batchSavedAssetsRef.current.clear();
         setBatchSaveProgress({ completed: 0, total: 0 });
+        // Deletion waits for this save (batchSavePromiseRef) to settle.
+        resetBatchReviewState();
         cleanupBatchEdits();
         cleanupTemporaryPreviewPhotos();
         setCaptureMode('single');
@@ -1103,6 +909,80 @@ function CameraScreen() {
     });
     return () => subscription.remove();
   }, [savedPhoto, isEnhancing, isSavingPreview, returnToReview]));
+
+  // Import Image and Review capture are steps inside this route. Android Back
+  // closes the gallery or returns to the camera instead of leaving the route.
+  const isReviewingCapture = Boolean(capturedPhoto) && !savedPhoto && !batchEditorPhotos &&
+    !batchReviewPhotos && !isImporting;
+  useFocusEffect(useCallback(() => {
+    if (!isImporting && !isReviewingCapture) return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (isImporting) {
+        closeImportImage();
+        return true;
+      }
+      if (isCapturing) return true;
+      if (capturedPhoto?.imported) {
+        discardPhoto();
+        return true;
+      }
+      Alert.alert('Discard this capture?', 'This capture has not been saved.', [
+        { text: 'Keep editing', style: 'cancel' },
+        { text: 'Discard', style: 'destructive', onPress: discardPhoto },
+      ]);
+      return true;
+    });
+    return () => subscription.remove();
+  }, [isImporting, isReviewingCapture, isCapturing, capturedPhoto, closeImportImage, discardPhoto]));
+
+  // Unsaved captures (a batch, or a single camera capture in Review/Preview)
+  // must never disappear because of one tap on Close or one Android Back.
+  // Imports are already in the photo library, so leaving with one is safe.
+  const unsavedBatchCount = batchPhotos.length;
+  const hasUnsavedCapture = Boolean(capturedPhoto) && !capturedPhoto.imported;
+  const isBusyWithFiles = isSavingBatch || isSavingPreview || isApplyingBatchEdit;
+  usePreventRemove(isBusyWithFiles || unsavedBatchCount > 0 || hasUnsavedCapture, ({ repeat }) => {
+    if (batchSaveInFlightRef.current || singleSavePromiseRef.current || batchPrepareInFlightRef.current ||
+      isBusyWithFiles) {
+      Alert.alert('Saving in progress', 'Wait for the current save to finish before leaving the camera.');
+      return;
+    }
+
+    const savedCount = batchSavedAssetsRef.current.size;
+    const remaining = unsavedBatchCount - savedCount;
+    const images = (value) => `${value} ${value === 1 ? 'image' : 'images'}`;
+    let title;
+    let message;
+    if (unsavedBatchCount > 0 && hasUnsavedCapture) {
+      title = 'Discard unsaved images?';
+      message = `Your batch of ${images(remaining)} and the current capture have not been saved.`;
+    } else if (unsavedBatchCount > 0) {
+      title = `Discard ${images(remaining)}?`;
+      message = savedCount > 0
+        ? `${savedCount} of ${unsavedBatchCount} are already in Snippets. The rest of the batch has not been saved.`
+        : 'This batch has not been saved.';
+    } else {
+      title = 'Discard this capture?';
+      message = 'This capture has not been saved.';
+    }
+
+    const discardAndLeave = () => {
+      // Clear the unsaved state first so removal prevention is off when the
+      // blocked navigation repeats.
+      discardBatch();
+      closeSavedPhoto();
+      repeat();
+    };
+
+    if (Platform.OS === 'web') {
+      if (globalThis.confirm?.(`${title}\n\n${message}`)) discardAndLeave();
+      return;
+    }
+    Alert.alert(title, message, [
+      { text: 'Keep scanning', style: 'cancel' },
+      { text: 'Discard', style: 'destructive', onPress: discardAndLeave },
+    ]);
+  });
 
   const displayedSavedPhoto =
     savedImageMode === 'blackAndWhite' && blackAndWhitePhoto
@@ -1274,7 +1154,7 @@ function CameraScreen() {
           })
         : capturedPhoto;
 
-      trackTemporaryPreviewPhoto(selectedPhoto);
+      if (selectedPhoto !== capturedPhoto) trackTemporaryPreviewPhoto(selectedPhoto);
 
       console.log('[screen] Image ready for enhancement', {
         uriAvailable: Boolean(selectedPhoto?.uri),
@@ -1372,6 +1252,7 @@ function CameraScreen() {
                 contentContainerStyle={styles.galleryGrid}
                 columnWrapperStyle={styles.galleryRow}
                 renderItem={renderGalleryItem}
+                extraData={preparingImportKey}
                 initialNumToRender={12}
                 maxToRenderPerBatch={9}
                 windowSize={5}
@@ -1416,11 +1297,27 @@ function CameraScreen() {
     return (
       <BatchReviewScreen
         photos={batchReviewPhotos}
+        displayedPhotos={batchFinishes.displayed}
+        statuses={batchFinishes.statuses}
+        mode={batchFinishMode}
+        onModeChange={selectBatchFinishMode}
+        invertSettings={batchInvertSettings}
+        onInvertSettingsChange={changeBatchInvertSettings}
+        currentIndex={batchReviewIndex}
+        onIndexChange={setBatchReviewIndex}
+        completed={batchFinishes.completed}
+        failed={batchFinishes.failed}
+        total={batchFinishes.total}
+        isProcessing={batchFinishes.isProcessing}
+        canSave={Boolean(batchFinishes.selectedPhotos) && !batchFinishes.isProcessing}
+        onRetryFailed={() => batchFinishes.retryFailed()}
         isSaving={isSavingBatch}
         saveProgress={batchSaveProgress}
         onBack={returnToBatchCamera}
         onDiscard={discardBatch}
-        onSave={saveBatch}
+        onSave={() => {
+          if (batchFinishes.selectedPhotos) void saveBatch(batchFinishes.selectedPhotos);
+        }}
       />
     );
   }
@@ -1643,7 +1540,7 @@ function CameraScreen() {
         <Pressable
           accessibilityLabel="Close camera"
           accessibilityRole="button"
-          onPress={() => router.replace('/explore')}
+          onPress={leaveCamera}
           style={({ pressed }) => [
             styles.cameraCloseButton,
             { top: insets.top + Spacing.three },
@@ -1824,11 +1721,13 @@ function CameraScreen() {
   );
 }
 
-const GalleryImportTile = memo(function GalleryImportTile({ item, onSelect }) {
+const GalleryImportTile = memo(function GalleryImportTile({ item, onSelect, preparing = false, disabled = false }) {
   return (
     <Pressable
       accessibilityLabel={`Import image ${item.fileName || 'from gallery'}`}
       accessibilityRole="button"
+      accessibilityState={{ disabled, busy: preparing }}
+      disabled={disabled}
       onPress={() => onSelect(item)}
       style={({ pressed }) => [styles.galleryTile, pressed && styles.pressed]}>
       <Image
@@ -1839,6 +1738,11 @@ const GalleryImportTile = memo(function GalleryImportTile({ item, onSelect }) {
         style={styles.galleryTileImage}
         transition={0}
       />
+      {preparing ? (
+        <View pointerEvents="none" style={styles.galleryTilePreparing}>
+          <ActivityIndicator color={Colors.light.background} />
+        </View>
+      ) : null}
     </Pressable>
   );
 });
@@ -2097,186 +2001,6 @@ const styles = StyleSheet.create({
   reviewContainer: {
     flex: 1,
     backgroundColor: REVIEW_BACKGROUND,
-  },
-  batchReviewContainer: {
-    flex: 1,
-    backgroundColor: REVIEW_BACKGROUND,
-  },
-  batchReviewSafeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-    paddingBottom: Spacing.three,
-  },
-  batchReviewHeader: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    marginBottom: Spacing.three,
-  },
-  batchReviewBackButton: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 22,
-    backgroundColor: 'transparent',
-    borderWidth: 0,
-  },
-  batchReviewHeading: {
-    flex: 1,
-  },
-  batchReviewTitle: {
-    color: PREVIEW_TEXT,
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: '600',
-    letterSpacing: 0.35,
-    textAlign: 'center',
-  },
-  batchReviewSubtitle: {
-    color: PREVIEW_MUTED,
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: 'center',
-  },
-  batchReviewHeaderSpacer: {
-    width: 44,
-  },
-  batchReviewImageFrame: {
-    width: '100%',
-    flex: 1,
-    minHeight: 1,
-    position: 'relative',
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    borderRadius: 20,
-    backgroundColor: PREVIEW_SURFACE,
-  },
-  batchReviewProcessingOverlay: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.one,
-    backgroundColor: 'rgba(0, 0, 0, 0.38)',
-  },
-  batchReviewProcessingText: {
-    color: REVIEW_BACKGROUND,
-  },
-  batchSaveNotice: {
-    padding: 10,
-    borderRadius: 12,
-    backgroundColor: '#EAF6EF',
-    marginBottom: Spacing.one,
-  },
-  batchSaveNoticeText: {
-    color: '#28754F',
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  batchReviewToggleRow: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.one,
-    marginTop: Spacing.two,
-  },
-  batchReviewToggle: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: Spacing.one,
-    borderRadius: 14,
-    backgroundColor: REVIEW_SURFACE,
-    borderWidth: 1,
-    borderColor: REVIEW_BORDER,
-  },
-  batchReviewToggleActive: {
-    backgroundColor: REVIEW_NEXT_ACCENT,
-    borderColor: REVIEW_NEXT_ACCENT,
-  },
-  batchReviewToggleText: {
-    color: REVIEW_TEXT,
-    fontSize: 11,
-    lineHeight: 16,
-    textAlign: 'center',
-    flexShrink: 1,
-  },
-  batchReviewToggleTextActive: {
-    color: REVIEW_BACKGROUND,
-  },
-  batchReviewActions: {
-    alignSelf: 'stretch',
-    flexDirection: 'row',
-    marginTop: Spacing.two,
-    marginHorizontal: -Spacing.four,
-    marginBottom: -Spacing.three,
-    paddingTop: 0,
-    paddingBottom: 0,
-    backgroundColor: PREVIEW_BACKGROUND,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: PREVIEW_BORDER,
-  },
-  batchReviewAction: {
-    flex: 1,
-    minHeight: 60,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.one,
-    paddingHorizontal: Spacing.four,
-  },
-  batchReviewDiscardAction: {
-    backgroundColor: '#FFF5F6',
-    borderRadius: 0,
-    borderWidth: 0,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: '#F0C9CF',
-  },
-  batchReviewSaveAction: {
-    backgroundColor: PREVIEW_SAVE_ACCENT,
-    borderRadius: 0,
-    borderWidth: 0,
-    shadowOpacity: 0,
-    elevation: 0,
-  },
-  batchReviewDiscardText: {
-    color: REVIEW_DISCARD_ACCENT,
-    flexShrink: 1,
-    textAlign: 'center',
-  },
-  batchReviewSaveText: {
-    color: REVIEW_BACKGROUND,
-    flexShrink: 1,
-    textAlign: 'center',
-  },
-  batchReviewGrid: {
-    paddingBottom: Spacing.four,
-  },
-  batchReviewRow: {
-    gap: Spacing.two,
-    marginBottom: Spacing.two,
-  },
-  batchReviewTile: {
-    flex: 1,
-    aspectRatio: 1,
-    overflow: 'hidden',
-    borderRadius: Spacing.two,
-    backgroundColor: REVIEW_SURFACE,
-    borderWidth: 1,
-    borderColor: REVIEW_BORDER,
-  },
-  batchReviewImage: {
-    width: '100%',
-    height: '100%',
   },
   savedImageContainer: {
     flex: 1,
@@ -2780,6 +2504,12 @@ const styles = StyleSheet.create({
   galleryTileImage: {
     width: '100%',
     height: '100%',
+  },
+  galleryTilePreparing: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
   },
   galleryLoadingFooter: {
     minHeight: 64,
