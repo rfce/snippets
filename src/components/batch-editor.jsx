@@ -76,17 +76,21 @@ export function BatchEditor({
   const busy = isApplying || isFinishing;
   const previewRotation = (pendingEdits?.rotation ?? edits?.rotation ?? 0) -
     (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
-  // Size the fixed preview container from the source photo's unrotated shape.
-  // Neither cropping nor rotating changes the container height, so the
-  // thumbnails below stay anchored instead of jumping when the image changes
-  // orientation.
-  const sourceRatio = photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 4 / 3;
+  // Size the fixed preview container from the batch, not the active photo.
+  // Taking the tallest photo's unrotated shape keeps the container height
+  // identical for every image, so switching between portrait and landscape
+  // captures (or rotating/cropping one) never moves the thumbnails below.
   const stageWidth = frame.width > 0 ? frame.width : Math.max(0, windowWidth - 36);
-  const naturalStageHeight = stageWidth > 0
-    ? (stageWidth - CROP_PADDING * 2) / sourceRatio + CROP_PADDING * 2
-    : 0;
-  const stageHeight = naturalStageHeight > 0
-    ? Math.min(naturalStageHeight, maxStageHeight) : 0;
+  const stageHeight = useMemo(() => {
+    if (stageWidth <= 0) return 0;
+    const innerWidth = Math.max(0, stageWidth - CROP_PADDING * 2);
+    const tallest = photos.reduce((max, item) => {
+      const source = item.sourcePhoto ?? item;
+      const ratio = source.width > 0 && source.height > 0 ? source.width / source.height : 4 / 3;
+      return Math.max(max, innerWidth / ratio + CROP_PADDING * 2);
+    }, 0);
+    return Math.min(tallest, maxStageHeight);
+  }, [photos, stageWidth, maxStageHeight]);
   // Lay the preview out against the computed stage size, not the last measured
   // height, so the first paint after a layout change is already correct.
   const previewFrame = {
