@@ -41,11 +41,11 @@ export function BatchEditor({
   const { width: windowWidth, height, fontScale } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const compact = height < 740 || fontScale > 1.2;
-  const thumbSize = compact ? 72 : 86;
+  const thumbSize = compact ? 78 : 92;
   // Fixed chrome: header, thumbnail strip, floating dock, paddings and the
   // minimum gap above the dock. The stage takes what is left over, so the photo
   // is never stranded in leftover space.
-  const reservedHeight = 46 + 8 + (thumbSize + 30) + 84 + 12 + 20
+  const reservedHeight = 46 + 8 + (thumbSize + 28) + 84 + 12 + 20
     + insets.top + insets.bottom;
   const maxStageHeight = Math.max(160, height - reservedHeight);
   const [isCropping, setIsCropping] = useState(false);

@@ -22,7 +22,7 @@ export function BatchFilmstrip({
 }) {
   const listRef = useRef(null);
   const viewportWidthRef = useRef(0);
-  const size = sizeProp ?? (compact ? 56 : 66);
+  const size = sizeProp ?? (compact ? 62 : 72);
   const activeIndex = Math.max(0, Math.min(selectedIndex, photos.length - 1));
   // A primitive signature keeps FlatList from re-rendering every tile when an
   // unrelated parent state changes; only real selection/edit changes refresh.
@@ -53,7 +53,7 @@ export function BatchFilmstrip({
       <FlatList
         ref={listRef}
         horizontal
-        style={{ width: '100%', height: size + 14, flexGrow: 0 }}
+        style={{ width: '100%', height: size + 4, flexGrow: 0 }}
         onLayout={({ nativeEvent: { layout } }) => {
           viewportWidthRef.current = layout.width;
           revealSelected();
@@ -82,7 +82,7 @@ export function BatchFilmstrip({
               disabled={disabled}
               onPress={() => onSelect(index)}
               style={({ pressed }) => [
-                styles.tile, { width: size, height: size + 8 },
+                styles.tile, { width: size, height: size },
                 selected && styles.selected, pressed && styles.pressed, disabled && styles.disabled,
               ]}>
               <View style={styles.imageClip}>
@@ -94,10 +94,10 @@ export function BatchFilmstrip({
                   style={[styles.image, { transform: [{ rotate: `${rotation}deg` }] }]}
                 />
               </View>
-              <View style={[styles.number, selected && styles.selectedNumber]}>
-                <ThemedText style={styles.numberText}>{String(index + 1).padStart(2, '0')}</ThemedText>
-              </View>
-              {edited && <EditedDot />}
+              <AnimatedCount
+                label={String(index + 1).padStart(2, '0')}
+                delay={(index % COUNT_TINTS.length) * 650}
+              />
             </Pressable>
           );
         }}
@@ -110,47 +110,44 @@ function ThumbnailSeparator() {
   return <View style={styles.separator} />;
 }
 
-// Marks a thumbnail as edited/cropped. The dot rests in a muted grey and
-// shimmers through bright tints on a loop so it reads as "something changed"
-// without shouting for attention.
-const DOT_TINTS = ['#8A97A8', '#7FD1E8', '#BBA6F7', '#8FE3B8', '#F7C9A6', '#8A97A8'];
+// Muted, softly saturated shades. Each is dark enough to keep the white
+// numerals above roughly 4:1 contrast; the list starts and ends on the same
+// hue so the loop wraps without a visible jump.
+const COUNT_TINTS = [
+  '#4A6FA5', '#6B5FA8', '#35786A', '#A85A54', '#7E5626', '#41718C', '#4A6FA5',
+];
 
-function EditedDot() {
+function AnimatedCount({ label, delay = 0 }) {
   const progress = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    const loop = Animated.loop(Animated.timing(progress, {
-      toValue: DOT_TINTS.length - 1,
-      duration: 3600,
-      easing: Easing.linear,
-      useNativeDriver: false,
-      isInteraction: false,
-    }));
-    loop.start();
-    return () => loop.stop();
-  }, [progress]);
-  const pulse = {
-    inputRange: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5],
-  };
+    let loop = null;
+    const timer = setTimeout(() => {
+      loop = Animated.loop(Animated.timing(progress, {
+        toValue: COUNT_TINTS.length - 1,
+        duration: 5200,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: false,
+        isInteraction: false,
+      }));
+      loop.start();
+    }, delay);
+    return () => {
+      clearTimeout(timer);
+      loop?.stop();
+    };
+  }, [delay, progress]);
   return (
-    <Animated.View
-      pointerEvents="none"
-      style={[styles.edited, {
+    <Animated.Text
+      accessible={false}
+      style={[styles.number, {
         backgroundColor: progress.interpolate({
-          inputRange: DOT_TINTS.map((_, index) => index),
-          outputRange: DOT_TINTS,
+          inputRange: COUNT_TINTS.map((_, index) => index),
+          outputRange: COUNT_TINTS,
         }),
-        opacity: progress.interpolate({
-          ...pulse,
-          outputRange: [0.55, 1, 0.55, 1, 0.55, 1, 0.55, 1, 0.55, 1, 0.55],
-        }),
-        transform: [{
-          scale: progress.interpolate({
-            ...pulse,
-            outputRange: [0.85, 1.1, 0.85, 1.1, 0.85, 1.1, 0.85, 1.1, 0.85, 1.1, 0.85],
-          }),
-        }],
       }]}
-    />
+    >
+      {label}
+    </Animated.Text>
   );
 }
 
@@ -161,15 +158,13 @@ const styles = StyleSheet.create({
   count: { color: '#526581', fontSize: 12, lineHeight: 16, fontVariant: ['tabular-nums'] },
   list: { paddingVertical: 2, paddingRight: 3 },
   separator: { width: GAP },
-  tile: { borderWidth: 2, borderColor: 'transparent', borderRadius: 14, padding: 3 },
+  tile: { borderWidth: 2, borderColor: 'transparent', borderRadius: 15, padding: 3 },
   selected: { borderColor: '#3C78D8', backgroundColor: '#EAF1FF' },
-  imageClip: { flex: 1, borderRadius: 9, overflow: 'hidden', backgroundColor: '#EEF2F7' },
+  imageClip: { flex: 1, borderRadius: 10, overflow: 'hidden', backgroundColor: '#EEF2F7' },
   image: { width: '100%', height: '100%' },
-  number: { position: 'absolute', bottom: 7, left: 7, borderRadius: 5, paddingHorizontal: 4, backgroundColor: 'rgba(15,23,42,0.72)' },
-  selectedNumber: { backgroundColor: '#3C78D8' },
-  numberText: { color: '#FFFFFF', fontSize: 10, lineHeight: 15, fontWeight: '700' },
-  edited: { position: 'absolute', top: 6, right: 6, width: 9, height: 9, borderRadius: 5,
-    backgroundColor: '#8A97A8' },
+  number: { position: 'absolute', bottom: 8, left: 8, borderRadius: 7, paddingHorizontal: 6,
+    paddingVertical: 1, overflow: 'hidden', color: '#FFFFFF', fontSize: 11, lineHeight: 16,
+    fontWeight: '700', fontVariant: ['tabular-nums'] },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.6 },
 });
