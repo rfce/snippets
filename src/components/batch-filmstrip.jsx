@@ -1,6 +1,6 @@
 import { Image } from 'expo-image';
 import { useCallback, useEffect, useRef } from 'react';
-import { FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { Animated, Easing, FlatList, Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { hasCustomCrop } from '@/crop-geometry';
@@ -97,7 +97,7 @@ export function BatchFilmstrip({
               <View style={[styles.number, selected && styles.selectedNumber]}>
                 <ThemedText style={styles.numberText}>{String(index + 1).padStart(2, '0')}</ThemedText>
               </View>
-              {edited && <View style={styles.edited} />}
+              {edited && <EditedDot />}
             </Pressable>
           );
         }}
@@ -108,6 +108,50 @@ export function BatchFilmstrip({
 
 function ThumbnailSeparator() {
   return <View style={styles.separator} />;
+}
+
+// Marks a thumbnail as edited/cropped. The dot rests in a muted grey and
+// shimmers through bright tints on a loop so it reads as "something changed"
+// without shouting for attention.
+const DOT_TINTS = ['#8A97A8', '#7FD1E8', '#BBA6F7', '#8FE3B8', '#F7C9A6', '#8A97A8'];
+
+function EditedDot() {
+  const progress = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.timing(progress, {
+      toValue: DOT_TINTS.length - 1,
+      duration: 3600,
+      easing: Easing.linear,
+      useNativeDriver: false,
+      isInteraction: false,
+    }));
+    loop.start();
+    return () => loop.stop();
+  }, [progress]);
+  const pulse = {
+    inputRange: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5],
+  };
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[styles.edited, {
+        backgroundColor: progress.interpolate({
+          inputRange: DOT_TINTS.map((_, index) => index),
+          outputRange: DOT_TINTS,
+        }),
+        opacity: progress.interpolate({
+          ...pulse,
+          outputRange: [0.55, 1, 0.55, 1, 0.55, 1, 0.55, 1, 0.55, 1, 0.55],
+        }),
+        transform: [{
+          scale: progress.interpolate({
+            ...pulse,
+            outputRange: [0.85, 1.1, 0.85, 1.1, 0.85, 1.1, 0.85, 1.1, 0.85, 1.1, 0.85],
+          }),
+        }],
+      }]}
+    />
+  );
 }
 
 const styles = StyleSheet.create({
@@ -124,8 +168,8 @@ const styles = StyleSheet.create({
   number: { position: 'absolute', bottom: 7, left: 7, borderRadius: 5, paddingHorizontal: 4, backgroundColor: 'rgba(15,23,42,0.72)' },
   selectedNumber: { backgroundColor: '#3C78D8' },
   numberText: { color: '#FFFFFF', fontSize: 10, lineHeight: 15, fontWeight: '700' },
-  edited: { position: 'absolute', top: 6, right: 6, width: 12, height: 12, borderRadius: 6,
-    backgroundColor: '#3C78D8' },
+  edited: { position: 'absolute', top: 6, right: 6, width: 9, height: 9, borderRadius: 5,
+    backgroundColor: '#8A97A8' },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.6 },
 });

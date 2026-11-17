@@ -16,7 +16,6 @@ import { getBatchPhotoId } from '@/batch-workflow';
 import { hasCustomCrop } from '@/crop-geometry';
 
 const ICONS = {
-  back: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
   crop: { ios: 'crop', android: 'crop', web: 'crop' },
   rotate: { ios: 'rotate.right', android: 'rotate_right', web: 'rotate_right' },
   reset: { ios: 'arrow.up.left.and.arrow.down.right', android: 'open_in_full', web: 'open_in_full' },
@@ -42,7 +41,7 @@ export function BatchEditor({
   const { width: windowWidth, height, fontScale } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const compact = height < 740 || fontScale > 1.2;
-  const thumbSize = compact ? 64 : 76;
+  const thumbSize = compact ? 72 : 86;
   // Fixed chrome: header, thumbnail strip, floating dock, paddings and the
   // minimum gap above the dock. The stage takes what is left over, so the photo
   // is never stranded in leftover space.
@@ -77,17 +76,14 @@ export function BatchEditor({
   const busy = isApplying || isFinishing;
   const previewRotation = (pendingEdits?.rotation ?? edits?.rotation ?? 0) -
     (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
-  const previewSideways = Math.abs(previewRotation % 180) === 90;
-  const previewRatio = displayPreview.width > 0 && displayPreview.height > 0
-    ? (previewSideways ? displayPreview.height / displayPreview.width
-      : displayPreview.width / displayPreview.height)
-    : 4 / 3;
-  // Size the stage to the photo instead of letting it absorb all spare height.
-  // The thumbnails then sit right under the image and the slack falls below
-  // them, which keeps the composition tight and deliberate.
+  // Size the fixed preview container from the source photo's unrotated shape.
+  // Neither cropping nor rotating changes the container height, so the
+  // thumbnails below stay anchored instead of jumping when the image changes
+  // orientation.
+  const sourceRatio = photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 4 / 3;
   const stageWidth = frame.width > 0 ? frame.width : Math.max(0, windowWidth - 36);
   const naturalStageHeight = stageWidth > 0
-    ? (stageWidth - CROP_PADDING * 2) / previewRatio + CROP_PADDING * 2
+    ? (stageWidth - CROP_PADDING * 2) / sourceRatio + CROP_PADDING * 2
     : 0;
   const stageHeight = naturalStageHeight > 0
     ? Math.min(naturalStageHeight, maxStageHeight) : 0;
@@ -409,8 +405,7 @@ export function BatchEditor({
     <View style={styles.screen}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
-          <IconButton label={isCropping ? 'Cancel crop changes' : 'Return to batch camera'}
-            icon={ICONS.back} onPress={goBack} disabled={busy} />
+          <View style={styles.headerSpacer} />
           <View style={styles.headerCopy}>
             <ThemedText numberOfLines={1} style={styles.headerTitle}>Edit image</ThemedText>
             <ThemedText numberOfLines={1} style={styles.headerSubtitle}>
