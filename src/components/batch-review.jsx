@@ -2,7 +2,7 @@ import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Animated, Easing, Pressable, StyleSheet, View, useWindowDimensions,
+  ActivityIndicator, Animated, Easing, Pressable, ScrollView, StyleSheet, View, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -11,6 +11,7 @@ import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { InvertAdjustments } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { getImageViewport } from '@/crop-geometry';
 import { getNeighbourIndices, useSwipeTrack } from '@/hooks/use-swipe-track';
 import { PREVIEW_FILTER_OPTIONS } from '@/invert-settings';
 
@@ -24,7 +25,24 @@ const BORDER = '#E4EAF2';
 const TEXT = '#0F172A';
 const HEADING = '#122033';
 const MUTED = '#667085';
-const SLIDE_INSET = 10;
+const INVERT_INK = '#282E42';
+const CARD_RADIUS = 20;
+
+// Icons hint at what each finish does; Invert keeps its dark selected state
+// from the single-image Preview.
+const FINISH_ICONS = {
+  original: { ios: 'photo', android: 'image', web: 'image' },
+  blackAndWhite: { ios: 'circle.lefthalf.filled', android: 'contrast', web: 'contrast' },
+  magicColor: { ios: 'wand.and.stars', android: 'auto_fix_high', web: 'auto_fix_high' },
+  invert: { ios: 'moon.fill', android: 'dark_mode', web: 'dark_mode' },
+};
+
+// The rounded card is sized to the image's own aspect ratio, so the image
+// fills it edge to edge without cropping any part of the page.
+function getSlideRect(photo, frame) {
+  const ratio = photo?.width > 0 && photo?.height > 0 ? photo.width / photo.height : 3 / 4;
+  return getImageViewport(frame, ratio, 0);
+}
 
 /**
  * Batch Review, "Choose your finish". Processing state and results are owned
@@ -89,15 +107,19 @@ export function BatchReviewScreen({
     onHoldEnd: () => setCompareMode((current) => (current === 'hold' ? null : current)),
   });
 
-  const slides = frame.width > 0
+  const slides = frame.width > 0 && frame.height > 0
     ? getNeighbourIndices(index, count).map((slideIndex) => ({
       index: slideIndex,
       id: getBatchPhotoId(photos[slideIndex]),
       photo: displayedPhotos[slideIndex] ?? photos[slideIndex],
       original: photos[slideIndex],
       finished: statuses[slideIndex] === 'done',
+      // Finishes keep the page's shape, so the unfiltered photo sizes the card
+      // and switching finish never resizes it.
+      rect: getSlideRect(photos[slideIndex], frame),
     }))
     : [];
+  const thumbnailSize = height >= 740 ? 88 : 76;
 
   const handleAccessibilityAction = (event) => {
     if (event.nativeEvent.actionName === 'increment') selectIndex(index + 1);
@@ -165,56 +187,67 @@ export function BatchReviewScreen({
           <Animated.View
             pointerEvents="none"
             style={[StyleSheet.absoluteFill, { transform: [{ translateX: trackX }] }]}>
-            {slides.map((slide) => (
-              <View
-                key={`slide:${slide.id}`}
-                style={[StyleSheet.absoluteFill, { transform: [{ translateX: slide.index * frame.width }] }]}>
-                {/* A stable recyclingKey keeps the previous pixels on screen until
-                    a newly finished result has decoded, so it crossfades in. */}
-                <Image
-                  source={slide.photo.uri}
-                  contentFit="contain"
-                  recyclingKey={slide.id}
-                  cachePolicy="memory-disk"
-                  transition={slide.finished ? 160 : 0}
-                  accessible={false}
-                  style={styles.slideImage}
-                />
-                {slide.index === index && slide.finished ? (
-                  // Kept mounted under the finished image so comparing is instant.
-                  <Image
-                    source={slide.original.uri}
-                    contentFit="contain"
-                    recyclingKey={`original:${slide.id}`}
-                    cachePolicy="memory-disk"
-                    transition={0}
-                    accessible={false}
-                    style={[styles.slideImage, { opacity: comparing ? 1 : 0 }]}
-                  />
-                ) : null}
-              </View>
-            ))}
+            {slides.map((slide) => {
+              const isActive = slide.index === index;
+              const status = statuses[slide.index] ?? null;
+              return (
+                <View
+                  key={`slide:${slide.id}`}
+                  style={[StyleSheet.absoluteFill, { transform: [{ translateX: slide.index * frame.width }] }]}>
+                  <View style={[styles.card, slide.rect]}>
+                    {/* A stable recyclingKey keeps the previous pixels on screen
+                        until a newly finished result has decoded, so it
+                        crossfades in. The card already has the image's aspect
+                        ratio, so cover only absorbs sub-pixel rounding. */}
+                    <Image
+                      source={slide.photo.uri}
+                      contentFit="cover"
+                      recyclingKey={slide.id}
+                      cachePolicy="memory-disk"
+                      transition={slide.finished ? 160 : 0}
+                      accessible={false}
+                      style={StyleSheet.absoluteFill}
+                    />
+                    {isActive && slide.finished ? (
+                      // Kept mounted under the finished image so comparing is instant.
+                      <Image
+                        source={slide.original.uri}
+                        contentFit="cover"
+                        recyclingKey={`original:${slide.id}`}
+                        cachePolicy="memory-disk"
+                        transition={0}
+                        accessible={false}
+                        style={[StyleSheet.absoluteFill, { opacity: comparing ? 1 : 0 }]}
+                      />
+                    ) : null}
+                    {/* Drawn above the image so light pages keep a visible edge. */}
+                    <View style={styles.cardOutline} />
+
+                    {isActive && comparing ? (
+                      <View style={styles.compareBadge}>
+                        <ThemedText type="smallBold" style={styles.compareBadgeText}>Original</ThemedText>
+                      </View>
+                    ) : null}
+                    {isActive && mode !== 'original' && (status === 'queued' || status === 'processing') ? (
+                      <View style={styles.imageChip}>
+                        <ActivityIndicator size="small" color={ACCENT} />
+                        <ThemedText numberOfLines={1} style={styles.imageChipText}>
+                          Applying {finishLabel}
+                        </ThemedText>
+                      </View>
+                    ) : null}
+                    {isActive && mode !== 'original' && status === 'error' ? (
+                      <View style={[styles.imageChip, styles.imageChipError]}>
+                        <ThemedText numberOfLines={2} style={[styles.imageChipText, styles.imageChipErrorText]}>
+                          {finishLabel} could not be applied to this image
+                        </ThemedText>
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
           </Animated.View>
-
-          {comparing ? (
-            <View pointerEvents="none" style={styles.compareBadge}>
-              <ThemedText type="smallBold" style={styles.compareBadgeText}>Original</ThemedText>
-            </View>
-          ) : null}
-
-          {mode !== 'original' && (currentStatus === 'queued' || currentStatus === 'processing') ? (
-            <View pointerEvents="none" style={styles.imageChip}>
-              <ActivityIndicator size="small" color={ACCENT} />
-              <ThemedText style={styles.imageChipText}>Applying {finishLabel}</ThemedText>
-            </View>
-          ) : null}
-          {mode !== 'original' && currentStatus === 'error' ? (
-            <View pointerEvents="none" style={[styles.imageChip, styles.imageChipError]}>
-              <ThemedText style={[styles.imageChipText, styles.imageChipErrorText]}>
-                {finishLabel} could not be applied to this image
-              </ThemedText>
-            </View>
-          ) : null}
         </View>
 
         <ReviewStatusRow
@@ -235,8 +268,8 @@ export function BatchReviewScreen({
           selectedIndex={index}
           onSelect={selectIndex}
           disabled={isSaving}
-          compact
-          showCaption={height >= 740}
+          showCaption={false}
+          size={thumbnailSize}
         />
 
         {hasSavedImages && (
@@ -247,33 +280,7 @@ export function BatchReviewScreen({
           </View>
         )}
 
-        <View style={styles.toggleRow}>
-          {PREVIEW_FILTER_OPTIONS.map((option) => {
-            const isActive = mode === option.value;
-            return (
-              <Pressable
-                key={option.value}
-                accessibilityLabel={`Show ${option.label.toLowerCase()} images`}
-                accessibilityRole="button"
-                accessibilityState={{ selected: isActive, disabled: changesLocked }}
-                disabled={changesLocked}
-                onPress={() => onModeChange(option.value)}
-                style={({ pressed }) => [
-                  styles.toggle,
-                  changesLocked && styles.disabled,
-                  isActive && styles.toggleActive,
-                  pressed && styles.pressed,
-                ]}>
-                <ThemedText
-                  type="smallBold"
-                  allowFontScaling={false}
-                  style={[styles.toggleText, isActive && styles.toggleTextActive]}>
-                  {option.label}
-                </ThemedText>
-              </Pressable>
-            );
-          })}
-        </View>
+        <FinishSelector mode={mode} disabled={changesLocked} onModeChange={onModeChange} />
 
         <InvertAdjustments
           visible={mode === 'invert'}
@@ -327,7 +334,7 @@ export function BatchReviewScreen({
             )}
             <ThemedText type="smallBold" style={styles.saveText}>
               {isSaving ? `${saveProgress.completed} / ${count}`
-                : hasSavedImages ? `Retry (${count - saveProgress.completed})` : 'Save batch'}
+                : hasSavedImages ? `Retry (${count - saveProgress.completed})` : 'Save'}
             </ThemedText>
           </Pressable>
         </View>
@@ -336,14 +343,76 @@ export function BatchReviewScreen({
   );
 }
 
-// Fixed height, so switching between progress, error and hint never moves the
-// image or the filmstrip.
+function FinishSelector({ mode, disabled, onModeChange }) {
+  const scrollRef = useRef(null);
+  const layoutsRef = useRef({});
+  const viewportWidthRef = useRef(0);
+
+  // Keep the selected finish fully visible when the row is wider than the screen.
+  const reveal = useCallback((value, animated = true) => {
+    const layout = layoutsRef.current[value];
+    const viewport = viewportWidthRef.current;
+    if (!layout || !viewport) return;
+    const centered = layout.x - (viewport - layout.width) / 2;
+    scrollRef.current?.scrollTo({ x: Math.max(0, centered), animated });
+  }, []);
+
+  useEffect(() => { reveal(mode); }, [mode, reveal]);
+
+  return (
+    <ScrollView
+      ref={scrollRef}
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      accessibilityRole="tablist"
+      accessibilityLabel="Finish"
+      onLayout={({ nativeEvent: { layout } }) => { viewportWidthRef.current = layout.width; }}
+      style={styles.finishScroll}
+      contentContainerStyle={styles.finishRow}>
+      {PREVIEW_FILTER_OPTIONS.map((option) => {
+        const selected = mode === option.value;
+        const dark = option.value === 'invert';
+        const tint = selected ? BACKGROUND : TEXT;
+        return (
+          <Pressable
+            key={option.value}
+            accessibilityLabel={option.label}
+            accessibilityRole="tab"
+            accessibilityState={{ selected, disabled }}
+            disabled={disabled}
+            onLayout={({ nativeEvent: { layout } }) => {
+              layoutsRef.current[option.value] = layout;
+              if (selected) reveal(option.value, false);
+            }}
+            onPress={() => onModeChange(option.value)}
+            style={({ pressed }) => [
+              styles.finishChip,
+              selected && (dark ? styles.finishChipSelectedDark : styles.finishChipSelected),
+              pressed && styles.pressed,
+              disabled && styles.disabled,
+            ]}>
+            <SymbolView name={FINISH_ICONS[option.value]} size={17} tintColor={tint} />
+            <ThemedText
+              numberOfLines={1}
+              allowFontScaling={false}
+              style={[styles.finishChipText, selected && styles.finishChipTextSelected]}>
+              {option.label}
+            </ThemedText>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+// Fixed height, so switching between nothing (Original), progress, error and
+// the compare hint never moves the image or the filmstrip.
 function ReviewStatusRow({
   mode, finishLabel, isProcessing, completed, failed, total, compareMode, canRetry, onRetryFailed,
 }) {
-  let content;
+  let content = null;
   if (mode === 'original') {
-    content = <ThemedText style={styles.hintText}>Choose a finish below</ThemedText>;
+    content = null;
   } else if (isProcessing) {
     // Never fully empty while working, so the bar reads as active from the start.
     const progress = total > 0 ? Math.max(0.04, completed / total) : 0.04;
@@ -448,20 +517,24 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   subtitle: { color: MUTED, fontSize: 13, lineHeight: 18, textAlign: 'center' },
+  // Clips the swipe track only; each slide draws its own rounded card.
   imageFrame: {
     width: '100%',
     flex: 1,
     minHeight: 1,
     overflow: 'hidden',
-    borderRadius: 20,
+  },
+  card: {
+    position: 'absolute',
+    overflow: 'hidden',
+    borderRadius: CARD_RADIUS,
     backgroundColor: CANVAS,
   },
-  slideImage: {
-    position: 'absolute',
-    top: SLIDE_INSET,
-    right: SLIDE_INSET,
-    bottom: SLIDE_INSET,
-    left: SLIDE_INSET,
+  cardOutline: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: CARD_RADIUS,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(15, 23, 42, 0.14)',
   },
   compareBadge: {
     position: 'absolute',
@@ -477,6 +550,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 12,
     alignSelf: 'center',
+    maxWidth: '88%',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
@@ -487,10 +561,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: BORDER,
   },
-  imageChipText: { color: HEADING, fontSize: 12, lineHeight: 16, fontWeight: '600' },
+  imageChipText: { color: HEADING, fontSize: 12, lineHeight: 16, fontWeight: '600', flexShrink: 1 },
   imageChipError: { backgroundColor: '#FFF5F6', borderColor: '#F0C9CF' },
   imageChipErrorText: { color: DISCARD_ACCENT },
-  statusRow: { height: 38, justifyContent: 'center', marginTop: Spacing.two },
+  statusRow: { height: 34, justifyContent: 'center', marginTop: Spacing.one },
   hintText: { color: MUTED, fontSize: 12, lineHeight: 16, textAlign: 'center' },
   progressBlock: { gap: 6 },
   progressLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
@@ -503,28 +577,43 @@ const styles = StyleSheet.create({
   retryText: { color: ACCENT, fontSize: 12, lineHeight: 16 },
   saveNotice: { padding: 10, borderRadius: 12, backgroundColor: '#EAF6EF', marginBottom: Spacing.one },
   saveNoticeText: { color: '#28754F', fontSize: 12, lineHeight: 17 },
-  toggleRow: {
-    width: '100%',
+  // Bleeds to the screen edges so chips scroll out of view instead of being
+  // cut at the content padding; vertical padding leaves room for the shadow.
+  finishScroll: { flexGrow: 0, marginTop: Spacing.one, marginHorizontal: -Spacing.four },
+  finishRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: Spacing.four,
+    paddingTop: 4, paddingBottom: 10 },
+  finishChip: {
+    height: 46,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.one,
-    marginTop: Spacing.two,
-  },
-  toggle: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: Spacing.one,
-    borderRadius: 14,
+    gap: 8,
+    paddingLeft: 14,
+    paddingRight: 18,
+    borderRadius: 23,
     backgroundColor: SURFACE,
     borderWidth: 1,
     borderColor: BORDER,
   },
-  toggleActive: { backgroundColor: ACCENT, borderColor: ACCENT },
-  toggleText: { color: TEXT, fontSize: 11, lineHeight: 16, textAlign: 'center', flexShrink: 1 },
-  toggleTextActive: { color: BACKGROUND },
+  finishChipSelected: {
+    backgroundColor: ACCENT,
+    borderColor: ACCENT,
+    shadowColor: '#2A5EB0',
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+  },
+  finishChipSelectedDark: {
+    backgroundColor: INVERT_INK,
+    borderColor: INVERT_INK,
+    shadowColor: INVERT_INK,
+    shadowOpacity: 0.28,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+  },
+  finishChipText: { color: TEXT, fontSize: 14, lineHeight: 18, fontWeight: '600' },
+  finishChipTextSelected: { color: BACKGROUND },
   actions: {
     alignSelf: 'stretch',
     flexDirection: 'row',
