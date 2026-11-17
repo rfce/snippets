@@ -6,7 +6,7 @@ import {
   ActivityIndicator, Alert, Animated, BackHandler, Easing, PanResponder, Pressable, StyleSheet, View,
   useWindowDimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
 import { CropEditor } from '@/components/capture-review';
@@ -39,8 +39,16 @@ export function BatchEditor({
   const commitRef = useRef(onCommitEdits);
   const mountedRef = useRef(true);
   commitRef.current = onCommitEdits;
-  const { height, fontScale } = useWindowDimensions();
+  const { width: windowWidth, height, fontScale } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const compact = height < 740 || fontScale > 1.2;
+  const thumbSize = compact ? 64 : 76;
+  // Fixed chrome: header, thumbnail strip, floating dock, paddings and the
+  // minimum gap above the dock. The stage takes what is left over, so the photo
+  // is never stranded in leftover space.
+  const reservedHeight = 46 + 8 + (thumbSize + 30) + 84 + 12 + 20
+    + insets.top + insets.bottom;
+  const maxStageHeight = Math.max(160, height - reservedHeight);
   const [isCropping, setIsCropping] = useState(false);
   const [isFinishing, setIsFinishing] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
@@ -69,7 +77,27 @@ export function BatchEditor({
   const busy = isApplying || isFinishing;
   const previewRotation = (pendingEdits?.rotation ?? edits?.rotation ?? 0) -
     (displayPreview.sourcePhoto ? displayPreview.edits?.rotation ?? 0 : 0);
-  const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, frame, CROP_PADDING);
+  const previewSideways = Math.abs(previewRotation % 180) === 90;
+  const previewRatio = displayPreview.width > 0 && displayPreview.height > 0
+    ? (previewSideways ? displayPreview.height / displayPreview.width
+      : displayPreview.width / displayPreview.height)
+    : 4 / 3;
+  // Size the stage to the photo instead of letting it absorb all spare height.
+  // The thumbnails then sit right under the image and the slack falls below
+  // them, which keeps the composition tight and deliberate.
+  const stageWidth = frame.width > 0 ? frame.width : Math.max(0, windowWidth - 36);
+  const naturalStageHeight = stageWidth > 0
+    ? (stageWidth - CROP_PADDING * 2) / previewRatio + CROP_PADDING * 2
+    : 0;
+  const stageHeight = naturalStageHeight > 0
+    ? Math.min(naturalStageHeight, maxStageHeight) : 0;
+  // Lay the preview out against the computed stage size, not the last measured
+  // height, so the first paint after a layout change is already correct.
+  const previewFrame = {
+    width: stageWidth,
+    height: stageHeight > 0 ? stageHeight : frame.height,
+  };
+  const previewStyle = getBatchRotationPreviewStyle(displayPreview, previewRotation, previewFrame, CROP_PADDING);
 
   // Build the neighbouring slides from their rendered previews (when they
   // exist) so a swipe reveals exactly what the filmstrip shows, including any
@@ -82,7 +110,7 @@ export function BatchEditor({
     const bakedRotation = rendered.sourcePhoto ? rendered.edits?.rotation ?? 0 : 0;
     return {
       item: rendered,
-      style: getBatchRotationPreviewStyle(rendered, storedRotation - bakedRotation, frame, CROP_PADDING),
+      style: getBatchRotationPreviewStyle(rendered, storedRotation - bakedRotation, previewFrame, CROP_PADDING),
     };
   };
   const firstSlideIndex = Math.max(0, activeIndex - 1);
@@ -122,7 +150,7 @@ export function BatchEditor({
     if (previous?.uri && !skipRetained) setRetainedPreview(previous);
   }
   const retainedStyle = retainedPreview
-    ? getBatchRotationPreviewStyle(retainedPreview.photo, retainedPreview.rotation, frame, CROP_PADDING)
+    ? getBatchRotationPreviewStyle(retainedPreview.photo, retainedPreview.rotation, previewFrame, CROP_PADDING)
     : null;
   // Drop the retained frame if the new source never reports onDisplay.
   useEffect(() => {
@@ -386,71 +414,79 @@ export function BatchEditor({
           <View style={styles.headerCopy}>
             <ThemedText numberOfLines={1} style={styles.headerTitle}>Edit image</ThemedText>
             <ThemedText numberOfLines={1} style={styles.headerSubtitle}>
-              {photos.length} {photos.length === 1 ? 'image' : 'images'} · {editedCount} edited
+              {photos.length > 1 ? `${photos.length} images` : 'Single image'}
+              {editedCount > 0 ? ` · ${editedCount} edited` : ''}
             </ThemedText>
           </View>
           <View style={styles.headerSpacer} />
         </View>
 
-        <View style={styles.canvas} onLayout={({ nativeEvent: { layout } }) => {
-          setFrame((current) => current.width === layout.width && current.height === layout.height
-            ? current : { width: layout.width, height: layout.height });
-        }} {...swipeResponder.panHandlers}>
-          <View pointerEvents={isCropping ? 'auto' : 'none'}
-            style={[StyleSheet.absoluteFill, { opacity: isCropping ? 1 : 0 }]}>
-            <CropEditor
-              key={`${id}:${editorRevision}`}
-              ref={editorRef}
-              photo={photo}
-              initialEdits={edits}
-              disabled={busy}
-              showCropHandles={isCropping}
-              viewportPadding={CROP_PADDING}
-            />
-          </View>
-          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-            <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateX: trackX }] }]}>
-              {slides.map((slide) => (
-                <View key={`slide:${slide.id}`}
-                  style={[StyleSheet.absoluteFill, { transform: [{ translateX: slide.offset }] }]}>
-                  {slide.isActive && retainedPreview && retainedStyle &&
-                    retainedPreview.uri !== displayPreview.uri ? (
-                    <Image
-                      key={`retained:${retainedPreview.uri}`}
-                      source={retainedPreview.uri}
-                      contentFit="contain"
-                      cachePolicy="memory-disk"
-                      transition={0}
-                      accessible={false}
-                      style={[retainedStyle, isCropping && styles.hiddenSlide]}
-                    />
-                  ) : null}
-                  <Image
-                    source={slide.item.uri}
-                    contentFit="contain"
-                    cachePolicy="memory-disk"
-                    transition={0}
-                    accessible={false}
-                    onDisplay={slide.isActive ? () => setRetainedPreview(null) : undefined}
-                    onError={slide.isActive ? () => setRetainedPreview(null) : undefined}
-                    style={[slide.style, isCropping && styles.hiddenSlide]}
-                  />
+        <View style={styles.content}>
+          <View style={[styles.stage, stageHeight > 0 && { height: stageHeight }]}
+            onLayout={({ nativeEvent: { layout } }) => {
+              setFrame((current) => current.width === layout.width && current.height === layout.height
+                ? current : { width: layout.width, height: layout.height });
+            }}>
+            <View style={styles.canvas} {...swipeResponder.panHandlers}>
+              <View pointerEvents={isCropping ? 'auto' : 'none'}
+                style={[StyleSheet.absoluteFill, { opacity: isCropping ? 1 : 0 }]}>
+                <CropEditor
+                  key={`${id}:${editorRevision}`}
+                  ref={editorRef}
+                  photo={photo}
+                  initialEdits={edits}
+                  disabled={busy}
+                  showCropHandles={isCropping}
+                  viewportPadding={CROP_PADDING}
+                />
+              </View>
+              <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+                <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateX: trackX }] }]}>
+                  {slides.map((slide) => (
+                    <View key={`slide:${slide.id}`}
+                      style={[StyleSheet.absoluteFill, { transform: [{ translateX: slide.offset }] }]}>
+                      {slide.isActive && retainedPreview && retainedStyle &&
+                        retainedPreview.uri !== displayPreview.uri ? (
+                        <Image
+                          key={`retained:${retainedPreview.uri}`}
+                          source={retainedPreview.uri}
+                          contentFit="contain"
+                          cachePolicy="memory-disk"
+                          transition={0}
+                          accessible={false}
+                          style={[retainedStyle, isCropping && styles.hiddenSlide]}
+                        />
+                      ) : null}
+                      <Image
+                        source={slide.item.uri}
+                        contentFit="contain"
+                        cachePolicy="memory-disk"
+                        transition={0}
+                        accessible={false}
+                        onDisplay={slide.isActive ? () => setRetainedPreview(null) : undefined}
+                        onError={slide.isActive ? () => setRetainedPreview(null) : undefined}
+                        style={[slide.style, isCropping && styles.hiddenSlide]}
+                      />
+                    </View>
+                  ))}
+                </Animated.View>
+              </View>
+              {isApplying && (
+                <View style={styles.applyingOverlay} accessibilityLiveRegion="polite">
+                  <ActivityIndicator color="#3C78D8" />
+                  <ThemedText style={styles.applyingText}>Applying edit…</ThemedText>
                 </View>
-              ))}
-            </Animated.View>
-          </View>
-          {isApplying && (
-            <View style={styles.applyingOverlay} accessibilityLiveRegion="polite">
-              <ActivityIndicator color="#3C78D8" />
-              <ThemedText style={styles.applyingText}>Applying edit…</ThemedText>
+              )}
             </View>
-          )}
+          </View>
+
+          <BatchFilmstrip photos={displayPhotos} editsById={effectiveEdits}
+            selectedIndex={activeIndex} onSelect={selectPhoto}
+            disabled={busy} compact={compact} showCaption={false}
+            size={thumbSize} style={styles.filmstrip} />
         </View>
 
-        <BatchFilmstrip photos={displayPhotos} editsById={effectiveEdits}
-          selectedIndex={activeIndex} onSelect={selectPhoto}
-          disabled={busy} compact={compact} showCaption={false}
-          size={compact ? 64 : 76} />
+        <View style={styles.spacer} />
 
         <View style={styles.footer}>
           <View style={styles.dock}>
@@ -469,8 +505,8 @@ export function BatchEditor({
               <>
                 <IconButton label="Rotate current image 90 degrees clockwise"
                   icon={ICONS.rotate} iconSize={28} large disabled={busy} onPress={rotate} />
-                <IconButton label="Delete current image" icon={ICONS.delete} iconSize={28} large destructive disabled={busy}
-                  onPress={deletePhoto} />
+                <IconButton label="Delete current image" icon={ICONS.delete} iconSize={28} large destructive
+                  disabled={busy} onPress={deletePhoto} />
                 <IconButton label="Save edits and return to batch camera" icon={ICONS.check} iconSize={28} large
                   primary disabled={busy} busy={isFinishing} onPress={finish} />
               </>
@@ -510,16 +546,28 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 12 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 46 },
   headerSpacer: { width: 46 },
-  headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2 },
-  headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
-  headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },
-  canvas: { flex: 1, minHeight: 1, marginTop: 8, marginBottom: 4, overflow: 'hidden' },
+  headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 1 },
+  headerTitle: { color: '#0F172A', fontSize: 17, lineHeight: 22, fontWeight: '600', letterSpacing: -0.2,
+    textAlign: 'center' },
+  headerSubtitle: { color: '#94A3B8', fontSize: 11, lineHeight: 15, fontWeight: '500',
+    letterSpacing: 0.2, textAlign: 'center' },
+  content: { width: '100%', alignItems: 'center' },
+  stage: { width: '100%', marginTop: 6, alignItems: 'center', justifyContent: 'center' },
+  canvas: { flex: 1, width: '100%', minHeight: 1, overflow: 'hidden' },
   hiddenSlide: { opacity: 0 },
   applyingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.65)',
     alignItems: 'center', justifyContent: 'center', gap: 8 },
   applyingText: { color: '#31517F', fontSize: 12, lineHeight: 18, fontWeight: '600' },
-  footer: { alignItems: 'center', gap: 12, paddingTop: 12, paddingBottom: 4 },
-  dock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
+  filmstrip: { marginTop: 12, paddingVertical: 2 },
+  spacer: { flex: 1, minHeight: 12 },
+  footer: { width: '100%', alignItems: 'center', paddingTop: 4, paddingBottom: 2 },
+  dock: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    paddingHorizontal: 8, paddingVertical: 8, borderRadius: 36,
+    backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#EDF1F7',
+    shadowColor: '#0F172A', shadowOpacity: 0.06, shadowRadius: 18,
+    shadowOffset: { width: 0, height: 6 }, elevation: 4,
+  },
   iconButton: {
     width: 46, height: 46, borderRadius: 23, backgroundColor: '#EEF3FB',
     alignItems: 'center', justifyContent: 'center',

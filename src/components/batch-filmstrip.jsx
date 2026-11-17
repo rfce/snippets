@@ -6,17 +6,19 @@ import { ThemedText } from '@/components/themed-text';
 import { hasCustomCrop } from '@/crop-geometry';
 import { getBatchPhotoId } from '@/batch-workflow';
 
+const GAP = 10;
+
 function getFilmstripOffset(index, count, size, viewportWidth) {
   if (count <= 0 || viewportWidth <= 0) return 0;
   const selected = Math.max(0, Math.min(index, count - 1));
-  const contentWidth = count * size + Math.max(0, count - 1) * 12 + 3;
-  const centered = selected * (size + 12) - (viewportWidth - size) / 2;
+  const contentWidth = count * size + Math.max(0, count - 1) * GAP + 3;
+  const centered = selected * (size + GAP) - (viewportWidth - size) / 2;
   return Math.max(0, Math.min(centered, Math.max(0, contentWidth - viewportWidth)));
 }
 
 export function BatchFilmstrip({
   photos, selectedIndex, onSelect, disabled = false, editsById = {}, compact = false, showCaption = true,
-  showCount = true, size: sizeProp,
+  showCount = true, size: sizeProp, style,
 }) {
   const listRef = useRef(null);
   const viewportWidthRef = useRef(0);
@@ -41,7 +43,7 @@ export function BatchFilmstrip({
   }, [activeIndex, photos.length, size]);
   useEffect(() => { revealSelected(true); }, [revealSelected]);
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, style]}>
       {showCaption && <View style={styles.caption}>
         <ThemedText style={styles.eyebrow}>YOUR STACK</ThemedText>
         {showCount && (
@@ -59,13 +61,13 @@ export function BatchFilmstrip({
         onContentSizeChange={() => revealSelected()}
         initialNumToRender={Math.max(1, Math.min(photos.length, 12))}
         removeClippedSubviews={false}
-        showsHorizontalScrollIndicator
+        showsHorizontalScrollIndicator={false}
         data={photos}
         extraData={extraData}
         keyExtractor={(item, index) => `${getBatchPhotoId(item)}:${index}`}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={ThumbnailSeparator}
-        getItemLayout={(_, index) => ({ length: size, offset: (size + 12) * index, index })}
+        getItemLayout={(_, index) => ({ length: size, offset: (size + GAP) * index, index })}
         renderItem={({ item, index }) => {
           const id = getBatchPhotoId(item);
           const edits = editsById[id] ?? item.edits;
@@ -109,15 +111,15 @@ function ThumbnailSeparator() {
 }
 
 const styles = StyleSheet.create({
-  container: { width: '100%', flexShrink: 0, paddingVertical: 10 },
+  container: { width: '100%', flexShrink: 0, paddingVertical: 6 },
   caption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   eyebrow: { color: '#718096', fontSize: 10, lineHeight: 14, letterSpacing: 1.8, fontWeight: '700' },
   count: { color: '#526581', fontSize: 12, lineHeight: 16, fontVariant: ['tabular-nums'] },
-  list: { paddingVertical: 3, paddingRight: 3 },
-  separator: { width: 12 },
-  tile: { borderWidth: 2, borderColor: 'transparent', borderRadius: 15, padding: 3 },
+  list: { paddingVertical: 2, paddingRight: 3 },
+  separator: { width: GAP },
+  tile: { borderWidth: 2, borderColor: 'transparent', borderRadius: 14, padding: 3 },
   selected: { borderColor: '#3C78D8', backgroundColor: '#EAF1FF' },
-  imageClip: { flex: 1, borderRadius: 10, overflow: 'hidden', backgroundColor: '#DFE7F1' },
+  imageClip: { flex: 1, borderRadius: 9, overflow: 'hidden', backgroundColor: '#EEF2F7' },
   image: { width: '100%', height: '100%' },
   number: { position: 'absolute', bottom: 7, left: 7, borderRadius: 5, paddingHorizontal: 4, backgroundColor: 'rgba(15,23,42,0.72)' },
   selectedNumber: { backgroundColor: '#3C78D8' },
