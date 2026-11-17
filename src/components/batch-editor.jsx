@@ -447,10 +447,6 @@ export function BatchEditor({
           )}
         </View>
 
-        <ThemedText style={styles.stackCount}>
-          {photos.length ? activeIndex + 1 : 0} / {photos.length}
-        </ThemedText>
-
         <BatchFilmstrip photos={displayPhotos} editsById={effectiveEdits}
           selectedIndex={activeIndex} onSelect={selectPhoto}
           disabled={busy} compact={compact} showCaption={false}
@@ -517,14 +513,12 @@ const styles = StyleSheet.create({
   headerCopy: { flex: 1, minWidth: 0, alignItems: 'center', gap: 2 },
   headerTitle: { color: '#13243E', fontSize: 18, lineHeight: 24, fontWeight: '700', textAlign: 'center' },
   headerSubtitle: { color: '#7B879A', fontSize: 11, lineHeight: 16, textAlign: 'center' },
-  canvas: { flex: 1, minHeight: 1, marginTop: 8, overflow: 'hidden' },
+  canvas: { flex: 1, minHeight: 1, marginTop: 8, marginBottom: 4, overflow: 'hidden' },
   hiddenSlide: { opacity: 0 },
   applyingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.65)',
     alignItems: 'center', justifyContent: 'center', gap: 8 },
   applyingText: { color: '#31517F', fontSize: 12, lineHeight: 18, fontWeight: '600' },
-  stackCount: { color: '#526581', fontSize: 12, lineHeight: 16, fontWeight: '600',
-    textAlign: 'center', marginTop: 10, fontVariant: ['tabular-nums'] },
-  footer: { alignItems: 'center', gap: 12, paddingTop: 4 },
+  footer: { alignItems: 'center', gap: 12, paddingTop: 12, paddingBottom: 4 },
   dock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
   iconButton: {
     width: 46, height: 46, borderRadius: 23, backgroundColor: '#EEF3FB',
