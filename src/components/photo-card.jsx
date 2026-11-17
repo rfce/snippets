@@ -67,7 +67,9 @@ export function PhotoCardChip({ label, error = false }) {
 
 /**
  * Header with a back button, centred title and subtitle, and a Compare
- * toggle that fills with the accent while it is on.
+ * toggle that fills with the accent while it is on. Either button can be
+ * left out (omit `onBack` / `onCompare`); its space is kept so the title
+ * stays centred on every step of the flow.
  */
 export function FinishHeader({
   title, subtitle, onBack, backLabel, backDisabled = false,
@@ -75,40 +77,44 @@ export function FinishHeader({
 }) {
   return (
     <View style={styles.header}>
-      <Pressable
-        accessibilityLabel={backLabel}
-        accessibilityRole="button"
-        disabled={backDisabled}
-        onPress={onBack}
-        style={({ pressed }) => [styles.headerButton, pressed && styles.pressed, backDisabled && styles.disabled]}>
-        <SymbolView
-          name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
-          size={22}
-          tintColor={FinishPalette.text}
-        />
-      </Pressable>
+      {onBack ? (
+        <Pressable
+          accessibilityLabel={backLabel}
+          accessibilityRole="button"
+          disabled={backDisabled}
+          onPress={onBack}
+          style={({ pressed }) => [styles.headerButton, pressed && styles.pressed, backDisabled && styles.disabled]}>
+          <SymbolView
+            name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+            size={22}
+            tintColor={FinishPalette.text}
+          />
+        </Pressable>
+      ) : <View style={styles.headerButton} />}
       <View style={styles.heading}>
         <ThemedText type="title" style={styles.title}>{title}</ThemedText>
         {subtitle ? <ThemedText style={styles.subtitle}>{subtitle}</ThemedText> : null}
       </View>
-      <Pressable
-        accessibilityLabel={compareActive ? 'Show finished image' : 'Compare with original'}
-        accessibilityRole="button"
-        accessibilityState={{ selected: compareActive, disabled: compareDisabled }}
-        disabled={compareDisabled}
-        onPress={onCompare}
-        style={({ pressed }) => [
-          styles.headerButton,
-          compareActive && styles.headerButtonActive,
-          pressed && styles.pressed,
-          compareDisabled && styles.disabled,
-        ]}>
-        <SymbolView
-          name={{ ios: 'square.on.square', android: 'compare', web: 'compare' }}
-          size={21}
-          tintColor={compareActive ? FinishPalette.background : FinishPalette.text}
-        />
-      </Pressable>
+      {onCompare ? (
+        <Pressable
+          accessibilityLabel={compareActive ? 'Show finished image' : 'Compare with original'}
+          accessibilityRole="button"
+          accessibilityState={{ selected: compareActive, disabled: compareDisabled }}
+          disabled={compareDisabled}
+          onPress={onCompare}
+          style={({ pressed }) => [
+            styles.headerButton,
+            compareActive && styles.headerButtonActive,
+            pressed && styles.pressed,
+            compareDisabled && styles.disabled,
+          ]}>
+          <SymbolView
+            name={{ ios: 'square.on.square', android: 'compare', web: 'compare' }}
+            size={21}
+            tintColor={compareActive ? FinishPalette.background : FinishPalette.text}
+          />
+        </Pressable>
+      ) : <View style={styles.headerButton} />}
     </View>
   );
 }

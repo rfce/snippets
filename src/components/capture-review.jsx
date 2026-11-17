@@ -1,11 +1,12 @@
 import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
 import {
   forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
 } from 'react';
-import { ActivityIndicator, Alert, Animated, PanResponder, Platform, Pressable, StyleSheet, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Alert, Animated, PanResponder, Platform, StyleSheet, View } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { EDIT_ICONS, IconButton } from '@/components/icon-dock';
+import { FinishHeader, FinishPalette } from '@/components/photo-card';
 import { ThemedText } from '@/components/themed-text';
 import { getCropMagnifierLayout, projectCropPointIntoMagnifier } from '@/crop-magnifier-geometry';
 import {
@@ -14,106 +15,120 @@ import {
   getImageViewport, getOutsideShadeStyle, moveCropHandle, rotateCornersClockwise,
 } from '@/crop-geometry';
 
-const ACCENT = '#3C78D8';
-const DISCARD = '#C2415A';
+const ACCENT = FinishPalette.accent;
 const TARGET_SIZE = 48;
+// Enough room for handles on the image edge to stay grabbable (most of each
+// 48 pt touch target remains inside the canvas) while the image gets larger.
+const REVIEW_PADDING = 18;
+const IMAGE_RADIUS = 12;
+const HINT_HEIGHT = 34;
+const HINT_GAP = 16;
+// Space between the dock's buttons and the safe-area bottom edge.
+const DOCK_BOTTOM_SPACE = 20;
 
 export const CaptureReview = memo(function CaptureReview({
   photo, initialEdits, isProcessing, onNext, onDiscard,
 }) {
   const editorRef = useRef(null);
+  const insets = useSafeAreaInsets();
+  // Reset crop only does something once the crop differs from the full image.
+  const [canReset, setCanReset] = useState(() => hasCustomCrop(initialEdits?.corners));
 
   return (
     <View style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.header}>
-          <ThemedText style={styles.title}>Review capture</ThemedText>
-          <View style={styles.badge}>
-            <SymbolView
-              name={{ ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }}
-              size={17}
-              tintColor={ACCENT}
-            />
-            <ThemedText type="smallBold" style={styles.badgeText}>Ready</ThemedText>
-          </View>
-        </View>
+      {/* The bottom edge belongs to the dock, which handles its own inset. */}
+      <SafeAreaView edges={['top', 'left', 'right']} style={styles.safeArea}>
+        <FinishHeader title="Review capture" subtitle="Adjust the crop" />
 
-        <CropEditor ref={editorRef} photo={photo} initialEdits={initialEdits} disabled={isProcessing} />
+        <CropEditor
+          ref={editorRef}
+          photo={photo}
+          initialEdits={initialEdits}
+          disabled={isProcessing}
+          viewportPadding={REVIEW_PADDING}
+          imageRadius={IMAGE_RADIUS}
+          footerHeight={HINT_HEIGHT}
+          footerGap={HINT_GAP}
+          footer={(
+            <ThemedText numberOfLines={2} style={styles.instruction}>
+              Hold and drag a handle to magnify and fine-tune your crop
+            </ThemedText>
+          )}
+          onCustomCropChange={setCanReset}
+        />
+      </SafeAreaView>
 
-        <ThemedText style={styles.instruction}>
-          Hold and drag a handle to magnify and fine-tune your crop
-        </ThemedText>
-        <View style={styles.tools}>
-          <Pressable
-            accessibilityLabel="Rotate image 90 degrees clockwise"
-            accessibilityRole="button"
+      {/* Bottom controls: all four circles centred as one row, with the
+          same icons and sizes as batch Edit image. */}
+      <View style={[styles.dock, { paddingBottom: insets.bottom + DOCK_BOTTOM_SPACE }]}>
+        <View style={styles.dockTools}>
+          <IconButton
+            label="Rotate image 90 degrees clockwise"
+            icon={EDIT_ICONS.rotate}
+            iconSize={28}
+            large
             disabled={isProcessing}
             onPress={() => editorRef.current?.rotate()}
-            style={({ pressed }) => [styles.tool, pressed && styles.pressed, isProcessing && styles.disabled]}>
-            <SymbolView
-              name={{ ios: 'arrow.clockwise', android: 'rotate_right', web: 'rotate_right' }}
-              size={22}
-              tintColor={ACCENT}
-            />
-            <ThemedText type="smallBold" style={styles.toolText}>Rotate</ThemedText>
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Reset crop to the full image"
-            accessibilityRole="button"
-            disabled={isProcessing}
+          />
+          <IconButton
+            label="Reset crop to the full image"
+            icon={EDIT_ICONS.reset}
+            iconSize={28}
+            large
+            disabled={isProcessing || !canReset}
             onPress={() => editorRef.current?.reset()}
-            style={({ pressed }) => [styles.tool, pressed && styles.pressed, isProcessing && styles.disabled]}>
-            <SymbolView
-              name={{ ios: 'arrow.counterclockwise', android: 'restart_alt', web: 'restart_alt' }}
-              size={22}
-              tintColor={ACCENT}
-            />
-            <ThemedText type="smallBold" style={styles.toolText}>Reset crop</ThemedText>
-          </Pressable>
-        </View>
-
-        <View style={styles.actions}>
-          <Pressable
-            accessibilityLabel="Discard captured image"
-            accessibilityRole="button"
+          />
+          <IconButton
+            label="Discard captured image"
+            icon={EDIT_ICONS.delete}
+            iconSize={28}
+            large
+            destructive
             disabled={isProcessing}
             onPress={onDiscard}
-            style={({ pressed }) => [styles.action, styles.discard, pressed && styles.pressed, isProcessing && styles.disabled]}>
-            <SymbolView
-              name={{ ios: 'trash.fill', android: 'delete', web: 'delete' }}
-              size={26}
-              tintColor={DISCARD}
-            />
-            <ThemedText type="smallBold" style={styles.discardText}>Discard</ThemedText>
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Next, preview this crop"
-            accessibilityRole="button"
-            disabled={isProcessing}
-            onPress={() => {
-              const edits = editorRef.current?.getEdits();
-              if (edits) onNext(edits);
-            }}
-            style={({ pressed }) => [styles.action, styles.next, pressed && styles.pressed, isProcessing && styles.disabled]}>
-            <ThemedText type="smallBold" style={styles.nextText}>Next</ThemedText>
-            {isProcessing ? <ActivityIndicator color="#FFFFFF" /> : (
-              <SymbolView
-                name={{ ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' }}
-                size={26}
-                tintColor="#FFFFFF"
-              />
-            )}
-          </Pressable>
+          />
         </View>
-      </SafeAreaView>
+        <IconButton
+          label="Next, preview this crop"
+          icon={EDIT_ICONS.check}
+          iconSize={28}
+          large
+          primary
+          disabled={isProcessing}
+          busy={isProcessing}
+          onPress={() => {
+            const edits = editorRef.current?.getEdits();
+            if (edits) onNext(edits);
+          }}
+        />
+      </View>
     </View>
   );
 });
+
+// Fits the image above a footer of `footerSpace` and centres the image and
+// footer together, so the footer always sits directly under the image.
+function getViewportWithFooter(frame, aspectRatio, padding, footerSpace) {
+  const availableWidth = Math.max(0, frame.width - padding * 2);
+  const availableHeight = Math.max(0, frame.height - padding * 2 - footerSpace);
+  if (!availableWidth || !availableHeight || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return { width: 0, height: 0, left: padding, top: padding };
+  }
+  const width = Math.min(availableWidth, availableHeight * aspectRatio);
+  const height = width / aspectRatio;
+  return {
+    width,
+    height,
+    left: (frame.width - width) / 2,
+    top: (frame.height - (height + footerSpace)) / 2,
+  };
+}
 
 // Only this canvas re-renders during a drag. The camera controller, review
 // controls, and source image do not receive a state update for every move.
 export const CropEditor = forwardRef(function CropEditor({
   photo, initialEdits, disabled, showCropHandles = true, viewportPadding = 28,
+  imageRadius = 0, footer = null, footerHeight = 0, footerGap = 12, onCustomCropChange,
 }, ref) {
   const [edits, setEdits] = useState(() => ({
     rotation: initialEdits?.rotation ?? 0,
@@ -211,12 +226,29 @@ export const CropEditor = forwardRef(function CropEditor({
 
   const sourceRatio = photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 4 / 3;
   const aspectRatio = edits.rotation % 180 === 0 ? sourceRatio : 1 / sourceRatio;
-  const viewport = getImageViewport(frame, aspectRatio, viewportPadding);
+  const viewport = footer
+    ? getViewportWithFooter(frame, aspectRatio, viewportPadding, footerHeight + footerGap)
+    : getImageViewport(frame, aspectRatio, viewportPadding);
   const edges = Object.entries(CROP_EDGES);
   const handles = [
-    ...edges.map(([name]) => ({ name, position: getEdgeMidpoint(edits.corners, name), isEdge: true })),
+    ...edges.map(([name, [first, second]]) => ({
+      name,
+      position: getEdgeMidpoint(edits.corners, name),
+      isEdge: true,
+      // Edge capsules follow the edge, including under perspective tilt.
+      angle: Math.atan2(
+        (edits.corners[second].y - edits.corners[first].y) * viewport.height,
+        (edits.corners[second].x - edits.corners[first].x) * viewport.width
+      ) * 180 / Math.PI,
+    })),
     ...Object.entries(edits.corners).map(([name, position]) => ({ name, position, isEdge: false })),
   ];
+
+  // Reported only when the answer changes, not on every drag frame.
+  const customCrop = hasCustomCrop(edits.corners);
+  const customCropChangeRef = useRef(onCustomCropChange);
+  customCropChangeRef.current = onCustomCropChange;
+  useEffect(() => { customCropChangeRef.current?.(customCrop); }, [customCrop]);
 
   return (
     <View
@@ -228,10 +260,12 @@ export const CropEditor = forwardRef(function CropEditor({
       }}>
       {viewport.width > 0 && viewport.height > 0 ? (
         <>
-          <ReviewImage uri={photo.uri} rotation={edits.rotation} {...viewport} />
-          {(showCropHandles || hasCustomCrop(edits.corners)) && (
+          <ReviewImage uri={photo.uri} rotation={edits.rotation} radius={imageRadius} {...viewport} />
+          {(showCropHandles || customCrop) && (
             <View pointerEvents="none" style={[styles.imageOverlay, viewport]}>
-              <View needsOffscreenAlphaCompositing style={styles.shadeClip}>
+              <View
+                needsOffscreenAlphaCompositing
+                style={[styles.shadeClip, imageRadius ? { borderRadius: imageRadius } : null]}>
                 {edges.map(([name, [first, second]]) => (
                   <View key={name} style={[
                     styles.shade,
@@ -247,13 +281,22 @@ export const CropEditor = forwardRef(function CropEditor({
               ))}
             </View>
           )}
-          {showCropHandles && handles.map(({ name, position, isEdge }) => (
+          {footer ? (
+            <View
+              pointerEvents="none"
+              style={[styles.footer, { top: viewport.top + viewport.height + footerGap, height: footerHeight }]}>
+              {footer}
+            </View>
+          ) : null}
+          {showCropHandles && handles.map(({ name, position, isEdge, angle }) => (
             <DraggableHandle
               key={name}
               handle={name}
               position={position}
               viewport={viewport}
               isEdge={isEdge}
+              angle={angle}
+              active={activeHandle === name}
               disabled={disabled}
               onStart={beginDrag}
               onMove={dragHandle}
@@ -277,10 +320,12 @@ export const CropEditor = forwardRef(function CropEditor({
   );
 });
 
-const ReviewImage = memo(function ReviewImage({ uri, rotation, width, height, left, top, onDisplay }) {
+const ReviewImage = memo(function ReviewImage({
+  uri, rotation, width, height, left, top, onDisplay, radius = 0,
+}) {
   const sideways = rotation % 180 !== 0;
   return (
-    <View pointerEvents="none" style={[styles.imageViewport, { width, height, left, top }]}>
+    <View pointerEvents="none" style={[styles.imageViewport, { width, height, left, top, borderRadius: radius }]}>
       <Image
         contentFit="contain"
         cachePolicy="memory-disk"
@@ -401,7 +446,9 @@ const CropMagnifier = memo(function CropMagnifier({
   );
 });
 
-function DraggableHandle({ handle, position, viewport, isEdge, disabled, onStart, onMove, onEnd }) {
+function DraggableHandle({
+  handle, position, viewport, isEdge, angle = 0, active = false, disabled, onStart, onMove, onEnd,
+}) {
   const inputsRef = useRef(null);
   const gestureRef = useRef(null);
   inputsRef.current = { handle, position, viewport, disabled, onStart, onMove, onEnd };
@@ -482,19 +529,29 @@ function DraggableHandle({ handle, position, viewport, isEdge, disabled, onStart
           top: viewport.top + position.y * viewport.height - TARGET_SIZE / 2,
           zIndex: isEdge ? 2 : 3 },
       ]}>
-      <View pointerEvents="none" style={[styles.handle, isEdge && styles.edgeHandle]} />
+      <View
+        pointerEvents="none"
+        style={[
+          isEdge ? styles.edgeHandle : styles.handle,
+          active && styles.activeHandle,
+          { transform: [...(isEdge ? [{ rotate: `${angle}deg` }] : []), { scale: active ? 1.18 : 1 }] },
+        ]}
+      />
     </View>
   );
 }
 
+const handleLift = {
+  shadowColor: '#0F172A',
+  shadowOpacity: 0.22,
+  shadowRadius: 4,
+  shadowOffset: { width: 0, height: 1 },
+  elevation: 3,
+};
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FFFFFF' },
-  safeArea: { flex: 1, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  title: { color: '#0F172A', fontSize: 28, lineHeight: 34, fontWeight: '700', flexShrink: 1 },
-  badge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10,
-    paddingVertical: 7, borderRadius: 20, backgroundColor: '#EEF4FF' },
-  badgeText: { color: ACCENT },
+  container: { flex: 1, backgroundColor: FinishPalette.background },
+  safeArea: { flex: 1, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
   canvas: { width: '100%', flex: 1, minHeight: 1, position: 'relative' },
   imageViewport: { position: 'absolute', overflow: 'hidden' },
   imageOverlay: { position: 'absolute' },
@@ -504,9 +561,12 @@ const styles = StyleSheet.create({
   handleTarget: { position: 'absolute', width: TARGET_SIZE, height: TARGET_SIZE,
     alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
   handle: { width: 22, height: 22, borderRadius: 11, backgroundColor: ACCENT,
-    borderWidth: 3, borderColor: '#FFFFFF' },
-  edgeHandle: { width: 18, height: 18, borderRadius: 9, backgroundColor: '#FFFFFF',
-    borderWidth: 2, borderColor: ACCENT },
+    borderWidth: 3, borderColor: '#FFFFFF', ...handleLift },
+  // A slim capsule reads as "drag this edge" and hides less of the page.
+  edgeHandle: { width: 30, height: 10, borderRadius: 5, backgroundColor: '#FFFFFF',
+    borderWidth: 2, borderColor: ACCENT, ...handleLift },
+  activeHandle: { shadowOpacity: 0.32, shadowRadius: 6, elevation: 6 },
+  footer: { position: 'absolute', left: 0, right: 0, alignItems: 'center', justifyContent: 'flex-start' },
   magnifier: {
     position: 'absolute', zIndex: 10, elevation: 12, padding: 2,
     borderWidth: 2, borderColor: '#FFFFFF', backgroundColor: ACCENT,
@@ -531,18 +591,18 @@ const styles = StyleSheet.create({
     borderColor: ACCENT, alignItems: 'center', justifyContent: 'center',
   },
   magnifierPointerDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: ACCENT },
-  instruction: { color: '#64748B', fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 4 },
-  tools: { flexDirection: 'row', justifyContent: 'center', gap: 12, marginVertical: 10 },
-  tool: { minHeight: 44, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'center', gap: 8, borderRadius: 14, backgroundColor: '#EEF4FF' },
-  toolText: { color: ACCENT },
-  actions: { flexDirection: 'row', gap: 12 },
-  action: { flex: 1, minHeight: 60, paddingHorizontal: 16, flexDirection: 'row',
-    alignItems: 'center', justifyContent: 'center', gap: 10, borderRadius: 18 },
-  discard: { backgroundColor: '#FFF1F3' },
-  discardText: { color: DISCARD },
-  next: { backgroundColor: ACCENT },
-  nextText: { color: '#FFFFFF' },
+  instruction: { color: FinishPalette.muted, fontSize: 12, lineHeight: 16, textAlign: 'center',
+    paddingHorizontal: 24 },
+  // Just the circles: no panel, so the buttons sit directly on the page.
+  dock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingTop: 8,
+    paddingHorizontal: 24,
+  },
+  dockTools: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.5 },
 });
