@@ -2,47 +2,29 @@ import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Animated, Easing, Pressable, ScrollView, StyleSheet, View, useWindowDimensions,
+  ActivityIndicator, Animated, Easing, Pressable, StyleSheet, View, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { getBatchPhotoId } from '@/batch-workflow';
 import { BatchFilmstrip } from '@/components/batch-filmstrip';
-import { InvertAdjustments } from '@/components/preview-filters';
+import {
+  FinishHeader, FinishPalette, PhotoCard, PhotoCardBadge, PhotoCardChip, finishStyles, getPhotoCardRect,
+} from '@/components/photo-card';
+import { FinishSelector, InvertAdjustments } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
-import { getImageViewport } from '@/crop-geometry';
 import { getNeighbourIndices, useSwipeTrack } from '@/hooks/use-swipe-track';
 import { PREVIEW_FILTER_OPTIONS } from '@/invert-settings';
 
-const ACCENT = '#3C78D8';
-const DISCARD_ACCENT = '#C2415A';
-const SAVE_ACCENT = '#2F9E72';
-const BACKGROUND = '#FFFFFF';
-const CANVAS = '#F5F7FA';
-const SURFACE = '#F7F9FC';
-const BORDER = '#E4EAF2';
-const TEXT = '#0F172A';
-const HEADING = '#122033';
-const MUTED = '#667085';
-const INVERT_INK = '#282E42';
-const CARD_RADIUS = 20;
-
-// Icons hint at what each finish does; Invert keeps its dark selected state
-// from the single-image Preview.
-const FINISH_ICONS = {
-  original: { ios: 'photo', android: 'image', web: 'image' },
-  blackAndWhite: { ios: 'circle.lefthalf.filled', android: 'contrast', web: 'contrast' },
-  magicColor: { ios: 'wand.and.stars', android: 'auto_fix_high', web: 'auto_fix_high' },
-  invert: { ios: 'moon.fill', android: 'dark_mode', web: 'dark_mode' },
-};
-
-// The rounded card is sized to the image's own aspect ratio, so the image
-// fills it edge to edge without cropping any part of the page.
-function getSlideRect(photo, frame) {
-  const ratio = photo?.width > 0 && photo?.height > 0 ? photo.width / photo.height : 3 / 4;
-  return getImageViewport(frame, ratio, 0);
-}
+const ACCENT = FinishPalette.accent;
+const DISCARD_ACCENT = FinishPalette.discard;
+const SAVE_ACCENT = FinishPalette.save;
+const BACKGROUND = FinishPalette.background;
+const CANVAS = FinishPalette.canvas;
+const BORDER = FinishPalette.border;
+const HEADING = FinishPalette.heading;
+const MUTED = FinishPalette.muted;
 
 /**
  * Batch Review, "Choose your finish". Processing state and results are owned
@@ -116,7 +98,7 @@ export function BatchReviewScreen({
       finished: statuses[slideIndex] === 'done',
       // Finishes keep the page's shape, so the unfiltered photo sizes the card
       // and switching finish never resizes it.
-      rect: getSlideRect(photos[slideIndex], frame),
+      rect: getPhotoCardRect(photos[slideIndex], frame),
     }))
     : [];
   const thumbnailSize = height >= 740 ? 88 : 76;
@@ -129,44 +111,16 @@ export function BatchReviewScreen({
   return (
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <View style={styles.header}>
-          <Pressable
-            accessibilityLabel="Return to batch camera"
-            accessibilityRole="button"
-            disabled={changesLocked}
-            onPress={onBack}
-            style={({ pressed }) => [styles.headerButton, pressed && styles.pressed, changesLocked && styles.disabled]}>
-            <SymbolView
-              name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
-              size={22}
-              tintColor={TEXT}
-            />
-          </Pressable>
-          <View style={styles.heading}>
-            <ThemedText type="title" style={styles.title}>Review</ThemedText>
-            <ThemedText style={styles.subtitle}>
-              {count} {count === 1 ? 'image' : 'images'} · Choose your finish
-            </ThemedText>
-          </View>
-          <Pressable
-            accessibilityLabel={comparing ? 'Show finished image' : 'Compare with original'}
-            accessibilityRole="button"
-            accessibilityState={{ selected: comparing, disabled: !canCompare }}
-            disabled={!canCompare}
-            onPress={() => setCompareMode((current) => (current === 'toggle' ? null : 'toggle'))}
-            style={({ pressed }) => [
-              styles.headerButton,
-              comparing && compareMode === 'toggle' && styles.headerButtonActive,
-              pressed && styles.pressed,
-              !canCompare && styles.disabled,
-            ]}>
-            <SymbolView
-              name={{ ios: 'square.on.square', android: 'compare', web: 'compare' }}
-              size={21}
-              tintColor={comparing && compareMode === 'toggle' ? BACKGROUND : TEXT}
-            />
-          </Pressable>
-        </View>
+        <FinishHeader
+          title="Review"
+          subtitle={`${count} ${count === 1 ? 'image' : 'images'} · Choose your finish`}
+          onBack={onBack}
+          backLabel="Return to batch camera"
+          backDisabled={changesLocked}
+          compareActive={comparing && compareMode === 'toggle'}
+          compareDisabled={!canCompare}
+          onCompare={() => setCompareMode((current) => (current === 'toggle' ? null : 'toggle'))}
+        />
 
         <View
           style={styles.imageFrame}
@@ -194,7 +148,17 @@ export function BatchReviewScreen({
                 <View
                   key={`slide:${slide.id}`}
                   style={[StyleSheet.absoluteFill, { transform: [{ translateX: slide.index * frame.width }] }]}>
-                  <View style={[styles.card, slide.rect]}>
+                  <PhotoCard
+                    rect={slide.rect}
+                    overlay={isActive ? (
+                      <>
+                        {comparing ? <PhotoCardBadge /> : null}
+                        {mode !== 'original' && (status === 'queued' || status === 'processing')
+                          ? <PhotoCardChip label={`Applying ${finishLabel}`} /> : null}
+                        {mode !== 'original' && status === 'error'
+                          ? <PhotoCardChip error label={`${finishLabel} could not be applied to this image`} /> : null}
+                      </>
+                    ) : null}>
                     {/* A stable recyclingKey keeps the previous pixels on screen
                         until a newly finished result has decoded, so it
                         crossfades in. The card already has the image's aspect
@@ -220,30 +184,7 @@ export function BatchReviewScreen({
                         style={[StyleSheet.absoluteFill, { opacity: comparing ? 1 : 0 }]}
                       />
                     ) : null}
-                    {/* Drawn above the image so light pages keep a visible edge. */}
-                    <View style={styles.cardOutline} />
-
-                    {isActive && comparing ? (
-                      <View style={styles.compareBadge}>
-                        <ThemedText type="smallBold" style={styles.compareBadgeText}>Original</ThemedText>
-                      </View>
-                    ) : null}
-                    {isActive && mode !== 'original' && (status === 'queued' || status === 'processing') ? (
-                      <View style={styles.imageChip}>
-                        <ActivityIndicator size="small" color={ACCENT} />
-                        <ThemedText numberOfLines={1} style={styles.imageChipText}>
-                          Applying {finishLabel}
-                        </ThemedText>
-                      </View>
-                    ) : null}
-                    {isActive && mode !== 'original' && status === 'error' ? (
-                      <View style={[styles.imageChip, styles.imageChipError]}>
-                        <ThemedText numberOfLines={2} style={[styles.imageChipText, styles.imageChipErrorText]}>
-                          {finishLabel} could not be applied to this image
-                        </ThemedText>
-                      </View>
-                    ) : null}
-                  </View>
+                  </PhotoCard>
                 </View>
               );
             })}
@@ -343,68 +284,6 @@ export function BatchReviewScreen({
   );
 }
 
-function FinishSelector({ mode, disabled, onModeChange }) {
-  const scrollRef = useRef(null);
-  const layoutsRef = useRef({});
-  const viewportWidthRef = useRef(0);
-
-  // Keep the selected finish fully visible when the row is wider than the screen.
-  const reveal = useCallback((value, animated = true) => {
-    const layout = layoutsRef.current[value];
-    const viewport = viewportWidthRef.current;
-    if (!layout || !viewport) return;
-    const centered = layout.x - (viewport - layout.width) / 2;
-    scrollRef.current?.scrollTo({ x: Math.max(0, centered), animated });
-  }, []);
-
-  useEffect(() => { reveal(mode); }, [mode, reveal]);
-
-  return (
-    <ScrollView
-      ref={scrollRef}
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      accessibilityRole="tablist"
-      accessibilityLabel="Finish"
-      onLayout={({ nativeEvent: { layout } }) => { viewportWidthRef.current = layout.width; }}
-      style={styles.finishScroll}
-      contentContainerStyle={styles.finishRow}>
-      {PREVIEW_FILTER_OPTIONS.map((option) => {
-        const selected = mode === option.value;
-        const dark = option.value === 'invert';
-        const tint = selected ? BACKGROUND : TEXT;
-        return (
-          <Pressable
-            key={option.value}
-            accessibilityLabel={option.label}
-            accessibilityRole="tab"
-            accessibilityState={{ selected, disabled }}
-            disabled={disabled}
-            onLayout={({ nativeEvent: { layout } }) => {
-              layoutsRef.current[option.value] = layout;
-              if (selected) reveal(option.value, false);
-            }}
-            onPress={() => onModeChange(option.value)}
-            style={({ pressed }) => [
-              styles.finishChip,
-              selected && (dark ? styles.finishChipSelectedDark : styles.finishChipSelected),
-              pressed && styles.pressed,
-              disabled && styles.disabled,
-            ]}>
-            <SymbolView name={FINISH_ICONS[option.value]} size={17} tintColor={tint} />
-            <ThemedText
-              numberOfLines={1}
-              allowFontScaling={false}
-              style={[styles.finishChipText, selected && styles.finishChipTextSelected]}>
-              {option.label}
-            </ThemedText>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
-  );
-}
-
 // Fixed height, so switching between nothing (Original), progress, error and
 // the compare hint never moves the image or the filmstrip.
 function ReviewStatusRow({
@@ -445,14 +324,14 @@ function ReviewStatusRow({
     );
   } else {
     content = (
-      <ThemedText style={styles.hintText}>
+      <ThemedText style={finishStyles.hintText}>
         {compareMode === 'hold' ? 'Original · Release to return'
           : compareMode === 'toggle' ? 'Original · Tap Compare to return'
             : 'Hold image to compare with original'}
       </ThemedText>
     );
   }
-  return <View style={styles.statusRow} accessibilityLiveRegion="polite">{content}</View>;
+  return <View style={finishStyles.hintRow} accessibilityLiveRegion="polite">{content}</View>;
 }
 
 function ProgressBar({ progress, completed, total }) {
@@ -492,31 +371,6 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.three,
     paddingBottom: Spacing.three,
   },
-  header: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    marginBottom: Spacing.three,
-  },
-  headerButton: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 22,
-  },
-  headerButtonActive: { backgroundColor: ACCENT },
-  heading: { flex: 1 },
-  title: {
-    color: HEADING,
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: '600',
-    letterSpacing: 0.35,
-    textAlign: 'center',
-  },
-  subtitle: { color: MUTED, fontSize: 13, lineHeight: 18, textAlign: 'center' },
   // Clips the swipe track only; each slide draws its own rounded card.
   imageFrame: {
     width: '100%',
@@ -524,48 +378,6 @@ const styles = StyleSheet.create({
     minHeight: 1,
     overflow: 'hidden',
   },
-  card: {
-    position: 'absolute',
-    overflow: 'hidden',
-    borderRadius: CARD_RADIUS,
-    backgroundColor: CANVAS,
-  },
-  cardOutline: {
-    ...StyleSheet.absoluteFillObject,
-    borderRadius: CARD_RADIUS,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(15, 23, 42, 0.14)',
-  },
-  compareBadge: {
-    position: 'absolute',
-    top: 12,
-    alignSelf: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 12,
-    backgroundColor: 'rgba(15, 23, 42, 0.72)',
-  },
-  compareBadgeText: { color: BACKGROUND, fontSize: 12, lineHeight: 16 },
-  imageChip: {
-    position: 'absolute',
-    bottom: 12,
-    alignSelf: 'center',
-    maxWidth: '88%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.94)',
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  imageChipText: { color: HEADING, fontSize: 12, lineHeight: 16, fontWeight: '600', flexShrink: 1 },
-  imageChipError: { backgroundColor: '#FFF5F6', borderColor: '#F0C9CF' },
-  imageChipErrorText: { color: DISCARD_ACCENT },
-  statusRow: { height: 34, justifyContent: 'center', marginTop: Spacing.one },
-  hintText: { color: MUTED, fontSize: 12, lineHeight: 16, textAlign: 'center' },
   progressBlock: { gap: 6 },
   progressLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   progressLabel: { color: HEADING, fontSize: 12, lineHeight: 16, fontWeight: '600', flexShrink: 1 },
@@ -577,43 +389,6 @@ const styles = StyleSheet.create({
   retryText: { color: ACCENT, fontSize: 12, lineHeight: 16 },
   saveNotice: { padding: 10, borderRadius: 12, backgroundColor: '#EAF6EF', marginBottom: Spacing.one },
   saveNoticeText: { color: '#28754F', fontSize: 12, lineHeight: 17 },
-  // Bleeds to the screen edges so chips scroll out of view instead of being
-  // cut at the content padding; vertical padding leaves room for the shadow.
-  finishScroll: { flexGrow: 0, marginTop: Spacing.one, marginHorizontal: -Spacing.four },
-  finishRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: Spacing.four,
-    paddingTop: 4, paddingBottom: 10 },
-  finishChip: {
-    height: 46,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingLeft: 14,
-    paddingRight: 18,
-    borderRadius: 23,
-    backgroundColor: SURFACE,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  finishChipSelected: {
-    backgroundColor: ACCENT,
-    borderColor: ACCENT,
-    shadowColor: '#2A5EB0',
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 3,
-  },
-  finishChipSelectedDark: {
-    backgroundColor: INVERT_INK,
-    borderColor: INVERT_INK,
-    shadowColor: INVERT_INK,
-    shadowOpacity: 0.28,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 3,
-  },
-  finishChipText: { color: TEXT, fontSize: 14, lineHeight: 18, fontWeight: '600' },
-  finishChipTextSelected: { color: BACKGROUND },
   actions: {
     alignSelf: 'stretch',
     flexDirection: 'row',

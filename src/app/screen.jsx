@@ -25,6 +25,9 @@ import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeome
 import { CaptureReview } from '@/components/capture-review';
 import { getBatchPhotoId, releaseTemporaryImagesAsync, savePendingBatchAsync } from '@/batch-workflow';
 import { FocusableCamera } from '@/components/focusable-camera';
+import {
+  FinishHeader, FinishPalette, PhotoCard, PhotoCardBadge, PhotoCardChip, finishStyles, getPhotoCardRect,
+} from '@/components/photo-card';
 import { PreviewFilters } from '@/components/preview-filters';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -256,6 +259,8 @@ function CameraScreen() {
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [savedPhoto, setSavedPhoto] = useState(null);
   const [savedImageMode, setSavedImageMode] = useState('original');
+  // Measured image area of Preview; the rounded card is fitted inside it.
+  const [previewFrame, setPreviewFrame] = useState({ width: 0, height: 0 });
   const [blackAndWhitePhoto, setBlackAndWhitePhoto] = useState(null);
   const [magicColorPhoto, setMagicColorPhoto] = useState(null);
   const [invertPhoto, setInvertPhoto] = useState(null);
@@ -1323,152 +1328,141 @@ function CameraScreen() {
   }
 
   if (savedPhoto) {
+    const previewBusy = isEnhancing || isSavingPreview;
+    const canComparePreview = savedImageMode !== 'original' && !previewBusy;
+    const previewFinishLabel =
+      PREVIEW_FILTER_OPTIONS.find((option) => option.value === savedImageMode)?.label ?? 'Original';
+    const showsFinishedPreview = displayedSavedPhoto !== savedPhoto;
+    // Finishes keep the crop's shape, so the crop sizes the card and switching
+    // finish never resizes it.
+    const previewCardRect = getPhotoCardRect(savedPhoto, previewFrame);
+
     return (
       <>
         <View style={styles.savedImageContainer}>
-          <SafeAreaView
-            style={[
-              styles.savedImageSafeArea,
-              { paddingBottom: Spacing.three },
-            ]}>
-            <View style={styles.savedImageHeader}>
-              <Pressable
-                accessibilityLabel="Back to review capture"
-                accessibilityRole="button"
-                disabled={isEnhancing || isSavingPreview}
-                onPress={returnToReview}
-                style={({ pressed }) => [
-                  styles.savedImageBackButton,
-                  pressed && styles.pressed,
-                  (isEnhancing || isSavingPreview) && styles.disabled,
-                ]}>
-                <SymbolView
-                  name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
-                  size={24}
-                  tintColor={PREVIEW_TEXT}
-                />
-              </Pressable>
-              <ThemedText type="default" style={styles.savedImageTitle}>
-                Preview
-              </ThemedText>
-              <Pressable
-                accessibilityLabel={comparisonMode ? 'Show filtered image' : 'Compare with original'}
-                accessibilityRole="button"
-                accessibilityState={{ selected: Boolean(comparisonMode) }}
-                disabled={savedImageMode === 'original' || isEnhancing || isSavingPreview}
-                onPress={() => setComparisonMode((current) => current === 'toggle' ? null : 'toggle')}
-                style={({ pressed }) => [
-                  styles.savedImageBackButton, pressed && styles.pressed,
-                  (savedImageMode === 'original' || isEnhancing || isSavingPreview) && styles.disabled,
-                ]}>
-                <SymbolView
-                  name={{ ios: 'square.on.square', android: 'compare', web: 'compare' }}
-                  size={23}
-                  tintColor={PREVIEW_TEXT}
-                />
-              </Pressable>
-            </View>
+          <SafeAreaView style={[styles.savedImageSafeArea, { paddingBottom: Spacing.three }]}>
+            <FinishHeader
+              title="Preview"
+              subtitle="Choose your finish"
+              onBack={returnToReview}
+              backLabel="Back to review capture"
+              backDisabled={previewBusy}
+              compareActive={comparisonMode === 'toggle'}
+              compareDisabled={!canComparePreview}
+              onCompare={() => setComparisonMode((current) => current === 'toggle' ? null : 'toggle')}
+            />
 
             <Pressable
-              accessibilityLabel="Preview image"
-              accessibilityHint="Hold to compare with the original crop. Release to return to the filter."
-              disabled={savedImageMode === 'original' || isEnhancing || isSavingPreview}
+              accessibilityLabel={`Preview image, ${comparisonMode ? 'original' : previewFinishLabel}`}
+              accessibilityHint={canComparePreview ? 'Hold to compare with the original crop.' : undefined}
+              disabled={!canComparePreview}
               delayLongPress={180}
               onLongPress={() => setComparisonMode('hold')}
               onPressOut={() => setComparisonMode((current) => current === 'hold' ? null : current)}
+              onLayout={({ nativeEvent: { layout } }) => {
+                setPreviewFrame((current) => (current.width === layout.width && current.height === layout.height
+                  ? current : { width: layout.width, height: layout.height }));
+              }}
               style={styles.savedImageFrame}>
-              <Image
-                contentFit="contain"
-                source={{ uri: comparisonPhoto?.uri ?? savedPhoto.uri }}
-                recyclingKey={comparisonPhoto?.uri ?? savedPhoto.uri}
-                transition={0}
-                style={styles.savedImage}
-              />
-              {comparisonMode ? (
-                <View pointerEvents="none" style={styles.comparisonBadge}>
-                  <ThemedText type="smallBold" style={styles.comparisonBadgeText}>Original</ThemedText>
-                </View>
+              {previewFrame.width > 0 && previewFrame.height > 0 ? (
+                <PhotoCard
+                  rect={previewCardRect}
+                  overlay={(
+                    <>
+                      {comparisonMode ? <PhotoCardBadge /> : null}
+                      {isEnhancing ? <PhotoCardChip label={`Applying ${previewFinishLabel}`} /> : null}
+                    </>
+                  )}>
+                  {/* A recyclingKey that is stable for this capture keeps the
+                      current pixels until the next finish has decoded, so
+                      finishes crossfade instead of blinking. */}
+                  <Image
+                    source={displayedSavedPhoto.uri}
+                    contentFit="cover"
+                    recyclingKey={`finish:${savedPhoto.uri}`}
+                    transition={showsFinishedPreview ? 160 : 0}
+                    accessible={false}
+                    style={StyleSheet.absoluteFill}
+                  />
+                  {showsFinishedPreview ? (
+                    // Kept mounted under the finished image so comparing is instant.
+                    <Image
+                      source={savedPhoto.uri}
+                      contentFit="cover"
+                      recyclingKey={`original:${savedPhoto.uri}`}
+                      transition={0}
+                      accessible={false}
+                      style={[StyleSheet.absoluteFill, { opacity: comparisonMode ? 1 : 0 }]}
+                    />
+                  ) : null}
+                </PhotoCard>
               ) : null}
-              {isEnhancing && (
-                <View style={styles.savedImageLoadingOverlay}>
-                  <ActivityIndicator color={TEAL_ACCENT} />
-                </View>
-              )}
             </Pressable>
-            <ThemedText style={styles.comparisonHint}>
-              {savedImageMode === 'original' ? 'Choose a filter below'
-                : comparisonMode === 'hold' ? 'Original · Release to return'
-                  : comparisonMode === 'toggle' ? 'Original · Tap Compare to return'
-                    : 'Hold image to compare with original'}
-            </ThemedText>
+
+            <View style={finishStyles.hintRow} accessibilityLiveRegion="polite">
+              {savedImageMode !== 'original' ? (
+                <ThemedText style={finishStyles.hintText}>
+                  {comparisonMode === 'hold' ? 'Original · Release to return'
+                    : comparisonMode === 'toggle' ? 'Original · Tap Compare to return'
+                      : 'Hold image to compare with original'}
+                </ThemedText>
+              ) : null}
+            </View>
+
             <PreviewFilters
               selectedMode={savedImageMode}
               onModeChange={selectSavedImageMode}
               invertSettings={invertSettings}
               onInvertSettingsChange={changeInvertSettings}
-              disabled={isEnhancing || isSavingPreview}
+              disabled={previewBusy}
             />
 
-              <View
-                style={[
-                  styles.savedImageActions,
-                  styles.previewActions,
-                  { paddingBottom: insets.bottom },
+            <View style={[styles.previewActionBar, { paddingBottom: insets.bottom }]}>
+              <Pressable
+                accessibilityLabel="Retake photo"
+                accessibilityRole="button"
+                disabled={previewBusy}
+                onPress={closeSavedPhoto}
+                style={({ pressed }) => [
+                  styles.previewAction,
+                  styles.previewRetakeAction,
+                  pressed && styles.pressed,
+                  previewBusy && styles.disabled,
                 ]}>
-                <Pressable
-                 accessibilityLabel="Retake photo"
-                 accessibilityRole="button"
-                 disabled={isEnhancing || isSavingPreview}
-                 onPress={closeSavedPhoto}
-                   style={({ pressed }) => [
-                     styles.savedImageActionButton,
-                     styles.previewActionButton,
-                     styles.previewRetakeButton,
-                     pressed && styles.pressed,
-                     (isEnhancing || isSavingPreview) && styles.disabled,
-                  ]}>
-                  <SymbolView
-                    name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }}
-                    size={30}
-                    tintColor={PREVIEW_RETAKE_ACCENT}
-                  />
-                  <ThemedText
-                    type="smallBold"
-                    allowFontScaling={false}
-                    style={styles.previewRetakeText}>
-                    Retake
-                  </ThemedText>
+                <SymbolView
+                  name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }}
+                  size={25}
+                  tintColor={FinishPalette.discard}
+                />
+                <ThemedText type="smallBold" allowFontScaling={false} style={styles.previewRetakeLabel}>
+                  Retake
+                </ThemedText>
               </Pressable>
 
               <Pressable
                 accessibilityLabel="Save selected image"
                 accessibilityRole="button"
-                disabled={isEnhancing || isSavingPreview}
+                accessibilityState={{ disabled: previewBusy, busy: isSavingPreview }}
+                disabled={previewBusy}
                 onPress={saveSavedImage}
-                   style={({ pressed }) => [
-                     styles.savedImageActionButton,
-                     styles.previewActionButton,
-                     styles.previewSaveButton,
-                     pressed && styles.pressed,
-                     (isEnhancing || isSavingPreview) && styles.disabled,
-                 ]}>
-                  {isSavingPreview ? (
-                     <ActivityIndicator color={PREVIEW_BACKGROUND} />
-                   ) : (
-                   <SymbolView
-                     name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
-                     size={30}
-                     tintColor={PREVIEW_BACKGROUND}
-                   />
-                   )}
-                   {!isSavingPreview && (
-                     <ThemedText
-                       type="smallBold"
-                       allowFontScaling={false}
-                       style={[styles.previewSaveText, styles.previewSaveTextOnAccent]}>
-                       Save
-                     </ThemedText>
-                   )}
+                style={({ pressed }) => [
+                  styles.previewAction,
+                  styles.previewSaveAction,
+                  pressed && styles.pressed,
+                  previewBusy && styles.disabled,
+                ]}>
+                {isSavingPreview ? (
+                  <ActivityIndicator color={FinishPalette.background} />
+                ) : (
+                  <SymbolView
+                    name={{ ios: 'arrow.down.circle.fill', android: 'download', web: 'download' }}
+                    size={25}
+                    tintColor={FinishPalette.background}
+                  />
+                )}
+                <ThemedText type="smallBold" allowFontScaling={false} style={styles.previewSaveLabel}>
+                  {isSavingPreview ? 'Saving' : 'Save'}
+                </ThemedText>
               </Pressable>
             </View>
           </SafeAreaView>
@@ -2004,7 +1998,7 @@ const styles = StyleSheet.create({
   },
   savedImageContainer: {
     flex: 1,
-    backgroundColor: PREVIEW_BACKGROUND,
+    backgroundColor: FinishPalette.background,
   },
   reviewSafeArea: {
     flex: 1,
@@ -2013,30 +2007,9 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.three,
     paddingBottom: Spacing.three,
   },
-  savedImageHeader: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  savedImageBackButton: {
-    width: 48,
-    height: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   savedImageHeaderSpacer: {
     width: 48,
   },
-  comparisonHint: {
-    minHeight: 18, marginTop: 6, textAlign: 'center', fontSize: 12,
-    lineHeight: 18, color: PREVIEW_MUTED,
-  },
-  comparisonBadge: {
-    position: 'absolute', top: 12, left: 12, borderRadius: 12,
-    paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#282E42',
-  },
-  comparisonBadgeText: { color: '#F5F5F5', fontSize: 12 },
   savedImageSafeArea: {
     flex: 1,
     alignItems: 'center',
@@ -2110,15 +2083,6 @@ const styles = StyleSheet.create({
   saveButtonText: {
     color: Colors.light.background,
   },
-  savedImageTitle: {
-    color: PREVIEW_TEXT,
-    textAlign: 'center',
-    marginBottom: Spacing.two,
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: '600',
-    letterSpacing: 0.35,
-  },
   imageFrame: {
     width: '100%',
     flex: 1,
@@ -2146,30 +2110,11 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     backgroundColor: 'transparent',
   },
+  // Measured area for the image; the rounded card is fitted inside it.
   savedImageFrame: {
     width: '100%',
     flex: 1,
     minHeight: 1,
-    position: 'relative',
-    borderRadius: 28,
-    padding: Spacing.one,
-    backgroundColor: 'transparent',
-    borderWidth: 0,
-    borderColor: 'transparent',
-    overflow: 'hidden',
-    shadowOpacity: 0,
-    elevation: 0,
-  },
-  savedImage: {
-    flex: 1,
-    width: '100%',
-    borderRadius: 22,
-  },
-  savedImageLoadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(245, 247, 250, 0.78)',
   },
   savedImageToggleRow: {
     width: '100%',
@@ -2248,35 +2193,33 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#3c87f7',
   },
-  savedImageActions: {
+  previewActionBar: {
     alignSelf: 'stretch',
     flexDirection: 'row',
-    gap: 0,
     marginTop: Spacing.two,
     marginHorizontal: -Spacing.four,
     marginBottom: -Spacing.three,
-    paddingTop: Spacing.two,
-    paddingBottom: Spacing.two,
-    paddingHorizontal: 0,
-    backgroundColor: PREVIEW_BACKGROUND,
-  },
-  previewActions: {
-    marginTop: 0,
-    marginBottom: -Spacing.three,
-    paddingTop: 0,
-    paddingBottom: 0,
-    backgroundColor: PREVIEW_BACKGROUND,
+    backgroundColor: FinishPalette.canvas,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: PREVIEW_BORDER,
+    borderTopColor: '#DCE4ED',
   },
-  savedImageActionButton: {
+  previewAction: {
     flex: 1,
-    minHeight: 46,
+    minHeight: 60,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.one,
-    paddingHorizontal: Spacing.three,
+    paddingHorizontal: Spacing.four,
   },
+  previewRetakeAction: {
+    backgroundColor: '#FFF5F6',
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: '#F0C9CF',
+  },
+  previewSaveAction: { backgroundColor: FinishPalette.save },
+  previewRetakeLabel: { color: FinishPalette.discard },
+  previewSaveLabel: { color: FinishPalette.background },
   reviewActionButton: {
     flexDirection: 'row',
     minHeight: 60,
@@ -2304,35 +2247,6 @@ const styles = StyleSheet.create({
     backgroundColor: REVIEW_NEXT_ACCENT,
     shadowOpacity: 0,
     elevation: 0,
-  },
-  previewActionButton: {
-    flexDirection: 'row',
-    minHeight: 60,
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.four,
-  },
-  previewRetakeButton: {
-    borderRadius: 0,
-    backgroundColor: '#FFF5F6',
-    borderWidth: 0,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: '#F0C9CF',
-  },
-  previewSaveButton: {
-    borderRadius: 0,
-    backgroundColor: PREVIEW_SAVE_ACCENT,
-    borderWidth: 0,
-    shadowOpacity: 0,
-    elevation: 0,
-  },
-  previewRetakeText: {
-    color: PREVIEW_RETAKE_ACCENT,
-  },
-  previewSaveText: {
-    color: PREVIEW_SAVE_ACCENT,
-  },
-  previewSaveTextOnAccent: {
-    color: PREVIEW_BACKGROUND,
   },
   reviewDiscardText: {
     color: REVIEW_DISCARD_ACCENT,
