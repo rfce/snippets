@@ -9,22 +9,13 @@ import {
   summarizeFinishes,
 } from '@/batch-finishes';
 import { releaseTemporaryImagesAsync } from '@/batch-workflow';
-import {
-  cleanupProcessedImagesAsync,
-  renderAdaptiveThresholdAsync,
-  renderInvertAsync,
-  renderMagicColorAsync,
-} from '@/perspective-crop';
-
-const FINISH_RENDERERS = {
-  blackAndWhite: renderAdaptiveThresholdAsync,
-  magicColor: renderMagicColorAsync,
-  invert: renderInvertAsync,
-};
+import { isKnownFinish, renderFinishAsync } from '@/finish-render';
+import { cleanupProcessedImagesAsync } from '@/perspective-crop';
 
 /**
  * Owns batch finish results for the whole batch session, not just one visit to
- * Review. Results are cached per photo, so returning to the camera to add a
+ * Review. Results are preview-size and for display only: saving renders each
+ * image again at full size from its original capture. Results are cached per photo, so returning to the camera to add a
  * page and coming back reprocesses only the new page. Processing runs one
  * image at a time, starting with `priorityIndex`, and publishes each result
  * as soon as it is ready.
@@ -68,7 +59,7 @@ export function useBatchFinishes({
 
   const hasPendingWork = useCallback(() => {
     const input = inputsRef.current;
-    if (!input.active || input.mode === 'original' || !FINISH_RENDERERS[input.mode]) return false;
+    if (!input.active || input.mode === 'original' || !isKnownFinish(input.mode)) return false;
     return Boolean(pickNextFinishJob({
       photos: input.photos,
       renderKey: input.renderKey,
@@ -87,9 +78,7 @@ export function useBatchFinishes({
         // Re-read inputs for every image, so a swipe re-prioritizes the queue
         // and a new finish applies after at most one in-flight image.
         const input = inputsRef.current;
-        if (!input.active || input.mode === 'original') break;
-        const render = FINISH_RENDERERS[input.mode];
-        if (!render) break;
+        if (!input.active || input.mode === 'original' || !isKnownFinish(input.mode)) break;
         const next = pickNextFinishJob({
           photos: input.photos,
           renderKey: input.renderKey,
@@ -100,13 +89,14 @@ export function useBatchFinishes({
 
         setActiveKey(next.key);
         try {
-          // Review photos already carry their crop and rotation in their pixels,
-          // so the identity geometry fast path applies (no corners/rotation).
-          const rendered = await render({
-            uri: next.photo.uri,
-            sourceWidth: next.photo.width,
-            sourceHeight: next.photo.height,
-            ...(input.mode === 'invert' ? { settings: input.invertSettings } : {}),
+          // Crop, rotation and finish in one preview-size pass from the
+          // original capture; the crop is metadata on the Review photo.
+          const rendered = await renderFinishAsync({
+            source: next.photo.sourcePhoto ?? next.photo,
+            edits: next.photo.edits,
+            mode: input.mode,
+            invertSettings: input.invertSettings,
+            size: 'preview',
           });
           if (!isCurrentGeneration()) {
             await cleanupProcessedImagesAsync([rendered]);

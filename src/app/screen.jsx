@@ -21,9 +21,11 @@ import { BatchEditor } from '@/components/batch-editor';
 import { BatchReviewScreen } from '@/components/batch-review';
 import { getBatchEditKey, renderBatchEditAsync } from '@/batch-editing';
 import { getFinishRenderKey } from '@/batch-finishes';
+import { backgroundSaves } from '@/background-saves';
+import { isKnownFinish, renderFinishAsync } from '@/finish-render';
 import { appendBatchCaptureFlight, isBatchCaptureRect, snapshotBatchCaptureGeometry } from '@/batch-capture-geometry';
 import { CaptureReview } from '@/components/capture-review';
-import { getBatchPhotoId, releaseTemporaryImagesAsync, savePendingBatchAsync } from '@/batch-workflow';
+import { getBatchPhotoId, releaseTemporaryImagesAsync } from '@/batch-workflow';
 import { FocusableCamera } from '@/components/focusable-camera';
 import {
   FinishHeader, FinishPalette, PhotoCard, PhotoCardBadge, PhotoCardChip, finishStyles, getPhotoCardRect,
@@ -42,17 +44,15 @@ import {
   normalizeInvertSettings,
 } from '@/invert-settings';
 import {
+  PREVIEW_OUTPUT_EDGE,
   cleanupProcessedImagesAsync,
+  createPreviewSourceAsync,
   prepareImportedImageAsync,
-  renderMagicColorAsync,
-  renderAdaptiveThresholdAsync,
-  renderInvertAsync,
   renderPerspectiveCropAsync,
 } from '@/perspective-crop';
 import {
   appendUniqueMediaLibraryImages,
   normalizeMediaLibraryImage,
-  saveToSnippetsAlbum,
 } from '@/snippets-library';
 
 const cameraModule = getCameraModule();
@@ -174,6 +174,11 @@ function CameraModuleUnavailable() {
     </ThemedView>
   );
 }
+
+// Edit image shows crops and rotations at preview size. Saving renders full
+// size from the original capture, so these images are for display only.
+const renderBatchEditPreviewAsync = (options) =>
+  renderPerspectiveCropAsync({ ...options, maxOutputEdge: PREVIEW_OUTPUT_EDGE });
 
 function CameraScreen() {
   const theme = useTheme();
@@ -537,18 +542,47 @@ function CameraScreen() {
   }, [invalidateGalleryLoad, preparingImportKey, reportDiagnostic]);
 
   // A prepared import is a temporary copy. Release it once the capture is
-  // gone, after any save that may still be reading it.
+  // gone, unless a background save took it over (that save deletes it when
+  // it is finished, so a retry can still read it).
+  const handedOffUrisRef = useRef(new Set());
   useEffect(() => {
     const photo = capturedPhoto;
     if (!photo?.temporary) return undefined;
     return () => {
-      void releaseTemporaryImagesAsync(
-        [photo],
-        [singleSavePromiseRef.current],
-        cleanupProcessedImagesAsync
-      );
+      if (handedOffUrisRef.current.delete(photo.uri)) return;
+      void releaseTemporaryImagesAsync([photo], [], cleanupProcessedImagesAsync);
     };
   }, [capturedPhoto]);
+
+  // A small copy of the current capture for preview renders, made in the
+  // background while Review capture is on screen. Next and every finish then
+  // read a few megapixels instead of the full capture.
+  const previewSourceRef = useRef(null);
+  const previewRenderJobsRef = useRef(new Set());
+  useEffect(() => {
+    const photo = capturedPhoto;
+    if (!photo?.uri) return undefined;
+    const entry = { photo, promise: createPreviewSourceAsync(photo) };
+    previewSourceRef.current = entry;
+    return () => {
+      if (previewSourceRef.current === entry) previewSourceRef.current = null;
+      void entry.promise.then((preview) => releaseTemporaryImagesAsync(
+        preview?.temporary ? [preview] : [],
+        [...previewRenderJobsRef.current],
+        cleanupProcessedImagesAsync
+      ));
+    };
+  }, [capturedPhoto]);
+  const getPreviewSourceAsync = (photo) => (previewSourceRef.current?.photo === photo
+    ? previewSourceRef.current.promise
+    : Promise.resolve(null));
+  // Renders that read the preview copy; it is deleted only after they settle.
+  const trackPreviewRender = (promise) => {
+    const jobs = previewRenderJobsRef.current;
+    jobs.add(promise);
+    promise.then(() => jobs.delete(promise), () => jobs.delete(promise));
+    return promise;
+  };
 
   const selectCaptureMode = useCallback((mode) => {
     if (mode === captureMode || captureInFlightRef.current || batchSaveInFlightRef.current) return;
@@ -776,7 +810,7 @@ function CameraScreen() {
     // batch ends. Cached orientations can then be reused without another export.
     const job = Promise.resolve().then(async () => {
       try {
-        const prepared = await renderBatchEditAsync(photo, edits, renderPerspectiveCropAsync);
+        const prepared = await renderBatchEditAsync(photo, edits, renderBatchEditPreviewAsync);
         if (!previewMountedRef.current) {
           if (prepared.temporary) await cleanupProcessedImagesAsync([prepared]);
           return false;
@@ -814,61 +848,62 @@ function CameraScreen() {
     setIsCameraReady(false);
   };
 
-  const saveBatch = async (photosToSave = batchPhotos) => {
-    if (!photosToSave.length || batchSaveInFlightRef.current) return;
+  // Hands the batch to the background queue and ends the batch session at
+  // once. The queue renders each image at full size from its original capture
+  // (crop + finish in one pass), so neither the preview results nor the Edit
+  // image renders need to stay around.
+  const saveBatch = async () => {
+    const photos = batchReviewPhotos;
+    if (!photos?.length || batchSaveInFlightRef.current) return;
 
+    // Only the permission prompt can make the person wait here.
     batchSaveInFlightRef.current = true;
     setIsSavingBatch(true);
-    const save = Promise.resolve().then(async () => {
-      try {
-        let permission = mediaPermission;
-        if (!permission?.granted) permission = await requestMediaPermission();
-        if (!permission?.granted) {
-          if (previewMountedRef.current) {
-            Alert.alert('Permission needed', 'Allow photo access to save this batch.');
-          }
-          return;
-        }
-
-        await savePendingBatchAsync(photosToSave, {
-          savedAssets: batchSavedAssetsRef.current,
-          savePhoto: (photo) => saveToSnippetsAlbum(mediaLibraryModule, photo.uri),
-          onProgress: (progress) => {
-            if (previewMountedRef.current) setBatchSaveProgress(progress);
-          },
-        });
-
-        if (!previewMountedRef.current) return;
-        setBatchPhotos([]);
-        setBatchReviewPhotos(null);
-        setBatchEdits({});
-        setBatchSelectedIndex(0);
-        batchSavedAssetsRef.current.clear();
-        setBatchSaveProgress({ completed: 0, total: 0 });
-        // Deletion waits for this save (batchSavePromiseRef) to settle.
-        resetBatchReviewState();
-        cleanupBatchEdits();
-        cleanupTemporaryPreviewPhotos();
-        setCaptureMode('single');
-        setIsCameraReady(false);
-      } catch (error) {
-        if (previewMountedRef.current) {
-          const completed = batchSavedAssetsRef.current.size;
-          Alert.alert(
-            'Could not finish saving batch',
-            getErrorDetails(error).message + (completed
-              ? `\n\n${completed} of ${photosToSave.length} images are already saved. Retry will save only the remaining images.`
-              : '')
-          );
-        }
-      }
-    });
-    // Register ownership before permission prompts or native saves can start.
-    batchSavePromiseRef.current = save;
     try {
-      await save;
+      let permission = mediaPermission;
+      if (!permission?.granted) permission = await requestMediaPermission();
+      if (!permission?.granted) {
+        if (previewMountedRef.current) Alert.alert('Permission needed', 'Allow photo access to save this batch.');
+        return;
+      }
+      if (!previewMountedRef.current) return;
+
+      const mode = batchFinishMode;
+      const settings = normalizeInvertSettings(batchInvertSettings);
+      backgroundSaves.enqueue({
+        label: photos.length > 1 ? 'batch' : 'image',
+        items: photos.map((photo) => {
+          const source = photo.sourcePhoto ?? photo;
+          const edits = photo.edits ? JSON.parse(JSON.stringify(photo.edits)) : null;
+          return {
+            id: getBatchPhotoId(photo),
+            render: () => renderFinishAsync({ source, edits, mode, invertSettings: settings, size: 'full' }),
+          };
+        }),
+        onItemSaved: (asset) => {
+          normalizeMediaLibraryImage(asset)
+            .then((image) => {
+              if (image?.uri && previewMountedRef.current) setRecentGalleryImage(image);
+            })
+            .catch(() => {});
+        },
+      });
+      console.log('[screen] Batch handed to background save', { count: photos.length, mode });
+
+      setBatchPhotos([]);
+      setBatchReviewPhotos(null);
+      setBatchEdits({});
+      setBatchSelectedIndex(0);
+      batchSavedAssetsRef.current.clear();
+      setBatchSaveProgress({ completed: 0, total: 0 });
+      resetBatchReviewState();
+      cleanupBatchEdits();
+      cleanupTemporaryPreviewPhotos();
+      setCaptureMode('single');
+      setIsCameraReady(false);
+    } catch (error) {
+      reportDiagnostic('Save batch', error, { count: photos.length });
     } finally {
-      batchSavePromiseRef.current = null;
       batchSaveInFlightRef.current = false;
       if (previewMountedRef.current) setIsSavingBatch(false);
     }
@@ -1001,12 +1036,7 @@ function CameraScreen() {
 
   const selectSavedImageMode = async (mode, nextSettings = invertSettings) => {
     if (previewBusyRef.current || isSavingPreview || !savedPhoto) return;
-    const renderers = {
-      blackAndWhite: renderAdaptiveThresholdAsync,
-      magicColor: renderMagicColorAsync,
-      invert: renderInvertAsync,
-    };
-    if (mode !== 'original' && !renderers[mode]) return;
+    if (!isKnownFinish(mode)) return;
     const settings = normalizeInvertSettings(nextSettings);
     const settingsKey = getInvertSettingsKey(settings);
     setComparisonMode(null);
@@ -1029,16 +1059,19 @@ function CameraScreen() {
     setIsEnhancing(true);
 
     try {
-      // Analyze the full capture and render the selected crop in one pass.
+      // Crop and finish in one preview-size pass, from the preview copy of the
+      // capture. The saved image repeats this pass at full size.
       const sourcePhoto = capturedPhoto ?? savedPhoto;
       const edits = capturedPhoto ? reviewEditsRef.current : null;
-      const enhancedPhoto = await renderers[mode]({
-        uri: sourcePhoto.uri,
-        sourceWidth: sourcePhoto.width,
-        sourceHeight: sourcePhoto.height,
-        ...(edits ? { corners: edits.corners, rotation: edits.rotation } : {}),
-        ...(mode === 'invert' ? { settings } : {}),
-      });
+      const previewSource = await getPreviewSourceAsync(capturedPhoto);
+      const enhancedPhoto = await trackPreviewRender(renderFinishAsync({
+        source: sourcePhoto,
+        previewSource,
+        edits,
+        mode,
+        invertSettings: settings,
+        size: 'preview',
+      }));
       produced.push(enhancedPhoto);
       if (!isCurrent()) {
         await cleanupProcessedImagesAsync(produced);
@@ -1070,55 +1103,47 @@ function CameraScreen() {
   };
 
   const saveSavedImage = async () => {
-    if (!displayedSavedPhoto?.uri || singleSavePromiseRef.current ||
-        isSavingPreview || isEnhancing || previewBusyRef.current) return;
+    if (!savedPhoto || !capturedPhoto?.uri || isSavingPreview || isEnhancing || previewBusyRef.current) return;
 
+    // Only the permission prompt can make the person wait here.
     setIsSavingPreview(true);
-    const save = Promise.resolve().then(async () => {
-      try {
-        let permission = mediaPermission;
-        if (!permission?.granted) {
-          permission = await requestMediaPermission();
-        }
-
-        if (!permission?.granted) {
-          Alert.alert('Permission needed', 'Allow photo access to save this image.');
-          return;
-        }
-
-        const savedAsset = await saveToSnippetsAlbum(mediaLibraryModule, displayedSavedPhoto.uri);
-        const savedImage = await normalizeMediaLibraryImage(savedAsset);
-
-        if (!previewMountedRef.current) return;
-        if (savedImage?.uri) {
-          setRecentGalleryImage(savedImage);
-        } else if (!displayedSavedPhoto.temporary) {
-          setRecentGalleryImage({
-            uri: displayedSavedPhoto.uri,
-            width: displayedSavedPhoto.width,
-            height: displayedSavedPhoto.height,
-            fileName: displayedSavedPhoto.fileName ?? null,
-          });
-        }
-        console.log('[screen] Final image saved', {
-          mode: savedImageMode,
-          uri: displayedSavedPhoto.uri,
-        });
-        closeSavedPhoto();
-      } catch (error) {
-        const details = getErrorDetails(error);
-        console.error('[screen] Final image save failed', details);
-        if (previewMountedRef.current) reportDiagnostic('Save final image', error, {
-          mode: savedImageMode,
-          sourceUri: displayedSavedPhoto?.uri ?? null,
-        });
-      }
-    });
-    singleSavePromiseRef.current = save;
     try {
-      await save;
+      let permission = mediaPermission;
+      if (!permission?.granted) permission = await requestMediaPermission();
+      if (!permission?.granted) {
+        Alert.alert('Permission needed', 'Allow photo access to save this image.');
+        return;
+      }
+      if (!previewMountedRef.current) return;
+
+      // Everything the full-size render needs, captured now: Preview closes
+      // right away and the queue renders crop + finish from the capture.
+      const source = capturedPhoto;
+      const edits = reviewEditsRef.current ? JSON.parse(JSON.stringify(reviewEditsRef.current)) : null;
+      const mode = savedImageMode;
+      const settings = normalizeInvertSettings(invertSettings);
+      if (source.temporary) handedOffUrisRef.current.add(source.uri);
+
+      backgroundSaves.enqueue({
+        label: 'image',
+        items: [{
+          id: source.uri,
+          render: () => renderFinishAsync({ source, edits, mode, invertSettings: settings, size: 'full' }),
+        }],
+        ownedFiles: source.temporary ? [source] : [],
+        onItemSaved: (asset) => {
+          normalizeMediaLibraryImage(asset)
+            .then((image) => {
+              if (image?.uri && previewMountedRef.current) setRecentGalleryImage(image);
+            })
+            .catch(() => {});
+        },
+      });
+      console.log('[screen] Image handed to background save', { mode });
+      closeSavedPhoto();
+    } catch (error) {
+      reportDiagnostic('Save final image', error, { mode: savedImageMode });
     } finally {
-      singleSavePromiseRef.current = null;
       if (previewMountedRef.current) setIsSavingPreview(false);
     }
   };
@@ -1149,17 +1174,18 @@ function CameraScreen() {
         return;
       }
 
-      const selectedPhoto = needsProcessing
-        ? await renderPerspectiveCropAsync({
-            uri: capturedPhoto.uri,
-            corners: cropCorners ?? getDefaultCorners(),
-            sourceWidth: capturedPhoto.width,
-            sourceHeight: capturedPhoto.height,
-            rotation: capturedRotation,
-          })
-        : capturedPhoto;
+      // Preview size only: the crop stays metadata, and saving renders it at
+      // full size from the capture together with the chosen finish.
+      const previewSource = await getPreviewSourceAsync(capturedPhoto);
+      const selectedPhoto = await trackPreviewRender(renderFinishAsync({
+        source: capturedPhoto,
+        previewSource,
+        edits: { corners: cropCorners ?? getDefaultCorners(), rotation: capturedRotation },
+        mode: 'original',
+        size: 'preview',
+      }));
 
-      if (selectedPhoto !== capturedPhoto) trackTemporaryPreviewPhoto(selectedPhoto);
+      if (selectedPhoto.temporary) trackTemporaryPreviewPhoto(selectedPhoto);
 
       console.log('[screen] Image ready for enhancement', {
         uriAvailable: Boolean(selectedPhoto?.uri),
@@ -1314,15 +1340,13 @@ function CameraScreen() {
         failed={batchFinishes.failed}
         total={batchFinishes.total}
         isProcessing={batchFinishes.isProcessing}
-        canSave={Boolean(batchFinishes.selectedPhotos) && !batchFinishes.isProcessing}
+        canSave={batchReviewPhotos.length > 0}
         onRetryFailed={() => batchFinishes.retryFailed()}
         isSaving={isSavingBatch}
         saveProgress={batchSaveProgress}
         onBack={returnToBatchCamera}
         onDiscard={discardBatch}
-        onSave={() => {
-          if (batchFinishes.selectedPhotos) void saveBatch(batchFinishes.selectedPhotos);
-        }}
+        onSave={() => { void saveBatch(); }}
       />
     );
   }

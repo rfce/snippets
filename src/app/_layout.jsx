@@ -3,6 +3,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useState } from 'react';
 import { StyleSheet, View, useColorScheme as useNativeColorScheme } from 'react-native';
 
+import { SaveStatusPill } from '@/components/save-status';
 import { SelectionContext } from '@/context/SelectionContext';
 
 SplashScreen.preventAutoHideAsync();
@@ -28,6 +29,8 @@ export default function RootLayout() {
         <SelectionContext.Provider value={{ selectedImageIds, setSelectedImageIds }}>
           <Stack screenOptions={{ headerShown: false }} />
         </SelectionContext.Provider>
+        {/* Background saves report progress here, on every screen. */}
+        <SaveStatusPill />
       </View>
     </ThemeProvider>
   );

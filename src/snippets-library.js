@@ -98,6 +98,45 @@ export function appendUniqueMediaLibraryImages(existingImages, incomingImages) {
   return nextImages;
 }
 
+/**
+ * Saves several images with one album lookup. The album is found (or created
+ * by the first save) once and reused for every later save. A failed save
+ * forgets the cached album, so a retry looks it up again in case it was
+ * deleted outside the app.
+ */
+export function createSnippetsAlbumSaver(mediaLibrary) {
+  let albumPromise = null;
+
+  return async function saveImage(uri) {
+    if (!uri) throw new Error('A local image URI is required to save a Snippets image.');
+    if (!mediaLibrary?.Asset?.create || !mediaLibrary?.Album?.get || !mediaLibrary?.Album?.create) {
+      throw new Error('The media-library album API is unavailable in this build.');
+    }
+
+    try {
+      if (!albumPromise) albumPromise = getSnippetsAlbum(mediaLibrary);
+      let album = await albumPromise;
+      if (album) return await mediaLibrary.Asset.create(uri, album);
+
+      // First save ever: create the album with this image in it.
+      const asset = await mediaLibrary.Asset.create(uri);
+      try {
+        album = await mediaLibrary.Album.create(SNIPPETS_ALBUM_NAME, [asset]);
+      } catch (error) {
+        // Another save can create the album between the lookup and creation.
+        album = await getSnippetsAlbum(mediaLibrary);
+        if (!album) throw error;
+        await album.add(asset);
+      }
+      albumPromise = Promise.resolve(album);
+      return asset;
+    } catch (error) {
+      albumPromise = null;
+      throw error;
+    }
+  };
+}
+
 export async function saveToSnippetsAlbum(mediaLibrary, uri) {
   if (!uri) {
     throw new Error('A local image URI is required to save a Snippets image.');

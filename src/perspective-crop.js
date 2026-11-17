@@ -15,6 +15,10 @@ const FALLBACK_GL_TEXTURE_EDGE = 4096;
 let outputEdgeLimit = MAX_OUTPUT_EDGE;
 let glLimitsPromise = null;
 const NORMALIZED_SOURCE_COMPRESS = 0.95;
+// On-screen results (Preview, Edit image, Review) render at this long edge:
+// sharp on a phone screen at a quarter of the pixels of a full-size render.
+// Saving always renders at full size from the original capture.
+export const PREVIEW_OUTPUT_EDGE = 2048;
 const BLACK_AND_WHITE_ANALYSIS_EDGE = 256;
 const BLACK_AND_WHITE_PAPER_GRID = 32;
 const SNAPSHOT_OPTIONS = {
@@ -160,6 +164,24 @@ export async function prepareImportedImageAsync(image) {
   }
 }
 
+/**
+ * A downscaled copy of a capture for preview renders, so each preview pass
+ * decodes and uploads a few megapixels instead of the full capture. Returns
+ * null when the capture is already about preview size or the copy cannot be
+ * made; previews then render from the capture itself (slower, still correct).
+ */
+export async function createPreviewSourceAsync(photo, maxEdge = PREVIEW_OUTPUT_EDGE) {
+  if (!photo?.uri || !(photo.width > 0 && photo.height > 0)) return null;
+  if (Math.max(photo.width, photo.height) <= maxEdge * 1.15) return null;
+  if (!getImageManipulatorModule()) return null;
+  try {
+    return await normalizeImageForGlAsync(photo.uri, { maxEdge, width: photo.width, height: photo.height });
+  } catch (error) {
+    console.warn('[perspective-crop] Preview source unavailable; using the capture', error);
+    return null;
+  }
+}
+
 function getImageManipulatorModule() {
   try {
     const module = require('expo-image-manipulator');
@@ -241,6 +263,7 @@ async function renderPerspectiveCropOnce({
   sourceWidth,
   sourceHeight,
   rotation = 0,
+  maxOutputEdge,
 }) {
   if (!uri) {
     throw new Error('A source image is required for perspective cropping.');
@@ -253,7 +276,7 @@ async function renderPerspectiveCropOnce({
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Valid image dimensions are required for perspective cropping.');
   }
-  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
@@ -332,6 +355,7 @@ async function renderAdaptiveThresholdOnce({
   sourceHeight,
   corners,
   rotation = 0,
+  maxOutputEdge,
 }) {
   if (!uri) {
     throw new Error('A source image is required for black-and-white enhancement.');
@@ -342,7 +366,7 @@ async function renderAdaptiveThresholdOnce({
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Valid image dimensions are required for black-and-white enhancement.');
   }
-  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
   const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
   const analysisHeight = Math.max(1, Math.round(height * analysisScale));
@@ -472,6 +496,7 @@ async function renderInvertOnce({
   settings,
   corners,
   rotation = 0,
+  maxOutputEdge,
 }) {
   if (!uri) {
     throw new Error('A source image is required for Invert enhancement.');
@@ -483,7 +508,7 @@ async function renderInvertOnce({
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Valid image dimensions are required for Invert enhancement.');
   }
-  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
   const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
   const analysisHeight = Math.max(1, Math.round(height * analysisScale));
@@ -1004,6 +1029,9 @@ async function renderMagicColorOnce({
   sourceHeight,
   corners,
   rotation = 0,
+  maxOutputEdge,
+  referenceWidth,
+  referenceHeight,
 }) {
   if (!uri) {
     throw new Error('A source image is required for magic-color enhancement.');
@@ -1011,7 +1039,7 @@ async function renderMagicColorOnce({
 
   const width = sourceWidth || 1;
   const height = sourceHeight || 1;
-  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation);
+  const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
   const GLView = getGLView();
   const gl = await GLView.createContextAsync();
   let sourceTexture;
@@ -1061,7 +1089,11 @@ async function renderMagicColorOnce({
       throw new Error('The magic-color shader uniforms are unavailable.');
     }
 
-    gl.uniform2f(texelSizeLocation, 1 / width, 1 / height);
+    // Illumination and paper estimates sample up to 48 texels away. Sizing
+    // texels from the full capture keeps that reach the same fraction of the
+    // page when a preview renders from a smaller copy, so a preview matches
+    // the saved image instead of looking flatter.
+    gl.uniform2f(texelSizeLocation, 1 / (referenceWidth || width), 1 / (referenceHeight || height));
     gl.uniform1f(sampleStepLocation, 12);
     gl.uniform1f(thresholdBiasLocation, 0.09);
 
@@ -1129,11 +1161,11 @@ export async function cleanupProcessedImagesAsync(images) {
   await Promise.all(cleanupTasks);
 }
 
-function getEnhancementGeometry(width, height, corners, rotation = 0) {
+function getEnhancementGeometry(width, height, corners, rotation = 0, maxEdge = outputEdgeLimit) {
   const normalizedRotation = normalizeRotation(rotation);
   if (!corners && normalizedRotation === 0) {
     return {
-      outputSize: getScaledOutputSize(width, height),
+      outputSize: getScaledOutputSize(width, height, maxEdge),
       destinationToSource: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
     };
   }
@@ -1149,7 +1181,7 @@ function getEnhancementGeometry(width, height, corners, rotation = 0) {
   const displayedHeight = normalizedRotation % 180 === 0 ? height : width;
   const displayedCorners = getPixelAlignedCorners(cropCorners, displayedWidth, displayedHeight);
   const sourceCorners = mapCornersToSource(displayedCorners, normalizedRotation);
-  const outputSize = getOutputSize(displayedCorners, displayedWidth, displayedHeight);
+  const outputSize = getOutputSize(displayedCorners, displayedWidth, displayedHeight, maxEdge);
   const axisAlignedCrop = normalizedRotation === 0 ? getAxisAlignedCrop(sourceCorners) : null;
   const destinationToSource = axisAlignedCrop
     ? getAxisAlignedTransform(axisAlignedCrop)
@@ -1253,6 +1285,13 @@ function getPixelAlignedCorners(corners, width, height) {
   };
 }
 
+// The device limit always applies; a preview render can ask for less.
+function getOutputEdge(maxOutputEdge) {
+  return Number.isFinite(maxOutputEdge) && maxOutputEdge > 0
+    ? Math.min(outputEdgeLimit, maxOutputEdge)
+    : outputEdgeLimit;
+}
+
 function getAxisAlignedTransform(crop) {
   return [
     [crop.right - crop.left, 0, crop.left],
@@ -1261,8 +1300,8 @@ function getAxisAlignedTransform(crop) {
   ];
 }
 
-function getScaledOutputSize(width, height) {
-  const scale = Math.min(1, outputEdgeLimit / Math.max(width, height));
+function getScaledOutputSize(width, height, maxEdge = outputEdgeLimit) {
+  const scale = Math.min(1, maxEdge / Math.max(width, height));
 
   return {
     width: Math.max(1, Math.round(width * scale)),
@@ -1270,7 +1309,7 @@ function getScaledOutputSize(width, height) {
   };
 }
 
-function getOutputSize(corners, sourceWidth, sourceHeight) {
+function getOutputSize(corners, sourceWidth, sourceHeight, maxEdge = outputEdgeLimit) {
   const width = sourceWidth || 1;
   const height = sourceHeight || 1;
   const top = distanceInPixels(corners.topLeft, corners.topRight, width, height);
@@ -1279,7 +1318,7 @@ function getOutputSize(corners, sourceWidth, sourceHeight) {
   const right = distanceInPixels(corners.topRight, corners.bottomRight, width, height);
   const rawWidth = Math.max(1, Math.round((top + bottom) / 2));
   const rawHeight = Math.max(1, Math.round((left + right) / 2));
-  const scale = Math.min(1, outputEdgeLimit / Math.max(rawWidth, rawHeight));
+  const scale = Math.min(1, maxEdge / Math.max(rawWidth, rawHeight));
 
   return {
     width: Math.max(1, Math.round(rawWidth * scale)),

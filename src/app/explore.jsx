@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { backgroundSaves } from '@/background-saves';
 import { SelectionActionBar } from '@/components/selection-actions';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -200,7 +201,9 @@ export default function ExploreScreen() {
     // on screen with no spinner and actions enabled, then swaps in the result.
     // The first load, pull-to-refresh and retries keep their visible states.
     const silent = background && reset && assetsRef.current.length > 0;
-    if (reset) dragSelection.cancel();
+    // A silent refresh can land while someone is selecting; it must not
+    // interrupt a drag or wipe their selection.
+    if (reset && !silent) dragSelection.cancel();
 
     loadingRef.current = true;
     if (!silent) setIsLoading(true);
@@ -261,7 +264,15 @@ export default function ExploreScreen() {
 
       // A full refresh replaces the loaded pages. Clear selection at commit
       // so selections made while the request was pending cannot become stale.
-      if (reset) clearSelection();
+      // A silent refresh keeps the selection, minus images that are gone.
+      if (reset && !silent) clearSelection();
+      if (silent) {
+        const presentIds = new Set(nextImages.map(getAssetKey));
+        setSelectedImageIds((current) => {
+          const kept = [...current].filter((id) => presentIds.has(id));
+          return kept.length === current.size ? current : new Set(kept);
+        });
+      }
       assetsRef.current = nextImages;
       paginationOffsetRef.current = offset + assets.length;
       hasMoreRef.current = nextHasMore;
@@ -278,7 +289,34 @@ export default function ExploreScreen() {
       loadingRef.current = false;
       if (!silent) setIsLoading(false);
     }
-  }, [clearSelection, dragSelection]);
+  }, [clearSelection, dragSelection, setSelectedImageIds]);
+
+  // Background saves keep running after the camera closes. Refresh silently
+  // as images land so new scans appear without leaving and re-entering.
+  useEffect(() => {
+    let lastSavedCount = backgroundSaves.getSnapshot().savedCount;
+    let timer = null;
+    const run = () => {
+      timer = null;
+      // Try again shortly if a load is already running.
+      if (loadingRef.current) {
+        timer = setTimeout(run, 500);
+        return;
+      }
+      void loadSavedImages(true, { background: true });
+    };
+    const unsubscribe = backgroundSaves.subscribe(() => {
+      const { savedCount } = backgroundSaves.getSnapshot();
+      if (savedCount === lastSavedCount) return;
+      lastSavedCount = savedCount;
+      // Coalesce a burst of batch saves into one refresh.
+      if (!timer) timer = setTimeout(run, 500);
+    });
+    return () => {
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+    };
+  }, [loadSavedImages]);
 
   useFocusEffect(
     useCallback(() => {
