@@ -845,6 +845,9 @@ export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel } = {}
     return 'skipped';
   }
   return runOnGlSession(async (session) => {
+    // The task may have waited behind other renders; do nothing if the photo
+    // is no longer wanted by the time its turn comes.
+    if (shouldCancel?.()) return 'cancelled';
     try {
       await ensurePaperAnalysis(session, {
         uri: photo.uri, width: photo.width, height: photo.height, shouldCancel,

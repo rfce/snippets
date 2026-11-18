@@ -49,6 +49,7 @@ import {
   PREVIEW_OUTPUT_EDGE,
   cleanupProcessedImagesAsync,
   createPreviewSourceAsync,
+  prefetchDocumentAnalysisAsync,
   prepareImportedImageAsync,
   renderPerspectiveCropAsync,
   warmUpGlAsync,
@@ -615,11 +616,27 @@ function CameraScreen() {
     if (!photo?.uri) return undefined;
     const entry = { photo, promise: createPreviewSourceAsync(photo) };
     previewSourceRef.current = entry;
+
+    // Black & White and Invert begin with a page analysis, the slow part of
+    // their first render (a second finish reuses it, which is why that one is
+    // fast). Prepare it now, while the person adjusts the crop, from the very
+    // image Preview will render from, so the first tap needs only the GPU.
+    // Nothing waits on this; it runs in short slices at low priority and
+    // stops as soon as the capture is discarded.
+    const analysis = entry.promise
+      .then((preview) => (previewSourceRef.current === entry
+        ? prefetchDocumentAnalysisAsync(preview ?? photo, {
+          shouldCancel: () => previewSourceRef.current !== entry,
+        })
+        : null))
+      .catch(() => null);
+
     return () => {
       if (previewSourceRef.current === entry) previewSourceRef.current = null;
+      // The preview copy is deleted only after anything reading it has settled.
       void entry.promise.then((preview) => releaseTemporaryImagesAsync(
         preview?.temporary ? [preview] : [],
-        [...previewRenderJobsRef.current],
+        [...previewRenderJobsRef.current, analysis],
         cleanupProcessedImagesAsync
       ));
     };
