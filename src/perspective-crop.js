@@ -19,6 +19,63 @@ const NORMALIZED_SOURCE_COMPRESS = 0.95;
 // sharp on a phone screen at a quarter of the pixels of a full-size render.
 // Saving always renders at full size from the original capture.
 export const PREVIEW_OUTPUT_EDGE = 2048;
+
+// --- Keeping the UI responsive during document analysis -------------------
+// Black & White and Invert analyse the page in JavaScript. That work is cut
+// into slices of about SLICE_BUDGET_MS, yielding to the event loop in between,
+// so taps, animations and React commits are never held up behind it.
+const SLICE_BUDGET_MS = 8;
+const PAPER_ANALYSIS_CACHE_LIMIT = 64;
+
+const getNow = () => (typeof performance !== 'undefined' && performance.now
+  ? performance.now() : Date.now());
+
+function createTimeSlicer(shouldCancel) {
+  let sliceStart = getNow();
+  return async () => {
+    if (getNow() - sliceStart < SLICE_BUDGET_MS) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Checked only when yielding, so a cancel costs nothing per pixel.
+    if (shouldCancel?.()) {
+      const error = new Error('Document analysis was cancelled.');
+      error.paperAnalysisCancelled = true;
+      throw error;
+    }
+    sliceStart = getNow();
+  };
+}
+
+/**
+ * Resolves after the next frame, so a pending React commit (a "working" state,
+ * a pressed button) paints before heavy work starts. A timer also resolves it,
+ * so work keeps moving when frames are paused (app in the background).
+ */
+export function yieldToUi() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => setTimeout(done, 0));
+    setTimeout(done, 80);
+  });
+}
+
+// The page analysis depends only on the source image, so it is computed once
+// per image and reused by every Black & White and Invert render of it
+// (previews, switching between the two, and the full-size save).
+const paperAnalysisCache = new Map();
+
+function getPaperAnalysisKey(uri, width, height) {
+  return `${uri}|${width}x${height}`;
+}
+
+export function hasPaperAnalysis(photo) {
+  return Boolean(photo?.uri) &&
+    paperAnalysisCache.has(getPaperAnalysisKey(photo.uri, photo.width, photo.height));
+}
 const BLACK_AND_WHITE_ANALYSIS_EDGE = 256;
 const BLACK_AND_WHITE_PAPER_GRID = 32;
 const SNAPSHOT_OPTIONS = {
@@ -477,28 +534,24 @@ async function renderAdaptiveThresholdOnce({
     throw new Error('Valid image dimensions are required for black-and-white enhancement.');
   }
   const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
-  const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
-  const analysisWidth = Math.max(1, Math.round(width * analysisScale));
-  const analysisHeight = Math.max(1, Math.round(height * analysisScale));
   const GLView = getGLView();
   const { gl } = session;
   let sourceTexture;
   let paperTexture;
   let outputTexture;
   let framebuffer;
-  let analysisProgram;
   let program;
   let positionBuffer;
 
   try {
     sourceTexture = createSourceTexture(gl, uri);
-    outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
-    framebuffer = createFramebuffer(gl, outputTexture);
-    analysisProgram = getCachedProgram(session, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
+    // Cached per source image: only the first Black & White or Invert render
+    // of a photo analyses it. Later renders (the other finish, a retry, the
+    // full-size save) go straight to the GPU pass below.
+    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture });
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.viewport(0, 0, analysisWidth, analysisHeight);
-    gl.useProgram(analysisProgram);
+    outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
+    framebuffer = createFramebuffer(gl, outputTexture);
     positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
     gl.bufferData(
@@ -507,31 +560,10 @@ async function renderAdaptiveThresholdOnce({
       gl.STATIC_DRAW
     );
 
-    const positionLocation = gl.getAttribLocation(analysisProgram, 'aPosition');
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
-    gl.uniform1i(gl.getUniformLocation(analysisProgram, 'uTexture'), 0);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // Read only a small analysis image. Paper estimation and interpolation
-    // happen once per image, rather than independently inside every ink pixel.
-    const analysisPixels = new Uint8Array(analysisWidth * analysisHeight * 4);
-    gl.readPixels(0, 0, analysisWidth, analysisHeight, gl.RGBA, gl.UNSIGNED_BYTE, analysisPixels);
-    checkGlError(gl, 'analysing the document background');
-    const paper = estimateBlackAndWhitePaper(analysisPixels, analysisWidth, analysisHeight);
-
     paperTexture = createOutputTexture(gl, paper.width, paper.height);
     gl.texImage2D(
       gl.TEXTURE_2D, 0, gl.RGBA, paper.width, paper.height, 0,
       gl.RGBA, gl.UNSIGNED_BYTE, paper.pixels
-    );
-    gl.bindTexture(gl.TEXTURE_2D, outputTexture);
-    gl.texImage2D(
-      gl.TEXTURE_2D, 0, gl.RGBA, outputSize.width, outputSize.height, 0,
-      gl.RGBA, gl.UNSIGNED_BYTE, null
     );
     checkGlError(gl, 'preparing the document paper map');
 
@@ -617,28 +649,24 @@ async function renderInvertOnce({
     throw new Error('Valid image dimensions are required for Invert enhancement.');
   }
   const { outputSize, destinationToSource } = getEnhancementGeometry(width, height, corners, rotation, getOutputEdge(maxOutputEdge));
-  const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
-  const analysisWidth = Math.max(1, Math.round(width * analysisScale));
-  const analysisHeight = Math.max(1, Math.round(height * analysisScale));
   const GLView = getGLView();
   const { gl } = session;
   let sourceTexture;
   let paperTexture;
   let outputTexture;
   let framebuffer;
-  let analysisProgram;
   let program;
   let positionBuffer;
 
   try {
     sourceTexture = createSourceTexture(gl, uri);
-    outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
-    framebuffer = createFramebuffer(gl, outputTexture);
-    analysisProgram = getCachedProgram(session, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
+    // Cached per source image: only the first Black & White or Invert render
+    // of a photo analyses it. Later renders (the other finish, a retry, the
+    // full-size save) go straight to the GPU pass below.
+    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture });
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.viewport(0, 0, analysisWidth, analysisHeight);
-    gl.useProgram(analysisProgram);
+    outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
+    framebuffer = createFramebuffer(gl, outputTexture);
     positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
     gl.bufferData(
@@ -647,31 +675,10 @@ async function renderInvertOnce({
       gl.STATIC_DRAW
     );
 
-    const positionLocation = gl.getAttribLocation(analysisProgram, 'aPosition');
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
-    gl.uniform1i(gl.getUniformLocation(analysisProgram, 'uTexture'), 0);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // Read only a small analysis image. Paper estimation and interpolation
-    // happen once per image, rather than independently inside every ink pixel.
-    const analysisPixels = new Uint8Array(analysisWidth * analysisHeight * 4);
-    gl.readPixels(0, 0, analysisWidth, analysisHeight, gl.RGBA, gl.UNSIGNED_BYTE, analysisPixels);
-    checkGlError(gl, 'analysing the document background');
-    const paper = estimateBlackAndWhitePaper(analysisPixels, analysisWidth, analysisHeight);
-
     paperTexture = createOutputTexture(gl, paper.width, paper.height);
     gl.texImage2D(
       gl.TEXTURE_2D, 0, gl.RGBA, paper.width, paper.height, 0,
       gl.RGBA, gl.UNSIGNED_BYTE, paper.pixels
-    );
-    gl.bindTexture(gl.TEXTURE_2D, outputTexture);
-    gl.texImage2D(
-      gl.TEXTURE_2D, 0, gl.RGBA, outputSize.width, outputSize.height, 0,
-      gl.RGBA, gl.UNSIGNED_BYTE, null
     );
     checkGlError(gl, 'preparing the document paper map');
 
@@ -742,11 +749,121 @@ async function renderInvertOnce({
   }
 }
 
-function estimateBlackAndWhitePaper(pixels, width, height) {
+/**
+ * The page analysis for one source image: a small GPU pass read back to JS,
+ * then the paper-map estimate. Cached by source (see paperAnalysisCache).
+ * `sourceTexture` is reused when the caller already uploaded the source, so a
+ * first render does not decode it twice. `shouldCancel` is polled while the
+ * estimate yields; a cancelled analysis throws an error flagged
+ * `paperAnalysisCancelled` and caches nothing.
+ */
+async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture = null, shouldCancel }) {
+  const key = getPaperAnalysisKey(uri, width, height);
+  const cached = paperAnalysisCache.get(key);
+  if (cached) {
+    // Most recently used entries are evicted last.
+    paperAnalysisCache.delete(key);
+    paperAnalysisCache.set(key, cached);
+    return cached;
+  }
+
+  const { gl } = session;
+  const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
+  const analysisWidth = Math.max(1, Math.round(width * analysisScale));
+  const analysisHeight = Math.max(1, Math.round(height * analysisScale));
+  const analysisPixels = new Uint8Array(analysisWidth * analysisHeight * 4);
+  let ownTexture;
+  let outputTexture;
+  let framebuffer;
+  let positionBuffer;
+
+  try {
+    const texture = sourceTexture ?? (ownTexture = createSourceTexture(gl, uri));
+    outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
+    framebuffer = createFramebuffer(gl, outputTexture);
+    const analysisProgram = getCachedProgram(session, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.viewport(0, 0, analysisWidth, analysisHeight);
+    gl.useProgram(analysisProgram);
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW
+    );
+
+    const positionLocation = gl.getAttribLocation(analysisProgram, 'aPosition');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(gl.getUniformLocation(analysisProgram, 'uTexture'), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Read only a small analysis image. Paper estimation and interpolation
+    // happen once per image, rather than independently inside every ink pixel.
+    gl.readPixels(0, 0, analysisWidth, analysisHeight, gl.RGBA, gl.UNSIGNED_BYTE, analysisPixels);
+    checkGlError(gl, 'analysing the document background');
+  } finally {
+    try {
+      if (positionBuffer) gl.deleteBuffer(positionBuffer);
+      if (framebuffer) gl.deleteFramebuffer(framebuffer);
+      if (outputTexture) gl.deleteTexture(outputTexture);
+      if (ownTexture) gl.deleteTexture(ownTexture);
+      resetGlState(gl);
+    } catch (cleanupError) {
+      console.warn('[perspective-crop] Analysis cleanup failed', cleanupError);
+    }
+  }
+
+  // All GL objects are released; the rest is JavaScript, cut into slices.
+  const paper = await estimateBlackAndWhitePaperAsync(
+    analysisPixels, analysisWidth, analysisHeight, createTimeSlicer(shouldCancel)
+  );
+  paperAnalysisCache.set(key, paper);
+  while (paperAnalysisCache.size > PAPER_ANALYSIS_CACHE_LIMIT) {
+    paperAnalysisCache.delete(paperAnalysisCache.keys().next().value);
+  }
+  return paper;
+}
+
+/**
+ * Prepares the page analysis for a capture ahead of time, at low priority, so
+ * the first Black & White or Invert render of it needs only the GPU pass.
+ * Resolves 'done', 'cancelled' (by `shouldCancel`, polled between slices of
+ * work) or 'skipped' (a source the renderers would copy first, which would
+ * not share this cache entry).
+ */
+export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel } = {}) {
+  if (!photo?.uri || !(photo.width > 0 && photo.height > 0)) return 'skipped';
+  if (hasPaperAnalysis(photo)) return 'done';
+  const limits = await getGlLimitsAsync();
+  if (!isLocalFileUri(photo.uri) || Math.max(photo.width, photo.height) > limits.maxTextureEdge) {
+    return 'skipped';
+  }
+  return runOnGlSession(async (session) => {
+    try {
+      await ensurePaperAnalysis(session, {
+        uri: photo.uri, width: photo.width, height: photo.height, shouldCancel,
+      });
+      return 'done';
+    } catch (error) {
+      // Resolved, not thrown: a failed task makes the shared GL context start over.
+      if (error?.paperAnalysisCancelled) return 'cancelled';
+      throw error;
+    }
+  }, 'low');
+}
+
+async function estimateBlackAndWhitePaperAsync(pixels, width, height, slice) {
   const luminances = new Float32Array(width * height);
   const neutralities = new Float32Array(width * height);
-  const allValues = [];
-  const borderValues = [];
+  const allValues = new Float64Array(width * height);
+  const borderBuffer = new Float64Array(width * height);
+  let borderCount = 0;
   const border = Math.max(1, Math.round(Math.min(width, height) * 0.04));
 
   for (let y = 0; y < height; y += 1) {
@@ -762,15 +879,22 @@ function estimateBlackAndWhitePaper(pixels, width, height) {
       const saturation = (maximum - Math.min(red, green, blue)) / Math.max(maximum, 0.001);
       luminances[y * width + x] = value;
       neutralities[y * width + x] = Math.max(0, 1 - saturation / 0.30);
-      allValues.push(value);
+      allValues[y * width + x] = value;
       if (x < border || y < border || x >= width - border || y >= height - border) {
-        borderValues.push(value);
+        borderBuffer[borderCount] = value;
+        borderCount += 1;
       }
     }
+    await slice();
   }
 
-  allValues.sort((a, b) => a - b);
-  borderValues.sort((a, b) => a - b);
+  // Typed arrays sort numerically in native code. This replaces a comparator
+  // sort of ~65,000 values in JavaScript, the single largest cost here, and
+  // returns exactly the same ordering.
+  const borderValues = borderBuffer.subarray(0, borderCount);
+  allValues.sort();
+  borderValues.sort();
+  await slice();
   // Use both the page border and its bulk. A large black foreground shape on
   // light paper must not flip polarity merely because it occupies most pixels.
   const backgroundIsDark = paperQuantile(borderValues, 0.60) < 0.35 &&
@@ -847,6 +971,7 @@ function estimateBlackAndWhitePaper(pixels, width, height) {
         neutrality[index] >= 0.60 && paperCoverage[index] >= 0.55 &&
         inkCount >= 1 && inkCount / samples.length <= 0.30 ? 1 : 0;
     }
+    await slice();
   }
 
   // Confirm that shadow candidates belong to a broad, consistent surface.
@@ -883,6 +1008,7 @@ function estimateBlackAndWhitePaper(pixels, width, height) {
   // paper. A dark/gray solid separated by an ink edge cannot seed its own
   // background, while a smooth shadow can extend well below the global level.
   for (let pass = 0; pass < Math.max(gridWidth, gridHeight); pass += 1) {
+    await slice();
     const admitted = [];
     for (let y = 0; y < gridHeight; y += 1) {
       for (let x = 0; x < gridWidth; x += 1) {
@@ -909,6 +1035,7 @@ function estimateBlackAndWhitePaper(pixels, width, height) {
   // their surrounding paper instead of treating their own black interior as
   // the background. Seed cells retain local shadow/illumination information.
   for (let pass = 0; pass < Math.max(gridWidth, gridHeight); pass += 1) {
+    await slice();
     const filled = [];
     for (let y = 0; y < gridHeight; y += 1) {
       for (let x = 0; x < gridWidth; x += 1) {
@@ -953,8 +1080,8 @@ function estimateBlackAndWhitePaper(pixels, width, height) {
       neutrality[index] = 0;
     }
   }
-  const mapPixels = expandBlackAndWhitePaper(
-    paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height
+  const mapPixels = await expandBlackAndWhitePaperAsync(
+    paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height, slice
   );
   return { width, height, pixels: mapPixels, backgroundIsDark };
 }
@@ -1005,7 +1132,9 @@ function fitBlackAndWhitePaperPlane(luminances, width, startX, endX, startY, end
   return { values, slopeX, slopeY };
 }
 
-function expandBlackAndWhitePaper(paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height) {
+async function expandBlackAndWhitePaperAsync(
+  paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height, slice
+) {
   const pixels = new Uint8Array(width * height * 4);
   const clampX = (x) => Math.max(0, Math.min(gridWidth - 1, x));
   const clampY = (y) => Math.max(0, Math.min(gridHeight - 1, y));
@@ -1121,6 +1250,7 @@ function expandBlackAndWhitePaper(paper, noise, neutrality, luminances, gridWidt
       pixels[offset + 2] = Math.round(neutral * 255);
       pixels[offset + 3] = 255;
     }
+    await slice();
   }
   return pixels;
 }

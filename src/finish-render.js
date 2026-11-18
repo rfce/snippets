@@ -5,6 +5,7 @@ import {
   renderInvertAsync,
   renderMagicColorAsync,
   renderPerspectiveCropAsync,
+  yieldToUi,
 } from './perspective-crop';
 
 const FINISH_RENDERERS = {
@@ -36,6 +37,9 @@ export function getGeometryEdits(edits) {
  *   `previewSource` (a downscaled copy) when one is available.
  * - Full-size renders (saves) and `priority: 'low'` work wait behind
  *   on-screen renders on the shared GL context.
+ * - On-screen renders first give the UI one frame, so the state that asked
+ *   for the render (a pressed finish, an "Applying..." label) paints before
+ *   any heavy work starts.
  *
  * Returns the rendered image (`temporary: true`, owned by the caller), or a
  * plain reference to an existing file (no `temporary`, never delete it) when
@@ -55,6 +59,9 @@ export async function renderFinishAsync({
     return { uri: input.uri, width: input.width, height: input.height };
   }
 
+  const renderPriority = priority ?? (preview ? 'high' : 'low');
+  if (renderPriority === 'high') await yieldToUi();
+
   const options = {
     uri: input.uri,
     sourceWidth: input.width,
@@ -63,7 +70,7 @@ export async function renderFinishAsync({
     ...(preview ? { maxOutputEdge: PREVIEW_OUTPUT_EDGE } : {}),
     referenceWidth: source.width,
     referenceHeight: source.height,
-    priority: priority ?? (preview ? 'high' : 'low'),
+    priority: renderPriority,
   };
 
   if (mode === 'original') return renderPerspectiveCropAsync(options);

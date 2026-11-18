@@ -51,6 +51,28 @@ export function getStaleFinishKeys(keys, photos) {
   return [...keys].filter((key) => !current.has(getSignatureFromCacheKey(key)));
 }
 
+// Identifies the page analysis of one source image (matches the renderer's
+// cache), so a photo is analysed once however many finishes use it.
+export function getPhotoAnalysisKey(photo) {
+  return `${photo.uri}|${photo.width}x${photo.height}`;
+}
+
+/**
+ * The next photo whose page analysis is not ready, starting from the image
+ * on screen. `skipped` holds keys that cannot be prepared ahead of time.
+ */
+export function pickNextAnalysisJob({ photos, priorityIndex, hasAnalysis, skipped }) {
+  for (const index of getFinishProcessingOrder(photos?.length ?? 0, priorityIndex)) {
+    // Renders read the original capture; edits are applied on the GPU.
+    const source = photos[index]?.sourcePhoto ?? photos[index];
+    if (!source?.uri || !(source.width > 0 && source.height > 0)) continue;
+    const key = getPhotoAnalysisKey(source);
+    if (skipped.has(key) || hasAnalysis(source)) continue;
+    return { index, source, key };
+  }
+  return null;
+}
+
 // Keeps the save identity of the original capture on the processed file.
 export function createFinishedPhoto(photo, rendered) {
   return {

@@ -3,7 +3,9 @@ import {
   getFinishCacheKey,
   getFinishProcessingOrder,
   getFinishRenderKey,
+  getPhotoAnalysisKey,
   getStaleFinishKeys,
+  pickNextAnalysisJob,
   pickNextFinishJob,
   summarizeFinishes,
 } from '../src/batch-finishes.js';
@@ -81,6 +83,26 @@ export async function runBatchFinishesChecks() {
 
     const original = summarizeFinishes({ photos, mode: 'original', renderKey: 'original', cache, failures, activeKey: null });
     assert(original.selectedPhotos === photos && original.statuses.every((status) => status === null), 'original needs no processing');
+  });
+
+  await check('page analysis is prepared from the viewed image, once per original capture', async () => {
+    const captures = ['a', 'b', 'c', 'd'].map(capture);
+    // Edited photos carry their original capture; analysis belongs to that capture.
+    const photos = captures.map((photo, index) => (index === 1 ? review(photo, 'file:///b-edited.jpg') : review(photo)));
+    const done = new Set([getPhotoAnalysisKey(captures[2])]);
+    const skipped = new Set([getPhotoAnalysisKey(captures[3])]);
+    const pick = (priorityIndex) => pickNextAnalysisJob({
+      photos, priorityIndex, skipped, hasAnalysis: (source) => done.has(getPhotoAnalysisKey(source)),
+    });
+
+    assert(pick(2).index === 0 && pick(2).source === captures[0], 'skips done and unpreparable photos, wraps around');
+    assert(pick(1).index === 1 && pick(1).source.uri === captures[1].uri,
+      'an edited photo is analysed from its original capture, not its edited copy');
+    done.add(getPhotoAnalysisKey(captures[0]));
+    done.add(getPhotoAnalysisKey(captures[1]));
+    assert(pick(0) === null, 'nothing left to prepare');
+    assert(pickNextAnalysisJob({ photos: [], priorityIndex: 0, skipped, hasAnalysis: () => false }) === null,
+      'empty batch');
   });
 
   return passed;
