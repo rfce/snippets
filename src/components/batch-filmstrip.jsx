@@ -43,6 +43,8 @@ export function BatchFilmstrip({
       animated,
     });
   }, [activeIndex, photos.length, size]);
+  // Follow selection and real viewport changes. Content-size notifications
+  // also fire during virtualized scrolling and must not recenter the strip.
   useEffect(() => { revealSelected(true); }, [revealSelected]);
   return (
     <View style={[styles.container, style]}>
@@ -57,10 +59,10 @@ export function BatchFilmstrip({
         horizontal
         style={{ width: '100%', height: size + 4, flexGrow: 0 }}
         onLayout={({ nativeEvent: { layout } }) => {
+          if (viewportWidthRef.current === layout.width) return;
           viewportWidthRef.current = layout.width;
           revealSelected();
         }}
-        onContentSizeChange={() => revealSelected()}
         initialScrollIndex={photos.length ? activeIndex : undefined}
         initialNumToRender={Math.max(1, Math.min(photos.length, 6))}
         maxToRenderPerBatch={4}
