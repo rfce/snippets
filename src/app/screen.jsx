@@ -293,11 +293,11 @@ function CameraScreen() {
     mode: batchFinishMode,
     invertSettings: batchInvertSettings,
     priorityIndex: batchReviewIndex,
-    active: Boolean(batchReviewPhotos),
+    active: Boolean(batchReviewPhotos) && appActive && isFocused && !batchEditorPhotos,
     speculativePhotos: batchReviewPhotos ?? speculativePhotos,
     speculativeMode: rememberedFinish?.mode ?? null,
     speculativeInvertSettings: rememberedFinish?.invertSettings,
-    paused: !speculationIdle,
+    paused: speculationBlocked || !speculationIdle || !isFocused,
     getPendingJobs: () => [batchSavePromiseRef.current],
     onError: (mode, error) => {
       const label = PREVIEW_FILTER_OPTIONS.find((option) => option.value === mode)?.label ?? 'Image enhancement';

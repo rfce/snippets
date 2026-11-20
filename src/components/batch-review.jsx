@@ -167,7 +167,8 @@ export function BatchReviewScreen({
                       source={slide.photo.uri}
                       contentFit="cover"
                       recyclingKey={slide.id}
-                      cachePolicy="memory-disk"
+                      cachePolicy="disk"
+                      enforceEarlyResizing
                       transition={slide.finished ? 160 : 0}
                       accessible={false}
                       style={StyleSheet.absoluteFill}
@@ -178,7 +179,8 @@ export function BatchReviewScreen({
                         source={slide.original.uri}
                         contentFit="cover"
                         recyclingKey={`original:${slide.id}`}
-                        cachePolicy="memory-disk"
+                        cachePolicy="disk"
+                      enforceEarlyResizing
                         transition={0}
                         accessible={false}
                         style={[StyleSheet.absoluteFill, { opacity: comparing ? 1 : 0 }]}

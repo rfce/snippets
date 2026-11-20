@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef } from 'react';
-import { ActivityIndicator, Animated, Easing, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, FlatList, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { hasCustomCrop } from '@/crop-geometry';
@@ -61,12 +61,16 @@ export function BatchFilmstrip({
           revealSelected();
         }}
         onContentSizeChange={() => revealSelected()}
-        initialNumToRender={Math.max(1, Math.min(photos.length, 12))}
-        removeClippedSubviews={false}
+        initialScrollIndex={photos.length ? activeIndex : undefined}
+        initialNumToRender={Math.max(1, Math.min(photos.length, 6))}
+        maxToRenderPerBatch={4}
+        windowSize={3}
+        updateCellsBatchingPeriod={50}
+        removeClippedSubviews={Platform.OS === 'android'}
         showsHorizontalScrollIndicator={false}
         data={photos}
         extraData={extraData}
-        keyExtractor={(item, index) => `${getBatchPhotoId(item)}:${index}`}
+        keyExtractor={(item) => getBatchPhotoId(item)}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={ThumbnailSeparator}
         getItemLayout={(_, index) => ({ length: size, offset: (size + GAP) * index, index })}
@@ -98,6 +102,9 @@ export function BatchFilmstrip({
                 <Image
                   source={item.uri}
                   contentFit="cover"
+                  cachePolicy="disk"
+                  enforceEarlyResizing
+                  priority="low"
                   recyclingKey={item.uri}
                   transition={0}
                   style={[styles.image, { transform: [{ rotate: `${rotation}deg` }] }]}
@@ -117,10 +124,7 @@ export function BatchFilmstrip({
                   />
                 </View>
               ) : null}
-              <AnimatedCount
-                label={String(index + 1).padStart(2, '0')}
-                delay={(index % COUNT_TINTS.length) * 650}
-              />
+              <ThumbnailCount label={String(index + 1).padStart(2, '0')} index={index} />
             </Pressable>
           );
         }}
@@ -133,44 +137,19 @@ function ThumbnailSeparator() {
   return <View style={styles.separator} />;
 }
 
-// Muted, softly saturated shades. Each is dark enough to keep the white
-// numerals above roughly 4:1 contrast; the list starts and ends on the same
-// hue so the loop wraps without a visible jump.
+// Static badges avoid a JavaScript-driven animation loop for every mounted
+// thumbnail while the user is swiping or a native edit is being saved.
 const COUNT_TINTS = [
   '#4A6FA5', '#6B5FA8', '#35786A', '#A85A54', '#7E5626', '#41718C', '#4A6FA5',
 ];
 
-function AnimatedCount({ label, delay = 0 }) {
-  const progress = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    let loop = null;
-    const timer = setTimeout(() => {
-      loop = Animated.loop(Animated.timing(progress, {
-        toValue: COUNT_TINTS.length - 1,
-        duration: 5200,
-        easing: Easing.inOut(Easing.ease),
-        useNativeDriver: false,
-        isInteraction: false,
-      }));
-      loop.start();
-    }, delay);
-    return () => {
-      clearTimeout(timer);
-      loop?.stop();
-    };
-  }, [delay, progress]);
+function ThumbnailCount({ label, index }) {
   return (
-    <Animated.Text
+    <Text
       accessible={false}
-      style={[styles.number, {
-        backgroundColor: progress.interpolate({
-          inputRange: COUNT_TINTS.map((_, index) => index),
-          outputRange: COUNT_TINTS,
-        }),
-      }]}
-    >
+      style={[styles.number, { backgroundColor: COUNT_TINTS[index % COUNT_TINTS.length] }]}>
       {label}
-    </Animated.Text>
+    </Text>
   );
 }
 

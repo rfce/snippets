@@ -127,7 +127,7 @@ function getViewportWithFooter(frame, aspectRatio, padding, footerSpace) {
 // Only this canvas re-renders during a drag. The camera controller, review
 // controls, and source image do not receive a state update for every move.
 export const CropEditor = forwardRef(function CropEditor({
-  photo, initialEdits, disabled, showCropHandles = true, viewportPadding = 28,
+  photo, initialEdits, disabled, showCropHandles = true, renderImage = true, viewportPadding = 28,
   imageRadius = 0, footer = null, footerHeight = 0, footerGap = 12, onCustomCropChange,
 }, ref) {
   const [edits, setEdits] = useState(() => ({
@@ -258,7 +258,7 @@ export const CropEditor = forwardRef(function CropEditor({
         endDrag();
         setFrame({ width: layout.width, height: layout.height });
       }}>
-      {viewport.width > 0 && viewport.height > 0 ? (
+      {renderImage && viewport.width > 0 && viewport.height > 0 ? (
         <>
           <ReviewImage uri={photo.uri} rotation={edits.rotation} radius={imageRadius} {...viewport} />
           {(showCropHandles || customCrop) && (
@@ -328,7 +328,8 @@ const ReviewImage = memo(function ReviewImage({
     <View pointerEvents="none" style={[styles.imageViewport, { width, height, left, top, borderRadius: radius }]}>
       <Image
         contentFit="contain"
-        cachePolicy="memory-disk"
+        cachePolicy="disk"
+        enforceEarlyResizing
         source={{ uri }}
         transition={0}
         onDisplay={onDisplay}

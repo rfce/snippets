@@ -33,6 +33,15 @@ export function getFinishProcessingOrder(count, priorityIndex) {
   return order;
 }
 
+// Idle preparation is deliberately small. Warming a whole stack competes with
+// editing and can cycle through the renderer's bounded paper-analysis cache.
+export function getIdleBatchPhotos(photos, priorityIndex = 0) {
+  const list = photos ?? [];
+  return getFinishProcessingOrder(list.length, priorityIndex)
+    .slice(0, 2)
+    .map((index) => list[index]);
+}
+
 export function pickNextFinishJob({ photos, renderKey, priorityIndex, isSettled }) {
   if (!photos?.length) return null;
   for (const index of getFinishProcessingOrder(photos.length, priorityIndex)) {

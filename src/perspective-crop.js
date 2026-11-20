@@ -108,19 +108,34 @@ export function renderMagicColorAsync(options) {
   return renderWithGlSourceAsync(options, renderMagicColorOnce);
 }
 
+function throwIfRenderCancelled(shouldCancel) {
+  if (!shouldCancel?.()) return;
+  const error = new Error('Image rendering was cancelled.');
+  error.renderCancelled = true;
+  throw error;
+}
+
 async function renderWithGlSourceAsync(options, render) {
+  throwIfRenderCancelled(options.shouldCancel);
   const limits = await getGlLimitsAsync();
+  throwIfRenderCancelled(options.shouldCancel);
   // Source preparation uses the image manipulator, not GL, so it runs before
   // taking a turn on the shared context.
   const prepared = await prepareGlSourceAsync(options, limits);
   try {
+    throwIfRenderCancelled(options.shouldCancel);
     const input = prepared ? {
       ...options,
       uri: prepared.uri,
       sourceWidth: prepared.width,
       sourceHeight: prepared.height,
     } : options;
-    return await runOnGlSession((session) => render(input, session), options.priority);
+    return await runOnGlSession((session) => {
+      // A queued warm-up may no longer be wanted when editing takes priority.
+      // Check before decoding/uploading the original capture into a texture.
+      throwIfRenderCancelled(options.shouldCancel);
+      return render(input, session);
+    }, options.priority);
   } finally {
     if (prepared?.temporary) await cleanupProcessedImagesAsync([prepared]);
   }
@@ -155,9 +170,9 @@ function pumpGlQueue() {
       const session = await getGlSessionAsync();
       next.resolve(await next.task(session));
     } catch (error) {
-      // A failed render may leave the context in an unknown state; start the
-      // next render on a fresh one.
-      invalidateGlSession();
+      // Cancelled renders run their normal finally cleanup. Preserve the
+      // context and compiled shaders; real failures still get a fresh context.
+      if (!error?.renderCancelled && !error?.paperAnalysisCancelled) invalidateGlSession();
       next.reject(error);
     } finally {
       glBusy = false;
@@ -523,6 +538,7 @@ async function renderAdaptiveThresholdOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
+  shouldCancel,
 }, session) {
   if (!uri) {
     throw new Error('A source image is required for black-and-white enhancement.');
@@ -548,7 +564,7 @@ async function renderAdaptiveThresholdOnce({
     // Cached per source image: only the first Black & White or Invert render
     // of a photo analyses it. Later renders (the other finish, a retry, the
     // full-size save) go straight to the GPU pass below.
-    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture });
+    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture, shouldCancel });
 
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
     framebuffer = createFramebuffer(gl, outputTexture);
@@ -637,6 +653,7 @@ async function renderInvertOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
+  shouldCancel,
 }, session) {
   if (!uri) {
     throw new Error('A source image is required for Invert enhancement.');
@@ -663,7 +680,7 @@ async function renderInvertOnce({
     // Cached per source image: only the first Black & White or Invert render
     // of a photo analyses it. Later renders (the other finish, a retry, the
     // full-size save) go straight to the GPU pass below.
-    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture });
+    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture, shouldCancel });
 
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
     framebuffer = createFramebuffer(gl, outputTexture);

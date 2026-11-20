@@ -350,12 +350,13 @@ export function BatchEditor({
                   initialEdits={edits}
                   disabled={busy}
                   showCropHandles={isCropping}
+                  renderImage={isCropping}
                   viewportPadding={CROP_PADDING}
                 />
               </View>
               <View pointerEvents="none" style={StyleSheet.absoluteFill}>
                 <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateX: trackX }] }]}>
-                  {slides.map((slide) => (
+                  {!isCropping && slides.map((slide) => (
                     <View key={`slide:${slide.id}`}
                       style={[StyleSheet.absoluteFill, { transform: [{ translateX: slide.offset }] }]}>
                       {slide.isActive && retainedPreview && retainedStyle &&
@@ -364,7 +365,8 @@ export function BatchEditor({
                           key={`retained:${retainedPreview.uri}`}
                           source={retainedPreview.uri}
                           contentFit="contain"
-                          cachePolicy="memory-disk"
+                          cachePolicy="disk"
+                          enforceEarlyResizing
                           transition={0}
                           accessible={false}
                           style={[retainedStyle, isCropping && styles.hiddenSlide]}
@@ -373,7 +375,8 @@ export function BatchEditor({
                       <Image
                         source={slide.item.uri}
                         contentFit="contain"
-                        cachePolicy="memory-disk"
+                        cachePolicy="disk"
+                          enforceEarlyResizing
                         transition={0}
                         accessible={false}
                         onDisplay={slide.isActive ? () => setRetainedPreview(null) : undefined}

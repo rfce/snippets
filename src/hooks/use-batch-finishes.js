@@ -4,6 +4,7 @@ import {
   createFinishedPhoto,
   getFinishCacheKey,
   getFinishRenderKey,
+  getIdleBatchPhotos,
   getStaleFinishKeys,
   pickNextAnalysisJob,
   pickNextFinishJob,
@@ -33,26 +34,35 @@ function getWorkTarget(input) {
   }
   const mode = input.speculativeMode;
   if (input.paused || !mode || mode === 'original' || !isKnownFinish(mode) || !input.speculativePhotos?.length) return null;
+  const photos = getIdleBatchPhotos(
+    input.speculativePhotos,
+    input.active ? input.priorityIndex : Math.max(0, input.speculativePhotos.length - 2)
+  );
   return {
-    photos: input.speculativePhotos,
+    photos,
     mode,
     invertSettings: input.speculativeInvertSettings,
     renderKey: getFinishRenderKey(mode, input.speculativeInvertSettings),
-    // In Review, start where the person is looking; while capturing, in order.
-    priorityIndex: input.active ? input.priorityIndex : 0,
+    // The idle window is already ordered: current/next in Review, latest shots
+    // in the camera. Only the chosen finish processes the entire batch.
+    priorityIndex: 0,
     priority: 'low',
     speculative: true,
   };
 }
 
-// The photos whose page analysis can be prepared ahead of time: the Review
-// photos while Review is open, otherwise the batch being captured.
+// Idle analysis uses a small window: current/next in Review, latest captures
+// in the camera. The chosen finish still processes the entire batch.
 function getAnalysisTarget(input, skipped) {
   if (input.paused) return null;
-  const photos = input.active ? input.photos : input.speculativePhotos;
+  const candidates = input.active ? input.photos : input.speculativePhotos;
+  const photos = getIdleBatchPhotos(
+    candidates,
+    input.active ? input.priorityIndex : Math.max(0, (candidates?.length ?? 0) - 2)
+  );
   return pickNextAnalysisJob({
     photos,
-    priorityIndex: input.active ? input.priorityIndex : 0,
+    priorityIndex: 0,
     hasAnalysis: hasPaperAnalysis,
     skipped,
   });
@@ -75,10 +85,11 @@ function getAnalysisTarget(input, skipped) {
  * `speculativePhotos` at low priority, for example between shots while
  * capturing a batch. The results share the cache, so choosing that finish
  * in Review is instant. `paused` stops new speculative work (an image
- * already in progress finishes) so captures and animations never compete
- * with it; it never delays the finish on screen in Review.
+ * already in progress is cancelled when possible) so captures and edits do
+ * not compete with it. Only two nearby images are warmed; the selected finish
+ * still processes the full stack, one image at a time.
  *
- * With nothing left to render, idle time prepares each photo's page
+ * With nothing left to render, idle time prepares nearby photos' page
  * analysis (the slow, JavaScript part of Black & White and Invert), so the
  * first tap on either starts straight on the GPU. That work is sliced into
  * short steps and is cancelled the moment a finish is chosen, a shot is
@@ -163,14 +174,22 @@ export function useBatchFinishes({
             const outcome = await prefetchDocumentAnalysisAsync(analysis.source, {
               shouldCancel: () => !isCurrentGeneration() || inputsRef.current.paused || hasUrgentWork(),
             });
+            if (!isCurrentGeneration()) break;
             if (outcome === 'skipped') analysisSkippedRef.current.add(analysis.key);
           } catch (error) {
+            if (!isCurrentGeneration()) break;
             // A failure here only means the first render does the analysis.
             analysisSkippedRef.current.add(analysis.key);
           }
           continue;
         }
 
+        const shouldCancel = () => {
+          if (!isCurrentGeneration()) return true;
+          const current = getWorkTarget(inputsRef.current);
+          return !current || current.renderKey !== target.renderKey ||
+            !current.photos.some((photo) => getFinishCacheKey(photo, current.renderKey) === next.key);
+        };
         setActiveKey(next.key);
         try {
           // Crop, rotation and finish in one preview-size pass from the
@@ -182,15 +201,18 @@ export function useBatchFinishes({
             invertSettings: target.invertSettings,
             size: 'preview',
             priority: target.priority,
+            shouldCancel,
           });
-          if (!isCurrentGeneration()) {
+          if (shouldCancel()) {
             await cleanupProcessedImagesAsync([rendered]);
-            break;
+            if (!isCurrentGeneration()) break;
+            continue;
           }
           cacheRef.current.set(next.key, createFinishedPhoto(next.photo, rendered));
           failuresRef.current.delete(next.key);
         } catch (error) {
           if (!isCurrentGeneration()) break;
+          if (error?.renderCancelled || error?.paperAnalysisCancelled) continue;
           failuresRef.current.set(next.key, error);
           // One alert per finish the person chose; speculative failures stay
           // silent and are retried when that finish is selected.

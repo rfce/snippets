@@ -3,6 +3,7 @@ import {
   getFinishCacheKey,
   getFinishProcessingOrder,
   getFinishRenderKey,
+  getIdleBatchPhotos,
   getPhotoAnalysisKey,
   getStaleFinishKeys,
   pickNextAnalysisJob,
@@ -103,6 +104,38 @@ export async function runBatchFinishesChecks() {
     assert(pick(0) === null, 'nothing left to prepare');
     assert(pickNextAnalysisJob({ photos: [], priorityIndex: 0, skipped, hasAnalysis: () => false }) === null,
       'empty batch');
+  });
+
+  await check('idle work stays bounded for small and large batches and follows the selected image', async () => {
+    for (const count of [20, 65, 200, 1000]) {
+      const photos = Array.from({ length: count }, (_, index) => review(capture(`idle-${index}`)));
+      equal(getIdleBatchPhotos(photos, 7), [photos[7], photos[8]], 'only the current and next image are warmed');
+      equal(getIdleBatchPhotos(photos, count - 1), [photos[count - 1], photos[0]], 'the window wraps at the end');
+      equal(getIdleBatchPhotos(photos, count - 2), photos.slice(-2), 'the camera warms only its latest shots');
+    }
+    equal(getIdleBatchPhotos([]), [], 'no work for an empty batch');
+    const only = review(capture('only'));
+    equal(getIdleBatchPhotos([only]), [only], 'a single page appears once');
+  });
+
+  await check('bounded idle analysis settles even when the full batch exceeds the cache capacity', async () => {
+    const photos = Array.from({ length: 200 }, (_, index) => review(capture(`bounded-${index}`)));
+    const candidates = getIdleBatchPhotos(photos, 0);
+    const cached = new Set(photos.slice(-64).map((photo) => getPhotoAnalysisKey(photo.sourcePhoto)));
+    const skipped = new Set();
+    let completed = 0;
+    for (;;) {
+      const job = pickNextAnalysisJob({
+        photos: candidates, priorityIndex: 0, skipped,
+        hasAnalysis: (source) => cached.has(getPhotoAnalysisKey(source)),
+      });
+      if (!job) break;
+      assert(completed < 2, 'idle preparation must settle instead of cycling through the full stack');
+      cached.add(job.key);
+      while (cached.size > 64) cached.delete(cached.values().next().value);
+      completed += 1;
+    }
+    assert(completed === 2 && cached.size === 64, 'only the nearby pages are prepared and memory stays bounded');
   });
 
   return passed;
