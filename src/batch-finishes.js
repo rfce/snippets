@@ -42,13 +42,15 @@ export function getIdleBatchPhotos(photos, priorityIndex = 0) {
     .map((index) => list[index]);
 }
 
-export function pickNextFinishJob({ photos, renderKey, priorityIndex, isSettled }) {
+export function pickNextFinishJob({ photos, renderKey, priorityIndex, isSettled, speculative = false }) {
   if (!photos?.length) return null;
-  for (const index of getFinishProcessingOrder(photos.length, priorityIndex)) {
+  const order = getFinishProcessingOrder(photos.length, priorityIndex);
+  for (const index of order) {
     const photo = photos[index];
     if (!photo?.uri) continue;
     const key = getFinishCacheKey(photo, renderKey);
-    if (!isSettled(key)) return { index, photo, key };
+    const job = { index, priorityIndex: order[0], speculative };
+    if (!isSettled(key, job)) return { ...job, photo, key };
   }
   return null;
 }

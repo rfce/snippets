@@ -46,12 +46,14 @@ export function getGeometryEdits(edits) {
  * nothing needs rendering (Original with no edits).
  */
 export async function renderFinishAsync({
-  source, previewSource = null, edits, mode = 'original', invertSettings, size = 'full', priority, shouldCancel,
+  source, previewSource = null, edits, mode = 'original', invertSettings, size = 'full', priority, shouldCancel, shouldCancelAnalysis, previewMaxEdge = PREVIEW_OUTPUT_EDGE,
 }) {
   if (!source?.uri) throw new Error('A captured image is required to render a finish.');
   if (!isKnownFinish(mode)) throw new Error(`Unknown finish: ${mode}`);
 
   const preview = size === 'preview';
+  const edge = Number.isFinite(previewMaxEdge)
+    ? Math.max(1, Math.min(PREVIEW_OUTPUT_EDGE, Math.round(previewMaxEdge))) : PREVIEW_OUTPUT_EDGE;
   const input = preview && previewSource?.uri ? previewSource : source;
   const geometry = getGeometryEdits(edits);
 
@@ -67,16 +69,19 @@ export async function renderFinishAsync({
     sourceWidth: input.width,
     sourceHeight: input.height,
     ...(geometry ?? {}),
-    ...(preview ? { maxOutputEdge: PREVIEW_OUTPUT_EDGE } : {}),
+    ...(preview ? { maxOutputEdge: edge } : {}),
+    preview,
     referenceWidth: source.width,
     referenceHeight: source.height,
     priority: renderPriority,
     shouldCancel,
+    shouldCancelAnalysis,
   };
 
-  if (mode === 'original') return renderPerspectiveCropAsync(options);
-  return FINISH_RENDERERS[mode]({
-    ...options,
-    ...(mode === 'invert' ? { settings: invertSettings } : {}),
-  });
+  const rendered = mode === 'original' ? await renderPerspectiveCropAsync(options)
+    : await FINISH_RENDERERS[mode]({
+      ...options,
+      ...(mode === 'invert' ? { settings: invertSettings } : {}),
+    });
+  return preview ? { ...rendered, previewMaxEdge: edge } : rendered;
 }

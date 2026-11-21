@@ -1,5 +1,9 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
+import { estimateBlackAndWhitePaperAsync } from './paper-analysis';
+import { getSharedPaperAnalysisCache } from './paper-analysis-cache';
+import { PREVIEW_OUTPUT_EDGE } from './preview-quality';
+
 import { getInvertPalette } from '@/invert-settings';
 
 // Enhancement exports keep their existing JPEG settings. Crop/rotation
@@ -18,14 +22,13 @@ const NORMALIZED_SOURCE_COMPRESS = 0.95;
 // On-screen results (Preview, Edit image, Review) render at this long edge:
 // sharp on a phone screen at a quarter of the pixels of a full-size render.
 // Saving always renders at full size from the original capture.
-export const PREVIEW_OUTPUT_EDGE = 2048;
+export { PREVIEW_OUTPUT_EDGE };
 
 // --- Keeping the UI responsive during document analysis -------------------
 // Black & White and Invert analyse the page in JavaScript. That work is cut
 // into slices of about SLICE_BUDGET_MS, yielding to the event loop in between,
 // so taps, animations and React commits are never held up behind it.
 const SLICE_BUDGET_MS = 8;
-const PAPER_ANALYSIS_CACHE_LIMIT = 64;
 
 const getNow = () => (typeof performance !== 'undefined' && performance.now
   ? performance.now() : Date.now());
@@ -66,7 +69,7 @@ export function yieldToUi() {
 // The page analysis depends only on the source image, so it is computed once
 // per image and reused by every Black & White and Invert render of it
 // (previews, switching between the two, and the full-size save).
-const paperAnalysisCache = new Map();
+const paperAnalysisCache = getSharedPaperAnalysisCache();
 
 function getPaperAnalysisKey(uri, width, height) {
   return `${uri}|${width}x${height}`;
@@ -77,7 +80,6 @@ export function hasPaperAnalysis(photo) {
     paperAnalysisCache.has(getPaperAnalysisKey(photo.uri, photo.width, photo.height));
 }
 const BLACK_AND_WHITE_ANALYSIS_EDGE = 256;
-const BLACK_AND_WHITE_PAPER_GRID = 32;
 const SNAPSHOT_OPTIONS = {
   format: 'jpeg',
   compress: 0.92,
@@ -124,12 +126,17 @@ async function renderWithGlSourceAsync(options, render) {
   const prepared = await prepareGlSourceAsync(options, limits);
   try {
     throwIfRenderCancelled(options.shouldCancel);
+    // Normalization can create a new temporary URI on every render. Keep the
+    // analysis tied to the source before that copy, so saves reuse previews.
+    const analysisKey = options.analysisKey ??
+      getPaperAnalysisKey(options.uri, options.sourceWidth, options.sourceHeight);
     const input = prepared ? {
       ...options,
+      analysisKey,
       uri: prepared.uri,
       sourceWidth: prepared.width,
       sourceHeight: prepared.height,
-    } : options;
+    } : { ...options, analysisKey };
     return await runOnGlSession((session) => {
       // A queued warm-up may no longer be wanted when editing takes priority.
       // Check before decoding/uploading the original capture into a texture.
@@ -538,7 +545,9 @@ async function renderAdaptiveThresholdOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
+  analysisKey,
   shouldCancel,
+  shouldCancelAnalysis = shouldCancel,
 }, session) {
   if (!uri) {
     throw new Error('A source image is required for black-and-white enhancement.');
@@ -564,7 +573,12 @@ async function renderAdaptiveThresholdOnce({
     // Cached per source image: only the first Black & White or Invert render
     // of a photo analyses it. Later renders (the other finish, a retry, the
     // full-size save) go straight to the GPU pass below.
-    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture, shouldCancel });
+    const paper = await ensurePaperAnalysis(session, {
+      uri, width, height, sourceTexture, analysisKey, shouldCancel: shouldCancelAnalysis,
+    });
+    // A different finish may need the same analysis. Finish that shared work,
+    // then skip this obsolete coloring pass before allocating its output.
+    throwIfRenderCancelled(shouldCancel);
 
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
     framebuffer = createFramebuffer(gl, outputTexture);
@@ -653,7 +667,10 @@ async function renderInvertOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
+  analysisKey,
+  preview = false,
   shouldCancel,
+  shouldCancelAnalysis = shouldCancel,
 }, session) {
   if (!uri) {
     throw new Error('A source image is required for Invert enhancement.');
@@ -680,7 +697,12 @@ async function renderInvertOnce({
     // Cached per source image: only the first Black & White or Invert render
     // of a photo analyses it. Later renders (the other finish, a retry, the
     // full-size save) go straight to the GPU pass below.
-    const paper = await ensurePaperAnalysis(session, { uri, width, height, sourceTexture, shouldCancel });
+    const paper = await ensurePaperAnalysis(session, {
+      uri, width, height, sourceTexture, analysisKey, shouldCancel: shouldCancelAnalysis,
+    });
+    // A different finish may need the same analysis. Finish that shared work,
+    // then skip this obsolete coloring pass before allocating its output.
+    throwIfRenderCancelled(shouldCancel);
 
     outputTexture = createOutputTexture(gl, outputSize.width, outputSize.height);
     framebuffer = createFramebuffer(gl, outputTexture);
@@ -734,8 +756,8 @@ async function renderInvertOnce({
     checkGlError(gl, 'rendering Invert');
 
     const snapshot = await GLView.takeSnapshotAsync(gl, {
-      format: 'png',
-      compress: 1,
+      format: preview ? 'jpeg' : 'png',
+      compress: preview ? 0.95 : 1,
       flip: false,
       framebuffer,
       rect: { x: 0, y: 0, width: outputSize.width, height: outputSize.height },
@@ -774,15 +796,10 @@ async function renderInvertOnce({
  * estimate yields; a cancelled analysis throws an error flagged
  * `paperAnalysisCancelled` and caches nothing.
  */
-async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture = null, shouldCancel }) {
-  const key = getPaperAnalysisKey(uri, width, height);
-  const cached = paperAnalysisCache.get(key);
-  if (cached) {
-    // Most recently used entries are evicted last.
-    paperAnalysisCache.delete(key);
-    paperAnalysisCache.set(key, cached);
-    return cached;
-  }
+async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture = null, analysisKey, shouldCancel }) {
+  const key = analysisKey ?? getPaperAnalysisKey(uri, width, height);
+  const cached = await paperAnalysisCache.get(key);
+  if (cached) return cached;
 
   const { gl } = session;
   const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
@@ -840,10 +857,7 @@ async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture 
   const paper = await estimateBlackAndWhitePaperAsync(
     analysisPixels, analysisWidth, analysisHeight, createTimeSlicer(shouldCancel)
   );
-  paperAnalysisCache.set(key, paper);
-  while (paperAnalysisCache.size > PAPER_ANALYSIS_CACHE_LIMIT) {
-    paperAnalysisCache.delete(paperAnalysisCache.keys().next().value);
-  }
+  await paperAnalysisCache.set(key, paper);
   return paper;
 }
 
@@ -857,6 +871,8 @@ async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture 
 export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel } = {}) {
   if (!photo?.uri || !(photo.width > 0 && photo.height > 0)) return 'skipped';
   if (hasPaperAnalysis(photo)) return 'done';
+  if (shouldCancel?.()) return 'cancelled';
+  if (await paperAnalysisCache.get(getPaperAnalysisKey(photo.uri, photo.width, photo.height))) return 'done';
   const limits = await getGlLimitsAsync();
   if (!isLocalFileUri(photo.uri) || Math.max(photo.width, photo.height) > limits.maxTextureEdge) {
     return 'skipped';
@@ -876,407 +892,6 @@ export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel } = {}
       throw error;
     }
   }, 'low');
-}
-
-async function estimateBlackAndWhitePaperAsync(pixels, width, height, slice) {
-  const luminances = new Float32Array(width * height);
-  const neutralities = new Float32Array(width * height);
-  const allValues = new Float64Array(width * height);
-  const borderBuffer = new Float64Array(width * height);
-  let borderCount = 0;
-  const border = Math.max(1, Math.round(Math.min(width, height) * 0.04));
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      // readPixels is bottom-up; localUri textures and the paper map use
-      // top-to-bottom image coordinates throughout the crop/enhancement flow.
-      const offset = ((height - 1 - y) * width + x) * 4;
-      const red = pixels[offset] / 255;
-      const green = pixels[offset + 1] / 255;
-      const blue = pixels[offset + 2] / 255;
-      const value = red * 0.299 + green * 0.587 + blue * 0.114;
-      const maximum = Math.max(red, green, blue);
-      const saturation = (maximum - Math.min(red, green, blue)) / Math.max(maximum, 0.001);
-      luminances[y * width + x] = value;
-      neutralities[y * width + x] = Math.max(0, 1 - saturation / 0.30);
-      allValues[y * width + x] = value;
-      if (x < border || y < border || x >= width - border || y >= height - border) {
-        borderBuffer[borderCount] = value;
-        borderCount += 1;
-      }
-    }
-    await slice();
-  }
-
-  // Typed arrays sort numerically in native code. This replaces a comparator
-  // sort of ~65,000 values in JavaScript, the single largest cost here, and
-  // returns exactly the same ordering.
-  const borderValues = borderBuffer.subarray(0, borderCount);
-  allValues.sort();
-  borderValues.sort();
-  await slice();
-  // Use both the page border and its bulk. A large black foreground shape on
-  // light paper must not flip polarity merely because it occupies most pixels.
-  const backgroundIsDark = paperQuantile(borderValues, 0.60) < 0.35 &&
-    paperQuantile(allValues, 0.60) < 0.40;
-  if (backgroundIsDark) {
-    for (let index = 0; index < luminances.length; index += 1) {
-      luminances[index] = 1 - luminances[index];
-    }
-    for (const values of [allValues, borderValues]) {
-      for (let index = 0; index < values.length; index += 1) values[index] = 1 - values[index];
-      values.reverse();
-    }
-  }
-  const globalPaper = Math.max(0.08, paperQuantile(allValues, 0.85), paperQuantile(borderValues, 0.60));
-  // Every cell needs a neighborhood, even for very wide/tall gallery images.
-  // A one-analysis-pixel cell could otherwise mistake a sampled faint stroke
-  // for an entire strip of paper.
-  const gridWidth = Math.min(BLACK_AND_WHITE_PAPER_GRID, Math.ceil(width / 8));
-  const gridHeight = Math.min(BLACK_AND_WHITE_PAPER_GRID, Math.ceil(height / 8));
-  const count = gridWidth * gridHeight;
-  const paper = new Float32Array(count);
-  const noise = new Float32Array(count);
-  const neutrality = new Float32Array(count);
-  const known = new Uint8Array(count);
-  const shadowPaper = new Uint8Array(count);
-  const paperCoverage = new Float32Array(count);
-
-  for (let gy = 0; gy < gridHeight; gy += 1) {
-    for (let gx = 0; gx < gridWidth; gx += 1) {
-      let samples = [];
-      const startX = Math.floor(gx * width / gridWidth);
-      const endX = Math.floor((gx + 1) * width / gridWidth);
-      const startY = Math.floor(gy * height / gridHeight);
-      const endY = Math.floor((gy + 1) * height / gridHeight);
-      for (let y = startY; y < endY; y += 1) {
-        for (let x = startX; x < endX; x += 1) samples.push(luminances[y * width + x]);
-      }
-      samples.sort((a, b) => a - b);
-      const plane = fitBlackAndWhitePaperPlane(luminances, width, startX, endX, startY, endY);
-      if (plane) samples = plane.values;
-      // An upper quantile rejects strokes without letting one specular pixel
-      // set the background. The median of the paper cluster removes the
-      // quantile's upward bias on textured paper and smooth lighting gradients.
-      const upper = paperQuantile(samples, 0.80);
-      const paperSamples = samples.filter((value) => Math.abs(value - upper) <= 0.04);
-      const level = paperQuantile(paperSamples, 0.50);
-      const index = gy * gridWidth + gx;
-      const deviations = paperSamples.map((value) => Math.abs(value - level)).sort((a, b) => a - b);
-      paper[index] = Math.max(0, Math.min(1, level));
-      noise[index] = Math.min(0.08, Math.max(0.002, paperQuantile(deviations, 0.50) * 1.4826));
-      let neutralSum = 0;
-      let paperCount = 0;
-      for (let y = startY; y < endY; y += 1) {
-        for (let x = startX; x < endX; x += 1) {
-          const sampleIndex = y * width + x;
-          const corrected = luminances[sampleIndex] -
-            (plane?.slopeX ?? 0) * (x - (startX + endX - 1) * 0.5) -
-            (plane?.slopeY ?? 0) * (y - (startY + endY - 1) * 0.5);
-          if (Math.abs(corrected - level) <= 0.04) {
-            neutralSum += neutralities[sampleIndex];
-            paperCount += 1;
-          }
-        }
-      }
-      neutrality[index] = paperCount ? neutralSum / paperCount : 0;
-      paperCoverage[index] = paperCount / samples.length;
-      known[index] = plane || level >= Math.max(0.08, globalPaper * 0.88) ? 1 : 0;
-      // A stable midtone with a minority of darker strokes is paper carrying
-      // text, even when a cast shadow separates it from the lit page. A uniform
-      // filled mark has no darker-stroke evidence and cannot seed this path.
-      const inkGap = Math.max(0.006, noise[index] * 3.5, level * 0.02);
-      const inkCount = samples.filter((value) => value < level - inkGap).length;
-      shadowPaper[index] = level >= Math.max(0.12, globalPaper * 0.18) &&
-        neutrality[index] >= 0.60 && paperCoverage[index] >= 0.55 &&
-        inkCount >= 1 && inkCount / samples.length <= 0.30 ? 1 : 0;
-    }
-    await slice();
-  }
-
-  // Confirm that shadow candidates belong to a broad, consistent surface.
-  // Neutral plateaus continuing to the page edge also provide a reference for
-  // blank shadowed margins. Near-black fills remain excluded from both paths.
-  const shadowSeeds = [];
-  for (let y = 0; y < gridHeight; y += 1) {
-    for (let x = 0; x < gridWidth; x += 1) {
-      const index = y * gridWidth + x;
-      if (known[index]) continue;
-      const atEdge = x === 0 || y === 0 || x === gridWidth - 1 || y === gridHeight - 1;
-      const edgePaper = atEdge && paperCoverage[index] >= 0.80 &&
-        neutrality[index] >= 0.65 && paper[index] >= Math.max(0.18, globalPaper * 0.25);
-      if (!shadowPaper[index] && !edgePaper) continue;
-      let surfaceSupport = 0;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if ((dx === 0 && dy === 0) || nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
-          const neighbor = ny * gridWidth + nx;
-          const tolerance = 0.04 + Math.min(0.025, noise[index] + noise[neighbor]);
-          if (neutrality[neighbor] >= 0.60 && Math.abs(paper[index] - paper[neighbor]) <= tolerance) {
-            surfaceSupport += 1;
-          }
-        }
-      }
-      if (surfaceSupport >= 3) shadowSeeds.push(index);
-    }
-  }
-  for (const index of shadowSeeds) known[index] = 1;
-
-  // Admit darker paper only along a gradual lighting transition from trusted
-  // paper. A dark/gray solid separated by an ink edge cannot seed its own
-  // background, while a smooth shadow can extend well below the global level.
-  for (let pass = 0; pass < Math.max(gridWidth, gridHeight); pass += 1) {
-    await slice();
-    const admitted = [];
-    for (let y = 0; y < gridHeight; y += 1) {
-      for (let x = 0; x < gridWidth; x += 1) {
-        const index = y * gridWidth + x;
-        if (known[index] || paper[index] < 0.08) continue;
-        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
-          const neighbor = ny * gridWidth + nx;
-          const tolerance = 0.035 + Math.min(0.025, noise[index] + noise[neighbor]);
-          if (known[neighbor] && Math.abs(paper[index] - paper[neighbor]) <= tolerance) {
-            admitted.push(index);
-            break;
-          }
-        }
-      }
-    }
-    if (!admitted.length) break;
-    for (const index of admitted) known[index] = 1;
-  }
-
-  // Inpaint only cells without plausible paper. Filled ink regions inherit
-  // their surrounding paper instead of treating their own black interior as
-  // the background. Seed cells retain local shadow/illumination information.
-  for (let pass = 0; pass < Math.max(gridWidth, gridHeight); pass += 1) {
-    await slice();
-    const filled = [];
-    for (let y = 0; y < gridHeight; y += 1) {
-      for (let x = 0; x < gridWidth; x += 1) {
-        const index = y * gridWidth + x;
-        if (known[index]) continue;
-        let weightSum = 0;
-        let paperSum = 0;
-        let noiseSum = 0;
-        let neutralSum = 0;
-        for (let dy = -1; dy <= 1; dy += 1) {
-          for (let dx = -1; dx <= 1; dx += 1) {
-            const nx = x + dx;
-            const ny = y + dy;
-            if ((dx === 0 && dy === 0) || nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
-            const neighbor = ny * gridWidth + nx;
-            if (!known[neighbor]) continue;
-            const weight = dx === 0 || dy === 0 ? 1 : 0.7071;
-            paperSum += paper[neighbor] * weight;
-            noiseSum += noise[neighbor] * weight;
-            neutralSum += neutrality[neighbor] * weight;
-            weightSum += weight;
-          }
-        }
-        if (weightSum) filled.push([index, paperSum / weightSum, noiseSum / weightSum, neutralSum / weightSum]);
-      }
-    }
-    if (!filled.length) break;
-    for (const [index, level, deviation, neutral] of filled) {
-      paper[index] = level;
-      noise[index] = deviation;
-      neutrality[index] = neutral;
-      known[index] = 1;
-    }
-  }
-
-  // Resolve fallbacks before expanding the map so an unknown region cannot
-  // bleed a zero paper/noise reference into its neighbors.
-  for (let index = 0; index < count; index += 1) {
-    if (!known[index]) {
-      paper[index] = globalPaper;
-      noise[index] = 0.002;
-      neutrality[index] = 0;
-    }
-  }
-  const mapPixels = await expandBlackAndWhitePaperAsync(
-    paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height, slice
-  );
-  return { width, height, pixels: mapPixels, backgroundIsDark };
-}
-
-function fitBlackAndWhitePaperPlane(luminances, width, startX, endX, startY, endY) {
-  const rows = Array.from({ length: endY - startY }, () => []);
-  const columns = Array.from({ length: endX - startX }, () => []);
-  for (let y = startY; y < endY; y += 1) {
-    for (let x = startX; x < endX; x += 1) {
-      const value = luminances[y * width + x];
-      rows[y - startY].push(value);
-      columns[x - startX].push(value);
-    }
-  }
-  const paperLevels = (groups) => groups.map((values) =>
-    paperQuantile(values.sort((a, b) => a - b), 0.80)
-  );
-  const robustSlope = (levels) => {
-    const slopes = [];
-    for (let first = 0; first < levels.length; first += 1) {
-      for (let second = first + 1; second < levels.length; second += 1) {
-        slopes.push((levels[second] - levels[first]) / (second - first));
-      }
-    }
-    return paperQuantile(slopes.sort((a, b) => a - b), 0.50);
-  };
-  const slopeX = robustSlope(paperLevels(columns));
-  const slopeY = robustSlope(paperLevels(rows));
-  const range = Math.abs(slopeX) * (endX - startX - 1) + Math.abs(slopeY) * (endY - startY - 1);
-  if (range < 0.025 || range > 0.60) return null;
-
-  // Estimate noise after removing the lighting slope. A steep penumbra must
-  // not look like noisy paper or lose its darker half during quantile sampling.
-  // Median pairwise slopes tolerate rows/columns containing text.
-  const values = [];
-  const centerX = (startX + endX - 1) * 0.5;
-  const centerY = (startY + endY - 1) * 0.5;
-  for (let y = startY; y < endY; y += 1) {
-    for (let x = startX; x < endX; x += 1) {
-      values.push(luminances[y * width + x] - slopeX * (x - centerX) - slopeY * (y - centerY));
-    }
-  }
-  values.sort((a, b) => a - b);
-  const upper = paperQuantile(values, 0.80);
-  const paperValues = values.filter((value) => Math.abs(value - upper) <= 0.025);
-  const level = paperQuantile(paperValues, 0.50);
-  if (paperValues.length / values.length < 0.65 || level < 0.12 || level > 1.02) return null;
-  return { values, slopeX, slopeY };
-}
-
-async function expandBlackAndWhitePaperAsync(
-  paper, noise, neutrality, luminances, gridWidth, gridHeight, width, height, slice
-) {
-  const pixels = new Uint8Array(width * height * 4);
-  const clampX = (x) => Math.max(0, Math.min(gridWidth - 1, x));
-  const clampY = (y) => Math.max(0, Math.min(gridHeight - 1, y));
-  const sourceAt = (x, y) => luminances[
-    Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))
-  ];
-  const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  for (let y = 0; y < height; y += 1) {
-    const gy = (y + 0.5) * gridHeight / height - 0.5;
-    const iy = Math.floor(gy);
-    const fy = gy - iy;
-    for (let x = 0; x < width; x += 1) {
-      const gx = (x + 0.5) * gridWidth / width - 0.5;
-      const ix = Math.floor(gx);
-      const fx = gx - ix;
-      let level = 0;
-      let deviation = 0;
-      let neutral = 0;
-      for (let dy = 0; dy <= 1; dy += 1) {
-        for (let dx = 0; dx <= 1; dx += 1) {
-          const index = clampY(iy + dy) * gridWidth + clampX(ix + dx);
-          const weight = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
-          level += paper[index] * weight;
-          deviation += noise[index] * weight;
-          neutral += neutrality[index] * weight;
-        }
-      }
-      const centerX = Math.round(gx);
-      const centerY = Math.round(gy);
-      let lowest = 1;
-      let highest = 0;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const index = clampY(centerY + dy) * gridWidth + clampX(centerX + dx);
-          lowest = Math.min(lowest, paper[index]);
-          highest = Math.max(highest, paper[index]);
-        }
-      }
-      if (highest - lowest > 0.025) {
-        // At a cast-shadow edge, ordinary interpolation mixes lit paper into
-        // dark paper, creating a false gray band. Guide the interpolation by
-        // the observed brightness; keep ordinary interpolation for gradients.
-        let weightSum = 0;
-        let paperSum = 0;
-        let noiseSum = 0;
-        let neutralSum = 0;
-        const intensity = luminances[y * width + x];
-        for (let dy = -1; dy <= 1; dy += 1) {
-          for (let dx = -1; dx <= 1; dx += 1) {
-            const nx = centerX + dx;
-            const ny = centerY + dy;
-            if (nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight) continue;
-            const index = ny * gridWidth + nx;
-            const distance = (nx - gx) ** 2 + (ny - gy) ** 2;
-            const difference = Math.abs(paper[index] - intensity) / Math.max(0.018, noise[index] * 4);
-            const weight = 1 / ((1 + distance * 4) * (1 + difference ** 4));
-            paperSum += paper[index] * weight;
-            noiseSum += noise[index] * weight;
-            neutralSum += neutrality[index] * weight;
-            weightSum += weight;
-          }
-        }
-        if (weightSum) {
-          level = paperSum / weightSum;
-          deviation = noiseSum / weightSum;
-          neutral = neutralSum / weightSum;
-        }
-        // A penumbra can change faster than the coarse grid. Opposite paper
-        // samples recover that local lighting slope while cancelling its
-        // gradient. Reject one-sided bright jumps at a hard shadow boundary;
-        // allow two bright sides to recover the paper across a narrow stroke.
-        if (intensity > lowest * 0.80 && intensity <= highest + 0.02) {
-          let localPaper = level;
-          // Keep a model that already matches the local paper. At a shadow
-          // boundary, prefer the darker valid paper pair over one mixing in
-          // the lit side; an inflated reference would promote show-through.
-          let lightingError = Math.abs(level - intensity);
-          let strokePaper = Infinity;
-          let hasLocalPaper = false;
-          let hasStrokePaper = false;
-          // This tests for paper on both sides of a stroke, not final ink.
-          // Analysis downsampling can halve a thin pencil stroke's contrast;
-          // the final shader still applies the stricter paper-noise threshold.
-          const contrastGap = Math.max(0.003, deviation * 1.5, intensity * 0.008);
-          for (const [dx, dy] of directions) {
-            const first = sourceAt(x - dx, y - dy);
-            const second = sourceAt(x + dx, y + dy);
-            const mean = (first + second) * 0.5;
-            const difference = mean - intensity;
-            const followsLighting = difference >= -0.01 &&
-              difference <= Math.max(0.04, intensity * 0.12);
-            const spansStroke = Math.min(first, second) > intensity + contrastGap;
-            const spansSlopedStroke = Math.min(first, second) < intensity - contrastGap &&
-              difference > contrastGap && difference <= Math.max(0.06, intensity * 0.12);
-            if (spansStroke || spansSlopedStroke) {
-              strokePaper = Math.min(strokePaper, mean);
-              hasStrokePaper = true;
-            }
-            if (followsLighting && Math.abs(difference) < lightingError) {
-              localPaper = mean;
-              lightingError = Math.abs(difference);
-              hasLocalPaper = true;
-            }
-          }
-          if (hasStrokePaper) level = Math.max(lowest, Math.min(highest, strokePaper));
-          else if (hasLocalPaper) level = Math.max(lowest, Math.min(highest, localPaper));
-        }
-      }
-      const offset = (y * width + x) * 4;
-      pixels[offset] = Math.round(level * 255);
-      // Encode small paper-noise values with enough precision in RGBA8.
-      pixels[offset + 1] = Math.round(Math.min(1, deviation * 8) * 255);
-      pixels[offset + 2] = Math.round(neutral * 255);
-      pixels[offset + 3] = 255;
-    }
-    await slice();
-  }
-  return pixels;
-}
-
-function paperQuantile(sortedValues, fraction) {
-  return sortedValues[Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * fraction))] ?? 0;
 }
 
 async function renderMagicColorOnce({

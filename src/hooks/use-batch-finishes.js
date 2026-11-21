@@ -5,6 +5,7 @@ import {
   getFinishCacheKey,
   getFinishRenderKey,
   getIdleBatchPhotos,
+  getPhotoAnalysisKey,
   getStaleFinishKeys,
   pickNextAnalysisJob,
   pickNextFinishJob,
@@ -12,6 +13,7 @@ import {
 } from '@/batch-finishes';
 import { releaseTemporaryImagesAsync } from '@/batch-workflow';
 import { isKnownFinish, renderFinishAsync } from '@/finish-render';
+import { getBatchPreviewEdge, isBatchPreviewReady, PREVIEW_OUTPUT_EDGE } from '@/preview-quality';
 import {
   cleanupProcessedImagesAsync,
   hasPaperAnalysis,
@@ -101,6 +103,8 @@ export function useBatchFinishes({
 }) {
   const renderKey = getFinishRenderKey(mode, invertSettings);
   const cacheRef = useRef(new Map());
+  // Keep replaced files owned until reset; a decoded view may still be using them.
+  const supersededFilesRef = useRef(new Map());
   const failuresRef = useRef(new Map());
   const alertedRenderKeysRef = useRef(new Set());
   // Photos whose analysis cannot be prepared ahead of time (or failed to).
@@ -135,14 +139,22 @@ export function useBatchFinishes({
   }, []);
 
   const isSettled = useCallback(
-    (key) => cacheRef.current.has(key) || failuresRef.current.has(key), []
+    (key, job) => failuresRef.current.has(key) || isBatchPreviewReady(cacheRef.current.get(key), job), []
   );
 
   // A finish the person chose that still has images to process. Anything
   // else (speculation, analysis) yields to it immediately.
-  const hasUrgentWork = useCallback(() => {
+  const getUrgentWork = useCallback(() => {
     const target = getWorkTarget(inputsRef.current);
-    return Boolean(target && !target.speculative && pickNextFinishJob({ ...target, isSettled }));
+    if (!target || target.speculative) return null;
+    const next = pickNextFinishJob({ ...target, isSettled });
+    if (!next) return null;
+    const source = next.photo.sourcePhoto ?? next.photo;
+    return {
+      ...next,
+      analysisKey: target.mode === 'blackAndWhite' || target.mode === 'invert'
+        ? getPhotoAnalysisKey(source) : null,
+    };
   }, [isSettled]);
 
   const hasPendingWork = useCallback(() => {
@@ -172,7 +184,13 @@ export function useBatchFinishes({
           if (!analysis) break;
           try {
             const outcome = await prefetchDocumentAnalysisAsync(analysis.source, {
-              shouldCancel: () => !isCurrentGeneration() || inputsRef.current.paused || hasUrgentWork(),
+              shouldCancel: () => {
+                if (!isCurrentGeneration()) return true;
+                const urgent = getUrgentWork();
+                // Choosing a finish for this source promotes the work already
+                // running instead of discarding its partial analysis.
+                return urgent ? urgent.analysisKey !== analysis.key : inputsRef.current.paused;
+              },
             });
             if (!isCurrentGeneration()) break;
             if (outcome === 'skipped') analysisSkippedRef.current.add(analysis.key);
@@ -187,26 +205,43 @@ export function useBatchFinishes({
         const shouldCancel = () => {
           if (!isCurrentGeneration()) return true;
           const current = getWorkTarget(inputsRef.current);
-          return !current || current.renderKey !== target.renderKey ||
-            !current.photos.some((photo) => getFinishCacheKey(photo, current.renderKey) === next.key);
+          if (!current || current.renderKey !== target.renderKey) return true;
+          // A stable Review array needs no per-slice scan or cache-key allocation.
+          if (current.photos === target.photos) return false;
+          return !current.photos.some((photo) => getFinishCacheKey(photo, current.renderKey) === next.key);
         };
+        const source = next.photo.sourcePhoto ?? next.photo;
+        const sourceAnalysisKey = getPhotoAnalysisKey(source);
+        const shouldCancelAnalysis = () => {
+          if (!isCurrentGeneration()) return true;
+          if (!shouldCancel()) return false;
+          const urgent = getUrgentWork();
+          return urgent?.analysisKey !== sourceAnalysisKey;
+        };
+        const previewMaxEdge = getBatchPreviewEdge(next);
         setActiveKey(next.key);
         try {
           // Crop, rotation and finish in one preview-size pass from the
           // original capture; the crop is metadata on the Review photo.
           const rendered = await renderFinishAsync({
-            source: next.photo.sourcePhoto ?? next.photo,
+            source,
             edits: next.photo.edits,
             mode: target.mode,
             invertSettings: target.invertSettings,
             size: 'preview',
-            priority: target.priority,
+            priority: previewMaxEdge === PREVIEW_OUTPUT_EDGE ? 'high' : 'low',
+            previewMaxEdge,
             shouldCancel,
+            shouldCancelAnalysis,
           });
           if (shouldCancel()) {
             await cleanupProcessedImagesAsync([rendered]);
             if (!isCurrentGeneration()) break;
             continue;
+          }
+          const previous = cacheRef.current.get(next.key);
+          if (previous?.temporary && previous.uri !== rendered.uri) {
+            supersededFilesRef.current.set(previous.uri, previous);
           }
           cacheRef.current.set(next.key, createFinishedPhoto(next.photo, rendered));
           failuresRef.current.delete(next.key);
@@ -230,7 +265,7 @@ export function useBatchFinishes({
       if (isCurrentGeneration() && hasPendingWork()) run();
     });
     runningRef.current = job;
-  }, [hasPendingWork, hasUrgentWork, isSettled, publish]);
+  }, [hasPendingWork, getUrgentWork, isSettled, publish]);
 
   const speculativeRenderKey = speculativeMode
     ? getFinishRenderKey(speculativeMode, speculativeInvertSettings) : null;
@@ -244,8 +279,9 @@ export function useBatchFinishes({
     return () => {
       mountedRef.current = false;
       generationRef.current += 1;
-      const files = [...cacheRef.current.values()];
+      const files = [...cacheRef.current.values(), ...supersededFilesRef.current.values()];
       cacheRef.current.clear();
+      supersededFilesRef.current.clear();
       failuresRef.current.clear();
       releaseFiles(files);
     };
@@ -265,8 +301,9 @@ export function useBatchFinishes({
   /** Ends the batch session: cancels queued work and releases every result. */
   const reset = useCallback(() => {
     generationRef.current += 1;
-    const files = [...cacheRef.current.values()];
+    const files = [...cacheRef.current.values(), ...supersededFilesRef.current.values()];
     cacheRef.current.clear();
+    supersededFilesRef.current.clear();
     failuresRef.current.clear();
     alertedRenderKeysRef.current.clear();
     analysisSkippedRef.current.clear();
