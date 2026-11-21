@@ -2,6 +2,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 import { estimateBlackAndWhitePaperAsync } from './paper-analysis';
 import { getSharedPaperAnalysisCache } from './paper-analysis-cache';
+import { createPaperAnalysisQueue } from './paper-analysis-jobs';
 import { PREVIEW_OUTPUT_EDGE } from './preview-quality';
 
 import { getInvertPalette } from '@/invert-settings';
@@ -33,17 +34,21 @@ const SLICE_BUDGET_MS = 8;
 const getNow = () => (typeof performance !== 'undefined' && performance.now
   ? performance.now() : Date.now());
 
-function createTimeSlicer(shouldCancel) {
+function createTimeSlicer(shouldCancel, waitForTurn, shouldPause) {
   let sliceStart = getNow();
   return async () => {
+    if (shouldPause?.()) {
+      await waitForTurn();
+      sliceStart = getNow();
+    }
     if (getNow() - sliceStart < SLICE_BUDGET_MS) return;
     await new Promise((resolve) => setTimeout(resolve, 0));
-    // Checked only when yielding, so a cancel costs nothing per pixel.
     if (shouldCancel?.()) {
       const error = new Error('Document analysis was cancelled.');
       error.paperAnalysisCancelled = true;
       throw error;
     }
+    if (shouldPause?.()) await waitForTurn();
     sliceStart = getNow();
   };
 }
@@ -70,6 +75,50 @@ export function yieldToUi() {
 // per image and reused by every Black & White and Invert render of it
 // (previews, switching between the two, and the full-size save).
 const paperAnalysisCache = getSharedPaperAnalysisCache();
+const paperAnalysisQueue = createPaperAnalysisQueue({
+  getCached: (key) => paperAnalysisCache.get(key),
+  waitForCapacity: () => paperAnalysisCache.whenWritable(),
+  prepare: async (photo, control) => {
+    await yieldToUi();
+    await control.checkpoint();
+    // Only this readback owns the GL context. Its textures and any normalized
+    // temporary file are released before the CPU estimator begins or pauses.
+    return renderWithGlSourceAsync({
+      uri: photo.uri, sourceWidth: photo.width, sourceHeight: photo.height,
+      priority: control.getPriority(), shouldCancel: control.shouldCancel,
+    }, (input, session) => {
+      if (control.shouldPause()) {
+        throw Object.assign(new Error('Document analysis is paused.'), { paperAnalysisPaused: true });
+      }
+      return readPaperAnalysisPixels(session, {
+        uri: input.uri, width: input.sourceWidth, height: input.sourceHeight,
+      });
+    });
+  },
+  analyse: ({ pixels, width, height }, control) => estimateBlackAndWhitePaperAsync(
+    pixels, width, height,
+    createTimeSlicer(control.shouldCancel, control.checkpoint, control.shouldPause)
+  ),
+  publish: (key, paper) => paperAnalysisCache.set(key, paper),
+});
+
+// Flags live in the caller's refs. Wake suspended work whenever they change;
+// there is no polling timer while a shutter, editor or background app pauses it.
+export function wakePaperAnalysis() {
+  paperAnalysisQueue.wake();
+}
+
+function getDocumentAnalysisAsync(options) {
+  const key = options.analysisKey ??
+    getPaperAnalysisKey(options.uri, options.sourceWidth, options.sourceHeight);
+  return paperAnalysisQueue.request(key, {
+    uri: options.uri, width: options.sourceWidth, height: options.sourceHeight,
+  }, {
+    priority: options.priority ?? 'high',
+    shouldCancel: options.shouldCancelAnalysis ?? options.shouldCancel,
+    shouldPause: options.shouldPauseAnalysis,
+  });
+}
 
 function getPaperAnalysisKey(uri, width, height) {
   return `${uri}|${width}x${height}`;
@@ -99,11 +148,11 @@ export function renderPerspectiveCropAsync(options) {
 }
 
 export function renderAdaptiveThresholdAsync(options) {
-  return renderWithGlSourceAsync(options, renderAdaptiveThresholdOnce);
+  return renderWithGlSourceAsync({ ...options, requiresPaperAnalysis: true }, renderAdaptiveThresholdOnce);
 }
 
 export function renderInvertAsync(options) {
-  return renderWithGlSourceAsync(options, renderInvertOnce);
+  return renderWithGlSourceAsync({ ...options, requiresPaperAnalysis: true }, renderInvertOnce);
 }
 
 export function renderMagicColorAsync(options) {
@@ -119,6 +168,14 @@ function throwIfRenderCancelled(shouldCancel) {
 
 async function renderWithGlSourceAsync(options, render) {
   throwIfRenderCancelled(options.shouldCancel);
+  const analysisKey = options.analysisKey ??
+    getPaperAnalysisKey(options.uri, options.sourceWidth, options.sourceHeight);
+  // Resolve shared CPU work before joining the GL render queue. A visible
+  // request joins/promotes the paper calculation already running for it.
+  const paperAnalysis = options.requiresPaperAnalysis
+    ? await getDocumentAnalysisAsync({ ...options, analysisKey }) : null;
+  if (paperAnalysis) options.onAnalysisReady?.();
+  throwIfRenderCancelled(options.shouldCancel);
   const limits = await getGlLimitsAsync();
   throwIfRenderCancelled(options.shouldCancel);
   // Source preparation uses the image manipulator, not GL, so it runs before
@@ -128,15 +185,14 @@ async function renderWithGlSourceAsync(options, render) {
     throwIfRenderCancelled(options.shouldCancel);
     // Normalization can create a new temporary URI on every render. Keep the
     // analysis tied to the source before that copy, so saves reuse previews.
-    const analysisKey = options.analysisKey ??
-      getPaperAnalysisKey(options.uri, options.sourceWidth, options.sourceHeight);
     const input = prepared ? {
       ...options,
       analysisKey,
+      paperAnalysis,
       uri: prepared.uri,
       sourceWidth: prepared.width,
       sourceHeight: prepared.height,
-    } : { ...options, analysisKey };
+    } : { ...options, analysisKey, paperAnalysis };
     return await runOnGlSession((session) => {
       // A queued warm-up may no longer be wanted when editing takes priority.
       // Check before decoding/uploading the original capture into a texture.
@@ -179,7 +235,7 @@ function pumpGlQueue() {
     } catch (error) {
       // Cancelled renders run their normal finally cleanup. Preserve the
       // context and compiled shaders; real failures still get a fresh context.
-      if (!error?.renderCancelled && !error?.paperAnalysisCancelled) invalidateGlSession();
+      if (!error?.renderCancelled && !error?.paperAnalysisCancelled && !error?.paperAnalysisPaused) invalidateGlSession();
       next.reject(error);
     } finally {
       glBusy = false;
@@ -545,9 +601,8 @@ async function renderAdaptiveThresholdOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
-  analysisKey,
+  paperAnalysis,
   shouldCancel,
-  shouldCancelAnalysis = shouldCancel,
 }, session) {
   if (!uri) {
     throw new Error('A source image is required for black-and-white enhancement.');
@@ -570,12 +625,9 @@ async function renderAdaptiveThresholdOnce({
 
   try {
     sourceTexture = createSourceTexture(gl, uri);
-    // Cached per source image: only the first Black & White or Invert render
-    // of a photo analyses it. Later renders (the other finish, a retry, the
-    // full-size save) go straight to the GPU pass below.
-    const paper = await ensurePaperAnalysis(session, {
-      uri, width, height, sourceTexture, analysisKey, shouldCancel: shouldCancelAnalysis,
-    });
+    // The shared paper map was resolved before entering the GPU queue.
+    const paper = paperAnalysis;
+    if (!paper) throw new Error('Document paper analysis is unavailable.');
     // A different finish may need the same analysis. Finish that shared work,
     // then skip this obsolete coloring pass before allocating its output.
     throwIfRenderCancelled(shouldCancel);
@@ -667,10 +719,9 @@ async function renderInvertOnce({
   corners,
   rotation = 0,
   maxOutputEdge,
-  analysisKey,
+  paperAnalysis,
   preview = false,
   shouldCancel,
-  shouldCancelAnalysis = shouldCancel,
 }, session) {
   if (!uri) {
     throw new Error('A source image is required for Invert enhancement.');
@@ -694,12 +745,9 @@ async function renderInvertOnce({
 
   try {
     sourceTexture = createSourceTexture(gl, uri);
-    // Cached per source image: only the first Black & White or Invert render
-    // of a photo analyses it. Later renders (the other finish, a retry, the
-    // full-size save) go straight to the GPU pass below.
-    const paper = await ensurePaperAnalysis(session, {
-      uri, width, height, sourceTexture, analysisKey, shouldCancel: shouldCancelAnalysis,
-    });
+    // The shared paper map was resolved before entering the GPU queue.
+    const paper = paperAnalysis;
+    if (!paper) throw new Error('Document paper analysis is unavailable.');
     // A different finish may need the same analysis. Finish that shared work,
     // then skip this obsolete coloring pass before allocating its output.
     throwIfRenderCancelled(shouldCancel);
@@ -796,11 +844,7 @@ async function renderInvertOnce({
  * estimate yields; a cancelled analysis throws an error flagged
  * `paperAnalysisCancelled` and caches nothing.
  */
-async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture = null, analysisKey, shouldCancel }) {
-  const key = analysisKey ?? getPaperAnalysisKey(uri, width, height);
-  const cached = await paperAnalysisCache.get(key);
-  if (cached) return cached;
-
+function readPaperAnalysisPixels(session, { uri, width, height }) {
   const { gl } = session;
   const analysisScale = Math.min(1, BLACK_AND_WHITE_ANALYSIS_EDGE / Math.max(width, height));
   const analysisWidth = Math.max(1, Math.round(width * analysisScale));
@@ -812,7 +856,7 @@ async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture 
   let positionBuffer;
 
   try {
-    const texture = sourceTexture ?? (ownTexture = createSourceTexture(gl, uri));
+    const texture = ownTexture = createSourceTexture(gl, uri);
     outputTexture = createOutputTexture(gl, analysisWidth, analysisHeight);
     framebuffer = createFramebuffer(gl, outputTexture);
     const analysisProgram = getCachedProgram(session, VERTEX_SHADER, BLACK_AND_WHITE_ANALYSIS_FRAGMENT_SHADER);
@@ -853,45 +897,24 @@ async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture 
     }
   }
 
-  // All GL objects are released; the rest is JavaScript, cut into slices.
-  const paper = await estimateBlackAndWhitePaperAsync(
-    analysisPixels, analysisWidth, analysisHeight, createTimeSlicer(shouldCancel)
-  );
-  await paperAnalysisCache.set(key, paper);
-  return paper;
+  return { pixels: analysisPixels, width: analysisWidth, height: analysisHeight };
 }
 
 /**
- * Prepares the page analysis for a capture ahead of time, at low priority, so
- * the first Black & White or Invert render of it needs only the GPU pass.
- * Resolves 'done', 'cancelled' (by `shouldCancel`, polled between slices of
- * work) or 'skipped' (a missing URI or source dimensions). Oversized and
- * non-file sources use the same safe normalization path as finish renders.
+ * Prepares the shared B&W/Invert paper map. Pausing preserves the estimator's
+ * workspace; only removal/replacement of a source or session teardown cancels it.
  */
-export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel } = {}) {
-  if (!photo?.uri || !(photo.width > 0 && photo.height > 0)) return 'skipped';
+export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel, shouldPause } = {}) {
+  if (!photo?.uri || !Number.isFinite(photo.width) || !Number.isFinite(photo.height) ||
+    photo.width <= 0 || photo.height <= 0) return 'skipped';
+  if (shouldCancel?.()) return 'cancelled';
   if (hasPaperAnalysis(photo)) return 'done';
-  if (shouldCancel?.()) return 'cancelled';
-  if (await paperAnalysisCache.get(getPaperAnalysisKey(photo.uri, photo.width, photo.height))) return 'done';
-
-  // Let capture feedback paint before decoding/uploading the source. The paper
-  // estimate itself keeps its existing short, cancellable JavaScript slices.
-  await yieldToUi();
-  if (shouldCancel?.()) return 'cancelled';
   try {
-    return await renderWithGlSourceAsync({
-      uri: photo.uri,
-      sourceWidth: photo.width,
-      sourceHeight: photo.height,
-      priority: 'low',
-      shouldCancel,
-    }, async (input, session) => {
-      await ensurePaperAnalysis(session, {
-        uri: input.uri, width: input.sourceWidth, height: input.sourceHeight,
-        analysisKey: input.analysisKey, shouldCancel,
-      });
-      return 'done';
+    await getDocumentAnalysisAsync({
+      uri: photo.uri, sourceWidth: photo.width, sourceHeight: photo.height,
+      priority: 'low', shouldCancelAnalysis: shouldCancel, shouldPauseAnalysis: shouldPause,
     });
+    return 'done';
   } catch (error) {
     if (error?.paperAnalysisCancelled || error?.renderCancelled) return 'cancelled';
     throw error;

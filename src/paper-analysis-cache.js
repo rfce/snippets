@@ -70,7 +70,7 @@ function decodePaper(key, bytes) {
  * is a miss, never the analysis of a different page.
  */
 export function createPaperAnalysisCache({
-  storage = null, memoryLimit = 64, diskLimit = 256 * 1024 * 1024,
+  storage = null, memoryLimit = 64, diskLimit = 256 * 1024 * 1024, maxPendingWrites = 4,
   maxAge = 3 * 24 * 60 * 60 * 1000, now = Date.now,
   schedule = setTimeout, unschedule = clearTimeout,
 } = {}) {
@@ -78,6 +78,8 @@ export function createPaperAnalysisCache({
   const reads = new Map();
   const writes = new Map();
   const index = new Map();
+  const capacityWaiters = new Set();
+  const writeLimit = Math.max(1, maxPendingWrites);
   let loaded = null;
   let mutations = Promise.resolve();
   let timer = null;
@@ -85,6 +87,15 @@ export function createPaperAnalysisCache({
   let scanOrphans = true;
   let revision = 0;
 
+  const whenWritable = async () => {
+    while (writes.size >= writeLimit) {
+      await new Promise((resolve) => capacityWaiters.add(resolve));
+    }
+  };
+  const notifyCapacity = () => {
+    for (const resolve of capacityWaiters) resolve();
+    capacityWaiters.clear();
+  };
   const mutate = (task) => {
     const job = mutations.then(task);
     mutations = job.catch(() => {});
@@ -136,6 +147,7 @@ export function createPaperAnalysisCache({
     if (timer !== null) { unschedule(timer); timer = null; }
     if (flushing) return flushing;
     const job = (async () => {
+      await Promise.allSettled([...writes.values()]);
       if (!await load()) return;
       if (scanOrphans && storage.list) {
         scanOrphans = false;
@@ -199,9 +211,16 @@ export function createPaperAnalysisCache({
       return job;
     },
     async set(key, paper) {
+      // Publish before any persistence. The analysis producer observes capacity
+      // before starting another workspace, so disk backlog stays bounded.
       remember(key, paper);
       if (!storage) return paper;
+      await whenWritable();
+      const previous = writes.get(key);
       const job = (async () => {
+        // Let the map reach its waiting preview before encoding or disk I/O.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (previous) await previous;
         if (!await load()) return;
         const bytes = encodePaper(key, paper);
         if (bytes.length > diskLimit) return;
@@ -209,12 +228,15 @@ export function createPaperAnalysisCache({
           await storage.write(entryName(key), bytes);
           touch(entryName(key), bytes.length);
         });
-      })().catch(() => {});
+      })().catch(() => {}).finally(() => {
+        if (writes.get(key) === job) writes.delete(key);
+        notifyCapacity();
+      });
       writes.set(key, job);
-      await job;
-      if (writes.get(key) === job) writes.delete(key);
+      // Persistence is owned by the cache; the visible GPU pass can start now.
       return paper;
     },
+    whenWritable,
     flush,
   };
 }

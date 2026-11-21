@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   createFinishedPhoto,
@@ -18,6 +18,7 @@ import {
   cleanupProcessedImagesAsync,
   hasPaperAnalysis,
   prefetchDocumentAnalysisAsync,
+  wakePaperAnalysis,
 } from '@/perspective-crop';
 
 // What the worker should process next, if anything. `paused` only holds back
@@ -54,50 +55,31 @@ function getWorkTarget(input) {
   };
 }
 
-// Idle analysis uses a small window: current/next in Review, latest captures
-// in the camera. The chosen finish still processes the entire batch.
-function getAnalysisTarget(input, skipped) {
+// Completion belongs to the batch session, independently of the bounded RAM
+// cache. Walking every pending capture therefore terminates even after eviction.
+function getAnalysisTarget(input, skipped, completed) {
   if (input.analysisPaused ?? input.paused) return null;
-  const candidates = input.active ? input.photos : input.speculativePhotos;
-  // During a capture flight, prepare the new shot first. Reversing this small
-  // copy never changes capture order or the order used for saving.
-  const photos = input.active ? getIdleBatchPhotos(candidates, input.priorityIndex)
-    : (candidates ?? []).slice(-2).reverse();
   return pickNextAnalysisJob({
-    photos,
-    priorityIndex: 0,
-    hasAnalysis: hasPaperAnalysis,
+    photos: input.active ? input.photos : input.speculativePhotos,
+    // Review reopens at this index (zero for a new batch). Prepare that page
+    // first, then walk capture order; a new shutter never restarts the old page.
+    priorityIndex: input.priorityIndex,
     skipped,
+    hasAnalysis: (source) => {
+      const key = getPhotoAnalysisKey(source);
+      if (completed.has(key)) return true;
+      if (!hasPaperAnalysis(source)) return false;
+      completed.add(key);
+      return true;
+    },
   });
 }
 
 /**
- * Owns batch finish results for the whole batch session, not just one visit to
- * Review. Results are preview-size and for display only: saving renders each
- * image again at full size from its original capture. Results are cached per photo, so returning to the camera to add a
- * page and coming back reprocesses only the new page. Processing runs one
- * image at a time, starting with `priorityIndex`, and publishes each result
- * as soon as it is ready.
- *
- * Every processed file stays owned here until `prune`, `reset`, or unmount,
- * and is deleted only after `getPendingJobs()` (for example an active save)
- * has settled.
- *
- * Speculation: when nothing on screen needs processing, the worker prepares
- * `speculativeMode` (the finish most likely to be chosen) for
- * `speculativePhotos` at low priority, for example between shots while
- * capturing a batch. The results share the cache, so choosing that finish
- * in Review is instant. `paused` stops new speculative work (an image
- * already in progress is cancelled when possible) so captures and edits do
- * not compete with it. Only two nearby images are warmed; the selected finish
- * still processes the full stack, one image at a time.
- *
- * With nothing left to render, idle time prepares nearby photos' page
- * analysis (the slow, JavaScript part of Black & White and Invert), so the
- * first tap on either starts straight on the GPU. That work is sliced into
- * short steps. It can run during the capture flight, but stops for the next
- * shutter, Edit image, or a backgrounded app. A chosen finish for the same
- * source can reuse the analysis already running.
+ * Owns per-photo preview results for a batch session. Selected finishes render
+ * first. During camera idle time, one resumable worker prepares all paper maps
+ * before warming the remembered finish. Pending entries are source metadata;
+ * at most one active and one suspended CPU workspace exist in the native queue.
  */
 export function useBatchFinishes({
   photos, mode, invertSettings, priorityIndex = 0, active, getPendingJobs, onError,
@@ -112,6 +94,10 @@ export function useBatchFinishes({
   const alertedRenderKeysRef = useRef(new Set());
   // Photos whose analysis cannot be prepared ahead of time (or failed to).
   const analysisSkippedRef = useRef(new Set());
+  const analysisCompletedRef = useRef(new Set());
+  const analysisRunningRef = useRef(null);
+  const runRef = useRef(() => {});
+  const runAnalysisRef = useRef(() => {});
   const runningRef = useRef(null);
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
@@ -121,10 +107,14 @@ export function useBatchFinishes({
   // any accompanying mode change has reached inputsRef.
   const [retryToken, setRetryToken] = useState(0);
 
+  const analysisPhotos = photos ?? speculativePhotos;
+  const analysisKeys = useMemo(() => new Set((analysisPhotos ?? []).map((photo) =>
+    getPhotoAnalysisKey(photo.sourcePhoto ?? photo)
+  )), [analysisPhotos]);
   const inputsRef = useRef(null);
   inputsRef.current = {
     photos, mode, invertSettings, renderKey, priorityIndex, active,
-    speculativePhotos, speculativeMode, speculativeInvertSettings, paused, analysisPaused,
+    speculativePhotos, speculativeMode, speculativeInvertSettings, paused, analysisPaused, analysisKeys,
   };
   const getPendingJobsRef = useRef(getPendingJobs);
   getPendingJobsRef.current = getPendingJobs;
@@ -137,7 +127,7 @@ export function useBatchFinishes({
 
   const releaseFiles = useCallback((files) => {
     if (!files.length) return;
-    const pending = [...(getPendingJobsRef.current?.() ?? []), runningRef.current];
+    const pending = [...(getPendingJobsRef.current?.() ?? []), runningRef.current, analysisRunningRef.current];
     void releaseTemporaryImagesAsync(files, pending, cleanupProcessedImagesAsync);
   }, []);
 
@@ -145,28 +135,23 @@ export function useBatchFinishes({
     (key, job) => failuresRef.current.has(key) || isBatchPreviewReady(cacheRef.current.get(key), job), []
   );
 
-  // A finish the person chose that still has images to process. Anything
-  // else (speculation, analysis) yields to it immediately.
-  const getUrgentWork = useCallback(() => {
-    const target = getWorkTarget(inputsRef.current);
-    if (!target || target.speculative) return null;
-    const next = pickNextFinishJob({ ...target, isSettled });
-    if (!next) return null;
-    const source = next.photo.sourcePhoto ?? next.photo;
-    return {
-      ...next,
-      analysisKey: target.mode === 'blackAndWhite' || target.mode === 'invert'
-        ? getPhotoAnalysisKey(source) : null,
-    };
-  }, [isSettled]);
-
-  const hasPendingWork = useCallback(() => {
+  const pickAnalysis = useCallback(() => {
     const input = inputsRef.current;
     const target = getWorkTarget(input);
-    return Boolean(
-      (target && pickNextFinishJob({ ...target, isSettled })) ||
-      getAnalysisTarget(input, analysisSkippedRef.current)
-    );
+    // The chosen finish already prepares its own paper maps. Keep idle work
+    // behind visible renders, including Magic Color, until those settle.
+    if (target && !target.speculative && pickNextFinishJob({ ...target, isSettled })) return null;
+    return getAnalysisTarget(input, analysisSkippedRef.current, analysisCompletedRef.current);
+  }, [isSettled]);
+
+  const pickRender = useCallback(() => {
+    const input = inputsRef.current;
+    const target = getWorkTarget(input);
+    if (!target) return null;
+    if (target.speculative && (analysisRunningRef.current ||
+      getAnalysisTarget(input, analysisSkippedRef.current, analysisCompletedRef.current))) return null;
+    const next = pickNextFinishJob({ ...target, isSettled });
+    return next ? { target, next } : null;
   }, [isSettled]);
 
   const run = useCallback(() => {
@@ -178,36 +163,9 @@ export function useBatchFinishes({
       while (isCurrentGeneration()) {
         // Re-read inputs for every image, so a swipe re-prioritizes the queue
         // and a new finish applies after at most one in-flight image.
-        const target = getWorkTarget(inputsRef.current);
-        const next = target ? pickNextFinishJob({ ...target, isSettled }) : null;
-
-        if (!next) {
-          // Nothing to render: prepare the next photo's page analysis.
-          const analysis = getAnalysisTarget(inputsRef.current, analysisSkippedRef.current);
-          if (!analysis) break;
-          try {
-            const outcome = await prefetchDocumentAnalysisAsync(analysis.source, {
-              shouldCancel: () => {
-                if (!isCurrentGeneration()) return true;
-                const urgent = getUrgentWork();
-                // Choosing a finish for this source promotes the work already
-                // running instead of discarding its partial analysis.
-                if (urgent) return urgent.analysisKey !== analysis.key;
-                if (inputsRef.current.analysisPaused ?? inputsRef.current.paused) return true;
-                // A newer shot can arrive while this task waits for the GPU.
-                // Re-prioritize before allocating textures or doing more CPU work.
-                return getAnalysisTarget(inputsRef.current, analysisSkippedRef.current)?.key !== analysis.key;
-              },
-            });
-            if (!isCurrentGeneration()) break;
-            if (outcome === 'skipped') analysisSkippedRef.current.add(analysis.key);
-          } catch (error) {
-            if (!isCurrentGeneration()) break;
-            // A failure here only means the first render does the analysis.
-            analysisSkippedRef.current.add(analysis.key);
-          }
-          continue;
-        }
+        const work = pickRender();
+        if (!work) break;
+        const { target, next } = work;
 
         const shouldCancel = () => {
           if (!isCurrentGeneration()) return true;
@@ -219,12 +177,9 @@ export function useBatchFinishes({
         };
         const source = next.photo.sourcePhoto ?? next.photo;
         const sourceAnalysisKey = getPhotoAnalysisKey(source);
-        const shouldCancelAnalysis = () => {
-          if (!isCurrentGeneration()) return true;
-          if (!shouldCancel()) return false;
-          const urgent = getUrgentWork();
-          return urgent?.analysisKey !== sourceAnalysisKey;
-        };
+        const shouldCancelAnalysis = () => !isCurrentGeneration() ||
+          !inputsRef.current.analysisKeys.has(sourceAnalysisKey);
+        const shouldPauseAnalysis = () => Boolean(inputsRef.current.analysisPaused ?? inputsRef.current.paused);
         const previewMaxEdge = getBatchPreviewEdge(next);
         setActiveKey(next.key);
         try {
@@ -240,6 +195,10 @@ export function useBatchFinishes({
             previewMaxEdge,
             shouldCancel,
             shouldCancelAnalysis,
+            shouldPauseAnalysis,
+            onAnalysisReady: () => {
+              if (!shouldCancelAnalysis()) analysisCompletedRef.current.add(sourceAnalysisKey);
+            },
           });
           if (shouldCancel()) {
             await cleanupProcessedImagesAsync([rendered]);
@@ -268,17 +227,62 @@ export function useBatchFinishes({
     })().finally(() => {
       if (runningRef.current === job) runningRef.current = null;
       if (mountedRef.current) setActiveKey(null);
-      // Inputs can change between the last check and this cleanup.
-      if (isCurrentGeneration() && hasPendingWork()) run();
+      // A previous generation can finish after a new batch has arrived. Use
+      // the latest callbacks so that cancellation never strands its new work.
+      if (mountedRef.current) {
+        if (pickRender()) runRef.current();
+        if (pickAnalysis()) runAnalysisRef.current();
+      }
     });
     runningRef.current = job;
-  }, [hasPendingWork, getUrgentWork, isSettled, publish]);
+  }, [pickAnalysis, pickRender, publish]);
+  runRef.current = run;
+
+  const runAnalysis = useCallback(() => {
+    if (analysisRunningRef.current || !mountedRef.current) return;
+    const generation = generationRef.current;
+    const isCurrentGeneration = () => mountedRef.current && generationRef.current === generation;
+    const job = (async () => {
+      while (isCurrentGeneration()) {
+        const analysis = pickAnalysis();
+        if (!analysis) break;
+        const shouldCancel = () => !isCurrentGeneration() ||
+          !inputsRef.current.analysisKeys.has(analysis.key);
+        try {
+          const outcome = await prefetchDocumentAnalysisAsync(analysis.source, {
+            shouldCancel,
+            shouldPause: () => Boolean(inputsRef.current.analysisPaused ?? inputsRef.current.paused),
+          });
+          if (!isCurrentGeneration()) break;
+          if (outcome === 'done' && !shouldCancel()) analysisCompletedRef.current.add(analysis.key);
+          if (outcome === 'skipped') analysisSkippedRef.current.add(analysis.key);
+        } catch (error) {
+          if (!isCurrentGeneration()) break;
+          // A later explicit finish can retry; idle failures must not loop.
+          analysisSkippedRef.current.add(analysis.key);
+        }
+      }
+    })().finally(() => {
+      if (analysisRunningRef.current === job) analysisRunningRef.current = null;
+      if (mountedRef.current) {
+        if (pickRender()) runRef.current();
+        if (pickAnalysis()) runAnalysisRef.current();
+      }
+    });
+    analysisRunningRef.current = job;
+  }, [pickAnalysis, pickRender]);
+  runAnalysisRef.current = runAnalysis;
 
   const speculativeRenderKey = speculativeMode
     ? getFinishRenderKey(speculativeMode, speculativeInvertSettings) : null;
   useEffect(() => {
+    for (const set of [analysisCompletedRef.current, analysisSkippedRef.current]) {
+      for (const key of set) if (!analysisKeys.has(key)) set.delete(key);
+    }
+    wakePaperAnalysis();
     run();
-  }, [active, mode, renderKey, photos, priorityIndex, retryToken, run,
+    runAnalysis();
+  }, [active, mode, renderKey, photos, priorityIndex, retryToken, run, runAnalysis, analysisKeys,
     speculativePhotos, speculativeRenderKey, paused, analysisPaused]);
 
   useEffect(() => {
@@ -286,6 +290,7 @@ export function useBatchFinishes({
     return () => {
       mountedRef.current = false;
       generationRef.current += 1;
+      wakePaperAnalysis();
       const files = [...cacheRef.current.values(), ...supersededFilesRef.current.values()];
       cacheRef.current.clear();
       supersededFilesRef.current.clear();
@@ -308,12 +313,14 @@ export function useBatchFinishes({
   /** Ends the batch session: cancels queued work and releases every result. */
   const reset = useCallback(() => {
     generationRef.current += 1;
+    wakePaperAnalysis();
     const files = [...cacheRef.current.values(), ...supersededFilesRef.current.values()];
     cacheRef.current.clear();
     supersededFilesRef.current.clear();
     failuresRef.current.clear();
     alertedRenderKeysRef.current.clear();
     analysisSkippedRef.current.clear();
+    analysisCompletedRef.current.clear();
     releaseFiles(files);
     publish();
   }, [publish, releaseFiles]);
@@ -332,7 +339,9 @@ export function useBatchFinishes({
   }, []);
 
   /** Resolves when no image is being processed; used before deleting sources. */
-  const whenIdle = useCallback(() => runningRef.current ?? Promise.resolve(), []);
+  const whenIdle = useCallback(() => Promise.allSettled(
+    [runningRef.current, analysisRunningRef.current].filter(Boolean)
+  ), []);
 
   const summary = summarizeFinishes({
     photos, mode, renderKey, cache: cacheRef.current, failures: failuresRef.current, activeKey,

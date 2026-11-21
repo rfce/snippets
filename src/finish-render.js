@@ -46,7 +46,7 @@ export function getGeometryEdits(edits) {
  * nothing needs rendering (Original with no edits).
  */
 export async function renderFinishAsync({
-  source, previewSource = null, edits, mode = 'original', invertSettings, size = 'full', priority, shouldCancel, shouldCancelAnalysis, previewMaxEdge = PREVIEW_OUTPUT_EDGE,
+  source, previewSource = null, edits, mode = 'original', invertSettings, size = 'full', priority, shouldCancel, shouldCancelAnalysis, shouldPauseAnalysis, onAnalysisReady, previewMaxEdge = PREVIEW_OUTPUT_EDGE,
 }) {
   if (!source?.uri) throw new Error('A captured image is required to render a finish.');
   if (!isKnownFinish(mode)) throw new Error(`Unknown finish: ${mode}`);
@@ -76,6 +76,8 @@ export async function renderFinishAsync({
     priority: renderPriority,
     shouldCancel,
     shouldCancelAnalysis,
+    shouldPauseAnalysis,
+    onAnalysisReady,
   };
 
   const rendered = mode === 'original' ? await renderPerspectiveCropAsync(options)
