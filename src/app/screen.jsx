@@ -270,13 +270,18 @@ function CameraScreen() {
       subscription.remove();
     };
   }, []);
+  const [capturedPhoto, setCapturedPhoto] = useState(null);
+  const [savedPhoto, setSavedPhoto] = useState(null);
+  const [isImporting, setIsImporting] = useState(false);
   const speculativePhotos = useMemo(() => batchPhotos.map((photo) =>
     batchRenderedPhotos[getBatchPhotoId(photo)] ?? { ...photo, sourcePhoto: photo }
   ), [batchPhotos, batchRenderedPhotos]);
-  // Never compete with anything the person is watching: a capture, its
-  // flight animation, Edit image, the single flow, or a backgrounded app.
-  const speculationBlocked = !appActive || isCapturing || batchCaptureFlights.length > 0 ||
-    Boolean(batchEditorPhotos) || isApplyingBatchEdit || (!batchReviewPhotos && captureMode !== 'batch');
+  // Shared Black & White/Invert analysis can use the native capture flight.
+  // Keep full finish renders behind the animation and their quiet period.
+  const analysisBlocked = !appActive || !isFocused || isCapturing ||
+    Boolean(batchEditorPhotos) || isApplyingBatchEdit || Boolean(capturedPhoto) ||
+    Boolean(savedPhoto) || isImporting || (!batchReviewPhotos && captureMode !== 'batch');
+  const speculationBlocked = analysisBlocked || batchCaptureFlights.length > 0;
   const [speculationIdle, setSpeculationIdle] = useState(false);
   useEffect(() => {
     if (speculationBlocked) {
@@ -297,7 +302,8 @@ function CameraScreen() {
     speculativePhotos: batchReviewPhotos ?? speculativePhotos,
     speculativeMode: rememberedFinish?.mode ?? null,
     speculativeInvertSettings: rememberedFinish?.invertSettings,
-    paused: speculationBlocked || !speculationIdle || !isFocused,
+    paused: speculationBlocked || !speculationIdle,
+    analysisPaused: analysisBlocked,
     getPendingJobs: () => [batchSavePromiseRef.current],
     onError: (mode, error) => {
       const label = PREVIEW_FILTER_OPTIONS.find((option) => option.value === mode)?.label ?? 'Image enhancement';
@@ -306,8 +312,6 @@ function CameraScreen() {
   });
   const { prune: pruneBatchFinishes, reset: resetBatchFinishes, whenIdle: whenBatchFinishesIdle } = batchFinishes;
   const [flashMode, setFlashMode] = useState('off');
-  const [capturedPhoto, setCapturedPhoto] = useState(null);
-  const [savedPhoto, setSavedPhoto] = useState(null);
   const [savedImageMode, setSavedImageMode] = useState('original');
   // Measured image area of Preview; the rounded card is fitted inside it.
   const [previewFrame, setPreviewFrame] = useState({ width: 0, height: 0 });
@@ -322,7 +326,6 @@ function CameraScreen() {
   const reviewEditsRef = useRef(null);
   const [cameraError, setCameraError] = useState(null);
   const [diagnosticError, setDiagnosticError] = useState(null);
-  const [isImporting, setIsImporting] = useState(false);
   const [galleryAssets, setGalleryAssets] = useState([]);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [recentGalleryImage, setRecentGalleryImage] = useState(null);

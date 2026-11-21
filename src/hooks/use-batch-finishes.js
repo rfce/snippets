@@ -21,7 +21,8 @@ import {
 } from '@/perspective-crop';
 
 // What the worker should process next, if anything. `paused` only holds back
-// speculation; the finish on screen in Review is always processed.
+// speculation; analysis has its own pause flag so it can run during the flight.
+// The finish on screen in Review is always processed.
 function getWorkTarget(input) {
   if (input.active && input.mode !== 'original' && isKnownFinish(input.mode)) {
     return {
@@ -56,12 +57,12 @@ function getWorkTarget(input) {
 // Idle analysis uses a small window: current/next in Review, latest captures
 // in the camera. The chosen finish still processes the entire batch.
 function getAnalysisTarget(input, skipped) {
-  if (input.paused) return null;
+  if (input.analysisPaused ?? input.paused) return null;
   const candidates = input.active ? input.photos : input.speculativePhotos;
-  const photos = getIdleBatchPhotos(
-    candidates,
-    input.active ? input.priorityIndex : Math.max(0, (candidates?.length ?? 0) - 2)
-  );
+  // During a capture flight, prepare the new shot first. Reversing this small
+  // copy never changes capture order or the order used for saving.
+  const photos = input.active ? getIdleBatchPhotos(candidates, input.priorityIndex)
+    : (candidates ?? []).slice(-2).reverse();
   return pickNextAnalysisJob({
     photos,
     priorityIndex: 0,
@@ -94,12 +95,14 @@ function getAnalysisTarget(input, skipped) {
  * With nothing left to render, idle time prepares nearby photos' page
  * analysis (the slow, JavaScript part of Black & White and Invert), so the
  * first tap on either starts straight on the GPU. That work is sliced into
- * short steps and is cancelled the moment a finish is chosen, a shot is
- * taken, or the app leaves the foreground.
+ * short steps. It can run during the capture flight, but stops for the next
+ * shutter, Edit image, or a backgrounded app. A chosen finish for the same
+ * source can reuse the analysis already running.
  */
 export function useBatchFinishes({
   photos, mode, invertSettings, priorityIndex = 0, active, getPendingJobs, onError,
   speculativePhotos = null, speculativeMode = null, speculativeInvertSettings, paused = false,
+  analysisPaused = paused,
 }) {
   const renderKey = getFinishRenderKey(mode, invertSettings);
   const cacheRef = useRef(new Map());
@@ -121,7 +124,7 @@ export function useBatchFinishes({
   const inputsRef = useRef(null);
   inputsRef.current = {
     photos, mode, invertSettings, renderKey, priorityIndex, active,
-    speculativePhotos, speculativeMode, speculativeInvertSettings, paused,
+    speculativePhotos, speculativeMode, speculativeInvertSettings, paused, analysisPaused,
   };
   const getPendingJobsRef = useRef(getPendingJobs);
   getPendingJobsRef.current = getPendingJobs;
@@ -189,7 +192,11 @@ export function useBatchFinishes({
                 const urgent = getUrgentWork();
                 // Choosing a finish for this source promotes the work already
                 // running instead of discarding its partial analysis.
-                return urgent ? urgent.analysisKey !== analysis.key : inputsRef.current.paused;
+                if (urgent) return urgent.analysisKey !== analysis.key;
+                if (inputsRef.current.analysisPaused ?? inputsRef.current.paused) return true;
+                // A newer shot can arrive while this task waits for the GPU.
+                // Re-prioritize before allocating textures or doing more CPU work.
+                return getAnalysisTarget(inputsRef.current, analysisSkippedRef.current)?.key !== analysis.key;
               },
             });
             if (!isCurrentGeneration()) break;
@@ -272,7 +279,7 @@ export function useBatchFinishes({
   useEffect(() => {
     run();
   }, [active, mode, renderKey, photos, priorityIndex, retryToken, run,
-    speculativePhotos, speculativeRenderKey, paused]);
+    speculativePhotos, speculativeRenderKey, paused, analysisPaused]);
 
   useEffect(() => {
     mountedRef.current = true;

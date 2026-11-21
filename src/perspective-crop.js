@@ -865,33 +865,37 @@ async function ensurePaperAnalysis(session, { uri, width, height, sourceTexture 
  * Prepares the page analysis for a capture ahead of time, at low priority, so
  * the first Black & White or Invert render of it needs only the GPU pass.
  * Resolves 'done', 'cancelled' (by `shouldCancel`, polled between slices of
- * work) or 'skipped' (a source the renderers would copy first, which would
- * not share this cache entry).
+ * work) or 'skipped' (a missing URI or source dimensions). Oversized and
+ * non-file sources use the same safe normalization path as finish renders.
  */
 export async function prefetchDocumentAnalysisAsync(photo, { shouldCancel } = {}) {
   if (!photo?.uri || !(photo.width > 0 && photo.height > 0)) return 'skipped';
   if (hasPaperAnalysis(photo)) return 'done';
   if (shouldCancel?.()) return 'cancelled';
   if (await paperAnalysisCache.get(getPaperAnalysisKey(photo.uri, photo.width, photo.height))) return 'done';
-  const limits = await getGlLimitsAsync();
-  if (!isLocalFileUri(photo.uri) || Math.max(photo.width, photo.height) > limits.maxTextureEdge) {
-    return 'skipped';
-  }
-  return runOnGlSession(async (session) => {
-    // The task may have waited behind other renders; do nothing if the photo
-    // is no longer wanted by the time its turn comes.
-    if (shouldCancel?.()) return 'cancelled';
-    try {
+
+  // Let capture feedback paint before decoding/uploading the source. The paper
+  // estimate itself keeps its existing short, cancellable JavaScript slices.
+  await yieldToUi();
+  if (shouldCancel?.()) return 'cancelled';
+  try {
+    return await renderWithGlSourceAsync({
+      uri: photo.uri,
+      sourceWidth: photo.width,
+      sourceHeight: photo.height,
+      priority: 'low',
+      shouldCancel,
+    }, async (input, session) => {
       await ensurePaperAnalysis(session, {
-        uri: photo.uri, width: photo.width, height: photo.height, shouldCancel,
+        uri: input.uri, width: input.sourceWidth, height: input.sourceHeight,
+        analysisKey: input.analysisKey, shouldCancel,
       });
       return 'done';
-    } catch (error) {
-      // Resolved, not thrown: a failed task makes the shared GL context start over.
-      if (error?.paperAnalysisCancelled) return 'cancelled';
-      throw error;
-    }
-  }, 'low');
+    });
+  } catch (error) {
+    if (error?.paperAnalysisCancelled || error?.renderCancelled) return 'cancelled';
+    throw error;
+  }
 }
 
 async function renderMagicColorOnce({
