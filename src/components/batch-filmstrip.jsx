@@ -43,8 +43,11 @@ export function BatchFilmstrip({
       animated,
     });
   }, [activeIndex, photos.length, size]);
-  // Follow selection and real viewport changes. Content-size notifications
-  // also fire during virtualized scrolling and must not recenter the strip.
+  // Mount from zero, then reveal the selection using the measured viewport.
+  // A nonzero initialScrollIndex can leave a short, non-scrollable stack with
+  // only its selected tail mounted while it waits for a native scroll event.
+  // Content-size notifications also fire during virtualized scrolling and
+  // must not recenter the strip.
   useEffect(() => { revealSelected(true); }, [revealSelected]);
   return (
     <View style={[styles.container, style]}>
@@ -63,7 +66,6 @@ export function BatchFilmstrip({
           viewportWidthRef.current = layout.width;
           revealSelected();
         }}
-        initialScrollIndex={photos.length ? activeIndex : undefined}
         initialNumToRender={Math.max(1, Math.min(photos.length, 6))}
         maxToRenderPerBatch={4}
         windowSize={3}
